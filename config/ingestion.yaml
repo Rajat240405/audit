@@ -1,0 +1,90 @@
+# Parliamentary RAG - Data Ingestion Configuration
+# ================================================
+
+scraper:
+  # Base URL for Lok Sabha questions and answers
+  base_url: "https://sansad.in/ls/questions/questions-and-answers"
+
+  # Request settings
+  request_timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 5
+  rate_limit_seconds_between_requests: 2.0
+
+  # Pagination
+  max_pages: 350  # ~3500 Q&A pairs at ~10 per page
+  questions_per_page: 10
+
+  # Strategy selection
+  strategy: "auto"  # "playwright", "httpx", "mock", "local"
+
+  # User agent
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+  # Timeout settings
+  playwright_navigation_timeout_ms: 30000
+
+validation:
+  required_fields:
+    - question_text
+    - answer_text
+  min_question_length: 10
+  min_answer_length: 10
+  deduplicate_by: "question_text"
+
+enrichment:
+  # Extract ministry names using regex patterns
+  extract_ministry: true
+  extract_date: true
+  extract_question_number: true
+
+  # Known ministry patterns for validation
+  known_ministries:
+    - "Finance"
+    - "Health and Family Welfare"
+    - "Education"
+    - "Home Affairs"
+    - "External Affairs"
+    - "Defence"
+    - "Agriculture"
+    - "Railways"
+    - "Road Transport and Highways"
+    - "Power"
+    - "Pulmonary"
+    - "Drinking Water and Sanitation"
+    - "Housing and Urban Affairs"
+    - "Labour and Employment"
+    - "Women and Child Development"
+    - "Environment, Forest and Climate Change"
+    - "Textiles"
+    - "Commerce and Industry"
+    - "Petroleum and Natural Gas"
+    - "Tourism"
+    - "Culture"
+    - "Information and Broadcasting"
+
+output:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  enriched_dir: "data/enriched"
+  filename_format: "qanda_{timestamp}.jsonl"
+
+mock:
+  # Number of mock records to generate if scraping fails
+  target_count: 3500
+
+  # Mix of realistic ministry distributions
+  ministry_distribution:
+    Finance: 0.15
+    Health_and_Family_Welfare: 0.12
+    Education: 0.10
+    Home_Affairs: 0.08
+    External_Affairs: 0.07
+    Defence: 0.06
+    Railways: 0.06
+    Agriculture: 0.05
+    Road_Transport_and_Highways: 0.05
+    Power: 0.04
+    Drinking_Water_and_Sanitation: 0.03
+    Environment_Forest_and_Climate_Change: 0.03
+    Others: 0.16
