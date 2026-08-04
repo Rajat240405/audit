@@ -13,532 +13,1159 @@ USER PROMPT:
 Below is the most relevant parliamentary Question & Answer context retrieved for your question.
 
 ======================================================================
-RETRIEVED CONTEXT (5 records):
+RETRIEVED CONTEXT (4 records):
 ======================================================================
 
-[Source 1] (ID: 18-6-1392)
-Ministry: COMMERCE AND INDUSTRY
-Subject: Industrial Parks
+[Source 1] (ID: 18-6-1909)
+Ministry: MICRO, SMALL AND MEDIUM ENTERPRISES
+Subject: Strengthening of Credit and Capital Availability for MSMEs
 
-QUESTION: GOVERNMENT OF INDIA 
-MINISTRY OF COMMERCE & INDUSTRY 
-DEPARTMENT FOR PROMOTION OF INDUSTRY AND INTERNAL TRADE 
+QUESTION: QUESTION: GOVERNMENT
  
-LOK SABHA 
+OF
  
-UNSTARRED QUESTION NO. 1392. 
-TO BE ANSWERED ON TUESDAY, THE 09TH DECEMBER, 2025. 
+INDIA
  
-INDUSTRIAL PARKS 
+MINISTRY
  
-1392.  SHRI PUTTA MAHESH KUMAR: 
-SHRI PRABHAKAR REDDY VEMIREDDY: 
+OF
  
-Will the Minister of COMMERCE AND INDUSTRY be pleased to state: 
-वाणिज्य  एवं उद्योग मंत्री 
-(a)  the details and total number of Industrial Parks proposed, under construction 
-and presently functional in the country, State-wise, especially in Andhra 
-Pradesh; 
+MICRO
+, SMALL
  
-(b)  the details regarding the total volume and value of products manufactured at 
-Industrial Parks in the country during the last five years, State -wise especially 
-in Andhra Pradesh; 
+AND
  
-(c)  whether the Government has designated any industrial parks for the  
-production/manufacture of specific products, if so, the details thereof, State -
-wise especially in Andhra Pradesh; and 
+MEDIUM
  
-(d)  whether the Government has any plans on increasing the number of industr ial 
-parks in the country, if so, the details of the potential locations being considered, 
-State-wise especially in Andhra Pradesh?
-ANSWER: ANSWER 
- 
-वाणिज्य  एवं उद्योग मंत्रालय में राज्य मंत्री (श्री णिणिन प्रसाद)   
-THE MINISTER OF STATE IN THE MINISTRY OF COMMERCE & INDUSTRY 
-(SHRI JITIN PRASADA) 
- 
-(a) to (d): Industries is a state subject. Government of India, through Department for 
-Promotion of Industry and Internal Trade (DPIIT) and other Central 
-Ministries/Departments provides an enabling ecosystem for overall industrial 
-development in the country through appropriate policy interventions. 
-DPIIT has built a centralized system for capturing information regarding 
-industrial parks through the India Industrial Land Bank portal wherein details 
-are updated by concerned States at regular intervals. The state -wise and 
-sector-wise details of Industrial Parks is available on the portal and can be 
-accessed at https://indiaindustriallandbank.gov.in/exploreParkReport. 
-The state wise details of industrial parks across the country and sector wise 
-details of industrial parks in Andhra Pradesh are enclosed at Annexure -I and 
-Annexure-II respect ively. Various ministries have reported funding 
-establishment of sector specific parks across the country including in Andhra 
-Pradesh. The list of these parks is enclosed at Annexure-III. 
-****** 
+ENTERPRISES
  
  
- 
- ANNEXURE-I 
- 
-ANNEXURE REFERRED TO IN REPLY TO PARTS (a ) to (d) OF THE LOK SABHA  
-UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
- 
-The state wise details of number of Industrial Parks across the country:  
- 
-S. 
-No. Name of state  Number of parks 
-1 ANDAMAN & NICOBAR 6 
-2 ANDHRA PRADESH 638 
-3 ARUNACHAL PRADESH 18 
-4 ASSAM 58 
-5 BIHAR 82 
-6 CHANDIGARH 7 
-7 CHHATTISGARH 114 
-8 DADRA & NAGAR HAVELI and DAMAN & DIU 10 
-9 DELHI 68 
-10 GOA 27 
-11 GUJARAT 285 
-12 HARYANA 46 
-13 HIMACHAL PRADESH 64 
-14 JAMMU & KASHMIR 137 
-15 JHARKHAND 206 
-16 KARNATAKA 384 
-17 KERALA 140 
-18 LADAKH 9 
-19 LAKSHADWEEP 9 
-20 MADHYA PRADESH 145 
-21 MAHARASHTRA 527 
-22 MANIPUR 7 
-23 MEGHALAYA 9 
-24 MIZORAM 8 
-25 NAGALAND 6 
-26 ODISHA 147 
-27 PUDUCHERRY 11 
-28 PUNJAB 67 
-29 RAJASTHAN 460 
-30 SIKKIM 5 
-31 TAMIL NADU 372 
-32 TELANGANA 169 
-33 TRIPURA 20 
-34 UTTAR PRADESH 284 
-35 UTTARAKHAND 35 
-36 WEST BENGAL 17 
-Grand Total 4597 
- 
-******* ANNEXURE-II 
- 
-ANNEXURE REFERRED TO IN REPLY TO PARTS (a ) to (d) OF THE LOK SABHA  
-UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
- 
-Sector wise details of Industrial Parks in Andhra Pradesh: 
- 
-S. 
-No. Sector No. of Parks 
-1 Automobiles 2 
-2 Chemicals 2 
-3 Construction 1 
-4 Electronics Hardware 7 
-5 Engineering 1 
-6 Food Processing 12 
-7 Gems and Jewellery 1 
-8 Leather 1 
-9 Metals 553 
-10 Mixed 36 
-11 Pharmaceuticals 8 
-12 Renewable Energy 1 
-13 Textiles 13 
-                        Total 638 
- 
-******* 
- 
-  ANNEXURE-III 
- 
-ANNEXURE REFERRED TO IN REPLY TO PARTS (a) to (d) OF THE LOK SABHA 
-UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
-Sector specific parks reported by various Ministries across the country including Andhra 
-Pradesh:  
- 
-A. Ministry of Food Processing Industries: 
- 
-S. No. SPV/IA Name State/ UT Name 
-1 Srini Food Park Pvt Ltd Andhra Pradesh 
-2 Godavari Mega Aqua Food Park Pvt Ltd Andhra Pradesh 
-3 Andhra Pradesh Industrial Infrastructure Corporation Ltd (APIIC) Andhra Pradesh 
-4 Rongoge Mega Food Park Pvt Ltd Arunachal Pradesh 
-5 North East Mega Food Park Ltd Assam 
-6 Bihar Industrial Area Development Authority (BIADA) Bihar 
-7 Pristine Mega Food Park Pvt Ltd Bihar 
-8 Indus Best Mega Food Park Pvt Ltd Chhattisgarh 
-9 Gujarat Agro Infrastructure Mega Food Park Pvt Ltd Gujarat 
-10 Fanidhar Mega Food Park Pvt Ltd Gujarat 
-11 Haryana State Cooperative Supply and Marketing Federation Ltd 
-(HAFED) 
-Haryana 
-12 Haryana State Industrial and Infrastructure Development 
-Corporation Ltd (HSIIDC) 
-Haryana 
-13 Cremica Food Park Pvt Ltd Himachal Pradesh 
-14 RFK Greens Food Park Pvt Ltd Jammu & Kashmir 
-15 Integrated Food Park Ltd Karnataka 
-16 Favorich Infra Pvt Ltd Karnataka 
-17 Kerala Industrial Infrastructure 
-Development Corporation (KINFRA) 
-Kerala 
-18 Kerala State Industrial De ... [Truncated to fit context budget]
-
-----------------------------------------------------------------------
-[Source 2] (ID: 18-4-3628)
-Ministry: HEALTH AND FAMILY WELFARE
-Subject: Multi-Drug Resistant Tuberculosis
-
-QUESTION: GOVERNMENT OF INDIA
-MINISTRY OF HEALTH AND FAMILYWELFARE
-DEPARTMENT OF HEALTH AND FAMILYWELFARE
 LOK SABHA
-UNSTARRED QUESTION NO. 3628
-TO BE ANSWERED ON 21ST MARCH, 2025
-MULTI-DRUG RESISTANT TUBERCULOSIS
-†3628. SMT. KAMLESH JANGDE:
-SHRI BALABHADRA MAJHI:
-SHRI RAJKUMAR CHAHAR:
-DR. HEMANT VISHNU SA V ARA:
-SHRI SHANKAR LALWANI:
-SHRI NABA CHARAN MAJHI:
-SHRI TAPIR GAO:
-SHRI DHARAMBIR SINGH:
-DR. RAJESH MISHRA:
-SHRI CAPTAIN BRIJESH CHOWTA:
-SHRI SHRIRANG APPACHANDU BARNE:
-SHRI PRA VEENPATEL:
-SHRI JANARDAN MISHRA:
-SHRI SURESH KUMAR KASHYAP:
-SHRI ARUN GOVIL:
-SHRI JASWANTSINH SUMANBHAI BHABHOR:
-SHRI BIDYUT BARAN MAHATO:
-SHRI LUMBA RAM CHAUDHARY:
-SHRI GAJENDRA SINGH PATEL:
-SMT. MAHIMA KUMARI MEWAR:
-SHRI CHA VDAVINOD LAKHAMSHI:
-SMT. KAMALJEET SEHRAWAT:
-SHRI PRADEEP KUMAR SINGH:
-SHRI KANWAR SINGH TANWAR:
-SMT. BHARTI PARDHI:
-SHRI BHOJRAJ NAG:
-SHRI YOGENDER CHANDOLIA:
-SHRI TRIVENDRA SINGH RAWAT:
-SHRI P P CHAUDHARY:
-DR. K SUDHAKAR:
-SHRI DINESHBHAI MAKWANA:
-SHRI JAI PRAKASH:
-SHRI DILIP SAIKIA:
-SHRI MANOJ TIWARI:
-Will the Minister of HEALTH AND FAMILYWELFARE be pleased to state:
-(a) whether the Government has launched TB Free India Campaign across the country and if
-so, the details thereof;
-(b) the steps taken/proposed to be taken by the Government to ensure that TB patients
-complete their treatment plan in cases of Multi Drug-resistant tuberculosis (MDR-TB)where completing the full course of treatment is a significant challenge alongwith the
-details of funding being made available in this regard;
-(c) the primary target for TB Free India Campaign alongwith the targeted year for achieving
-the same;
-(d) the manner in which TB Free India Campaign addresses the challenges of Multi Drug
-resistant tuberculosis (MDR-TB);
-(e) the specific awareness campaigns and interventions being undertaken to reduce TB
-stigma and encourage seeking early healthcare behaviour particularly in Amroha
-Parliamentary Constituency of Uttar Pradesh along with the number of awareness or
-health camps organised in Sidhi Parliamentary Constituency under the TB Free India
-Campaign; and
-(f) whether the Government is considering procurement and deployment of additional
-portable/handheld X-ray equipments in areas with higher number of TB disease
-particularly in the said Constituency and if so, the details thereof?
-ANSWER: ANSWER
-THE MINISTER OF STATEIN THE MINISTRY OF HEALTH AND FAMILYWELFARE
-(SMT. ANUPRIYAPATEL)
-(a) to (f) The Government has launched a 100-Day TB Mukt Bharat Abhiyan in identified
-347 priority districts across 33 State/UTs, to accelerate the endeavour to achieve Sustainable
-Development Goals related to TB. Under the campaign in 347 districts (7th Dec 2024 – 14th
-Mar 2025), 9.02 crore vulnerable individuals were screened and 3.01 lakh new TB cases
-identified, while 1.58 lakh TB patients successfully completed their treatment.
-The Government, under the National TB Elimination Program (NTEP), has implemented a
-multi-pronged strategy to ensure Multi Drug Resistant TB (MDR-TB) patients complete their
-treatment. In view of the challenges in diagnosis and treatment to MDR-TB cases, the
-Government has taken following specific measures:
-● Universal Drug Susceptibility Testing (UDST) is implemented to ensure every
-diagnosed TB patient is tested for drug resistance at the time of diagnosis.
-● Scaling up molecular diagnostic laboratories to 8,295 Nucleic Acid Amplification
-Test (NAAT) machines to cover all districts of the country.
-● 100 Line Probe Assay and 69 liquid culture testing laboratories have been established
-for diagnosis of multi drug resistance.
-● 6 National Reference Laboratories and 34 Intermediate Reference Laboratories have
-been established in the country.
-● 826 Drug Resistant TB treatment centres have been established across all districts.
-● In 2021, shorter, safer, all oral drug resistant TB treatment regimen has been
-introduced.
-● In 2024, a newer, shorter and more efficacious treatment regimen (BPaLM) consisting
-of four-drug combination – Bedaquiline, Pretomanid, Linezolid and Moxifloxacin has
-been introduced for management of drug-resistant TB Universal● A nutritional support scheme implemented for providing ₹1000 per month to all TB
-patients, including MDR-TB cases, throughout treatment.
-The primary target of 100 Days intensified TB Mukt Bharat Abhiyan launched on 7th
-December 2024, is to detect TB cases early, reduce TB related mortality and prevent new
-cases among the vulnerable population.
-As part of Jan Bhagidari, efforts have been made for a whole of government approach to raise
-awareness, reduce stigma and improve health seeking behaviour among the vulnerable
-population. Through this campaign, vulnerable population were mobilized with the
-involvement of private sector, civil society organizations, local community volunteers and
-health workers in all focus districts, including Amroha district of Uttar Pradesh and Sidhi
-district of Madhya Pradesh.
-During the campaign period, 4,324 and 2,456 Ni-kshay shivirs were reported to have been
-organised in Amroha and Sidhi districts, respectively, for providing awareness and screening
-the vulnerable population.
-To enhance the availability of hand-held X-rays in high burden areas, the government has
-approved procurement for central supplies. In addition, based on need, adequate provisions
-for procurement have been made through National Health Mission for State/UTs.
+ 
+UNSTARRED
+ 
+QUESTION NO. 1909
+ 
+TO BE ANSWERED ON
+ 
+1
+1.12.2025
+ 
+ 
+ 
+STRENGTHENING OF CREDIT AN
+D CAPITAL AVAILABILITY FOR MSMEs
+ 
+ 
+1909. 
+ 
+SHRI HASMUKHBHAI SOMABHAI PATEL: 
+ 
+            
+SHRI MITESH PATEL BAKABHAI: 
+ 
+            
+SHRI VISHNU DAYAL RAM: 
+ 
+            
+SHRI NARAYAN TATU RANE: 
+ 
+            
+SMT. D K ARUNA: 
+ 
+            
+SHRI RODMAL NAGAR: 
+ 
+            
+DR. SANJAY JAISWAL: 
+ 
+            
+SHRI CHANDRA PRAKASH JOSHI: 
+ 
+       
+     
+SHRI ASHISH DUBEY:
+ 
+ 
+Will the Minister of 
+MICRO, SMALL AND MEDIUM ENTERPRISES 
+be pleased to state:
+ 
+ 
+(
+a
+)
+ 
+the details of the recently implemented reforms and financial schemes to strengthen access to 
+credit and equity, capital availability for Micro, Small 
+and Medium Enterprises (MSMEs) including the 
+Aatmanirbhar Bharat Package and the Credit Guarantee Scheme;
+ 
+(
+b
+)
+ 
+the quantum of additional credit enabled through the said mechanisms along with the number of 
+enterprises benefitted thereunder;
+ 
+(
+c
+)
+ 
+the steps taken to ex
+pand guarantee coverage and promote collateral
+-
+free financing for micro 
+and small enterprises; and
+ 
+(
+d
+)
+ 
+ 
+whether the Government has developed monitoring systems to assess the effectiveness of these 
+financial interventions in enhancing the productivity and compe
+titiveness of MSMEs and if so, the 
+details thereof ?
+ANSWER: ANSWER: ANSWER
+ 
+ 
+MINISTER OF STATE FOR MICRO, SMALL AND MEDIUM ENTERPRISES
+ 
+(SUSHRI SHOBHA KARANDLAJE)
+ 
+ 
+(a) to (c)
+:
+ 
+ 
+Government has taken various measures t
+o strengthen access to credit and equity for 
+Micro, 
+Small and Medium Enterprises (MSMEs)
+ 
+including the following: 
+-
+ 
+ 
+i
+.
+ 
+The Emergency Credit Line Guarantee Scheme (ECLGS) was launched in May, 2020 as part of 
+Aatmanirbhar Bharat 
+Package 
+to support eligible MSMEs and business enterprises in meeting 
+their operati
+onal liabilities 
+due to 
+disruption caused by COVID
+-
+19 pandemic. The Scheme was 
+operational till 31.03.2023. As reported by Department of Financial Services (DFS), under 
+ECLGS, since inception till 31.03.2023, total 1.13 crore guarantees 
+covering a value of
+ 
+Rs.
+2.42 
+lakh crore have been extended to MSMEs. 
+  
+: 2 :
+ 
+ 
+ 
+ 
+ii
+.
+ 
+Ministry of MSME implements 
+Credit Guarantee Scheme (CGS) 
+for MSEs through Credit 
+Guarantee Fund Trust for Micro and Small Enterprises (CGTMSE) to provide credit guarantee 
+for loans (
+revised to loans upto Rs 10 crore 
+w.e.f 01.04.2025) extended by Member Lending 
+Institutions to new as well as existing MSEs without collateral security and third
+-
+party 
+guarantee. To expand the scope of the Scheme and to ensure greater access to credit for 
+MSEs, 
+CGS was revamped effective from 01.04.2023, following a corpus infusion of Rs. 9,000 crore 
+into CGTMSE. 
+Further, t
+he Standard Rate of the Annual Guarantee Fee (AGF) was reduced by 
+50%, to as low as 0.37% per annum.
+ 
+S
+in
+ce inception in 2000, to till 30
+.1
+1.2025, 1.31
+ 
+crore 
+credit guarantees were approv
+ed 
+covering 
+an amount Rs. 11.85
+ 
+lakh crore.
+ 
+ 
+iii
+.
+ 
+Self
+-
+Reliant
+ 
+India (SRI) Fund has been set up to infuse Rs. 50,000 crore as equity funding in 
+MSMEs
+ 
+with 
+a provision of Rs. 10,000 crore from the Government of I
+ndia and Rs. 40,000 
+crore through Private Equity/Venture Capital Funds.
+ 
+Since inception in 2021 till 30.11.2025, 
+682
+ 
+MSME
+s
+ 
+have been assisted by w
+ay of investing more than Rs. 15,442
+ 
+Crore.
+ 
+ 
+iv
+.
+ 
+Prime Minister's Employment Generation Programme pro
+vides Margin Money subsidy upto 
+35%, for setting up of new micro enterprises, in the non
+-
+farm sector with project cost of Rs. 50 
+lakh for Manufacturing and 
+Rs. 20 lakh for 
+Services enterprises. 
+ 
+ 
+v
+.
+ 
+PM Vishwakarma Scheme was launched on 17.09.2023 to provide 
+end
+-
+to
+-
+end holistic support 
+to artisans and craftspeople of 18 traditional trades who work with their hands and tools. The 
+Scheme includes provision of loans upto Rs. 3 lakh with interest subvention of max upto 8%.
+ 
+ 
+(d)
+:
+ 
+ 
+Ministry of MSME 
+conducts 
+regular 
+r
+eview 
+m
+eetings 
+to 
+track the implementation and 
+assess the 
+performance 
+of 
+its schemes. It also holds 
+stakeholder consultations 
+on regular basis for feedback and 
+necessary policy interventions
+ 
+as and when required
+. 
+Recently, MSME 
+d
+ashboard integrated throug
+h 
+API with all the major 
+s
+chemes of the Ministry 
+ha
+s 
+been launched in this direction. 
+ 
+ 
+ 
+ 
+ 
 *****
 
 ----------------------------------------------------------------------
-[Source 3] (ID: 18-5-4550)
-Ministry: PERSONNEL, PUBLIC GRIEVANCES AND PENSIONS
-Subject: Family Pension to Divorced Daughters
+[Source 2] (ID: 18-4-5298)
+Ministry: MICRO, SMALL AND MEDIUM ENTERPRISES
+Subject: Support to MSMEs Exporters
 
-QUESTION: GOVERNMENT OF INDIA 
-MINISTRY OF PERSONNEL, PUBLIC GRIEVANCES AND PENSIONS 
-(DEPARTMENT OF PENSION & PENSIONERS’ WELFARE) 
+QUESTION: QUESTION: GOVERNMENT OF INDIA
  
-LOK SABHA  
-UNSTARRED QUESTION NO. 4550 
-(ANSWERED ON 20.08.2025) 
+MINISTRY OF MICRO SMALL AND MEDIUM ENTERPRISES
  
-FAMILY PENSION TO DIVORCED DAUGHTERS 
-†4550. SHRI ANIL FIROJIYA: 
-SHRI ALOK SHARMA: 
  
-Will the PRIME MINISTER be pleased to state: 
+LOK SABHA
  
-(a) the steps taken by the Government to ensure that a divorced daughter of a Government servant 
-is eligible to receive family pension; 
-(b) whether the family pension is admissible in case the daughter gets divorced after the death of 
-both parents and if so, the details thereof; 
-(c) whether a daughter is eligible to receive family pension if she is widowed or divorced after the 
-retirement of the Government servant; and 
-(d) if so, the details thereof?
-ANSWER: ANSWER 
-MINISTER OF STATE IN THE MINISTRY OF PERSONNEL, PUBLIC GRIEVANCES 
-AND PENSIONS AND MINISTER OF STATE IN THE PRIME MINISTER’S OFFICE 
-(DR. JITENDRA SINGH) 
-(a) to (d): Department of Pension and Pensioners’ Welfare (DoPPW) has notified the Central 
-Civil Service (Pension) Rules, 2021. Various provisions have been incorporated in these rules 
-and in the Office Memorandum No. F. No.1/1(1)/2022-P&PW(E) dated 26.10.2022 issued 
-subsequently to ensure that a divorced/widowed daughter of a deceased Government employee 
-or pensioner covered under these rules gets family pension on her turn. The same provisions as 
-described hereunder are provided under separate Rules for Railway and Defence employees and 
-pensioners. In terms of these rules: 
+UNSTARRED QUESTION NO. 5298
  
- Where a deceased Government employee or pensioner is not survived by a spouse or son 
-or daughter eligible for family pension or if they die or cease to fulfil the eligibility conditions 
-for family pension prescribed in the above mentioned rules and there is no disabled child eligible 
-to receive family pension, the family pension shall be granted or continued to be payable to an 
-unmarried or widowed or divorced daughter beyond the age of twenty-five years for life or until 
-she gets married or re-married or until she starts earning her livelihood, whichever is the earliest 
-subject to the conditions like  the unmarried or widowed or divorced daughter was dependent on 
-her parent or parents when he or she or  they were alive.  Further, in the case of widowed 
-daughter, death of her husband and in the case of divorced daughter, her divorce took place or 
-the divorce proceedings filed in a competent court during the lifetime of the Government servant 
-or pensioner or his or her spouse. 
+TO BE ANSWERED ON 03.04.2025
+ 
+ 
+SUPPORT TO MSMEs EXPORTERS
+ 
+ 
+5298.
+ 
+ 
+DR. NISHIKANT DUBEY:
+ 
+ 
+ 
+SHRI P P CHAUDHARY:
+ 
+ 
+ 
+SMT. 
+ 
+SHOBHANABEN 
+ 
+MAHENDRASINH 
+ 
+BARAIYA:
+ 
+ 
+Will the Minister of MICRO, SMALL AND MEDIUM ENTERPRISES be pleased
+ 
+to state:
+-
+ 
+ 
+(a)
+ 
+ 
+the specific measures introduced by the Government to support MSME exporters facing global 
+trade challenges including any financial assistance, regulatory relief
+ 
+or trade facilitation provided to 
+them;
+ 
+(b)
+ 
+ 
+the steps being taken to help MSMEs expand into international markets and improve 
+competitiveness;
+ 
+(c)
+ 
+ 
+whether any dedicated export promotion initiatives have been implemented for MSMEs in 
+priority sectors and
+ 
+if so, the details thereof and outcomes achieved;
+ 
+(d)
+ 
+ 
+whether any steps have been taken to simplify/ease export financing, credit guarantees and 
+documentation requirements for small businesses and if so, the details thereof; and
+ 
+(e)
+ 
+ 
+whether any digital 
+platforms or technical assistance programmes have been established to 
+enhance MSME export capabilities and if so, the details thereof and number of enterprises benefited?
+ANSWER: ANSWER: ANSWER
+ 
+ 
+MINISTER OF STATE FOR MICRO, SMALL AND MEDIUM ENTERPRISES
+ 
+(SUSHRI SHOBHA 
+KARANDLAJE)
+ 
+ 
+(a) to (c):
+ 
+Ministry of Micro, Small and Medium Enterprises (MSME) has developed a support 
+system towards export promotion by setting up 65 Export Facilitation Centres
+ 
+(EFCs) in its field 
+offices namely, MSME Development and Facilitation Offices, MSME Technology Centres and 
+MSME Testing Centres. These EFCs handhold the MSMEs by providing MSMEs with support in 
+documentation, market access, financing, technology adoption 
+and training. Ministry of MSME also 
+implements the International Cooperation (IC) Scheme which provides assistance for Capacity 
+Building of First Time Exporters (CBFTE). Under the CBFTE, reimbursement is provided to new 
+Micro &Small Enterprises (MSE) expor
+ters for costs incurred on Registration
+-
+cum
+-
+Membership 
+Certification (RCMC) with EPCs, Export Insurance Premium and testing & quality certification for 
+exports. (ii) The Market Development Assistance (MDA) component of IC Scheme provides 
+assistance on reim
+bursement basis to the eligible Central / State Government organizations and 
+Industry Associations to facilitate participation of MSMEs in international exhibitions and fairs held 
+abroad; and for organizing international conference in India with the aim of
+ 
+technology upgradation, 
+modernization, joint venture etc.
+ 
+ 
+ 
+MSME Champions Scheme with three sub schemes, MSME
+-
+Sustainable (ZED) Certification 
+Scheme, MSME
+-
+Competitive (LEAN) Scheme and MSME
+-
+Innovative Scheme (Incubation, Design& 
+IPR) is a holistic approa
+ch to unify, synergize and converge with various Schemes and interventions to 
+enable MSMEs to become globally competitive.
+ 
+  
+ 
+: 2 :
+ 
+ 
+ 
+ 
+Other initiatives for helping MSMEs to grow their business globally include Ministry of 
+Commerce and Industry’s Trade Inf
+rastructure for Export Scheme (TIES) and Market Access 
+Initiative (MAI) which facilitates participation of Indian Exporters in exhibitions, buyer seller meets, 
+fairs etc. Initiatives like Districts as Export hubs identify export potential, address bottlene
+cks and 
+supports local exporters / manufacturers. The Trade Connect e Platform is an information and 
+intermediation platform on international trade, which provides comprehensive services for both new 
+and existing exporters.
+ 
+ 
+(d)
+ 
+& (e):
+ 
+To support M
+SMEs
+ 
+in 
+accessing global market, the Government 
+has taken following 
+measures: 
+ 
+ 
+(i)
+ 
+Ministry of MSME has set up a dedicated support system for export promotion by setting up 65 
+Export Facilitation Centres
+ 
+(EFCs). These EFCs support MSMEs by disseminating information 
+on various Schemes and supports available for the MSMEs for enhancing their  exports,  in 
+linking them with financial institutions such as NBFCs, new fintech start
+-
+ups etc, to avail credit 
+at c
+ompetitive rates etc.  
+ 
+ 
+(ii)
+ 
+Raising and Accelerating MSME Performance (RAMP) Scheme aims to provide support to 
+Micro, Small and Medium enterprises through increased access to technological upgradation, 
+market and credit by strengthening of Central and St
+ate agencies.
+ 
+ 
+(iii)
+ 
+The Trade Connect e
+-
+Platform is an information and intermediation platform on international 
+trade, which provides comprehensive services for both new and existing exporters.
+ 
  
 ******
 
 ----------------------------------------------------------------------
-[Source 4] (ID: 18-6-0002)
-Ministry: ENVIRONMENT, FOREST AND CLIMATE CHANGE
-Subject: Revised Greenbelt and Plantation Norms for Sustainable Industrial Growth
+[Source 3] (ID: 18-2-1651)
+Ministry: MICRO, SMALL AND MEDIUM ENTERPRISES
+Subject: National Small Industries Corporation
 
-QUESTION: OIH 
-GOVERNMENT OF INDIA 
-MINISTRY OF ENVIRONMENT, FOREST AND CLIMATE CHANGE 
+QUESTION: QUESTION: GOVERNMENT OF INDIA
  
-LOK SABHA 
-UNSTARRED QUESTION NO. 2 
-TO BE ANSWERED ON 01.12.2025 
+MINISTRY OF MICRO, SMALL AND MEDIUM ENTERPRISES
  
-Revised Greenbelt and Plantation Norms for Sustainable Industrial Growth 
  
-2.    SHRI DILESHWAR KAMAIT: 
-SHRI NALIN SOREN: 
-SHRI BASAVARAJ BOMMAI: 
-SHRI VISHWESHWAR HEGDE KAGERI: 
-SHRI P C MOHAN: 
-SHRI VIJAY BAGHEL: 
-SMT. KAMALJEET SEHRAWAT: 
-SHRI ALOK SHARMA: 
-SHRI NABA CHARAN MAJHI: 
-SHRI HASMUKHBHAI SOMABHAI PATEL: 
-SHRI MITESH PATEL BAKABHAI: 
-SHRI ASHISH DUBEY: 
-SMT. MAHIMA KUMARI MEWAR: 
-SHRI KALI CHARAN SINGH:  
+LOK SABHA
  
-Will the Minister of ENVIRONMENT, FOREST AND CLIMATE CHANGE be pleased  to 
-state:  
-(a)     the details of the revised greenbelt and plantation norms notified by the Government for 
-new  industrial estates, parks and individual industrial projects under the Environmental 
-Clearance framework; 
-(b)    the rationale behind revising the earlier requiremen t of 33 per cent green cover to the 
-present norms; 
-(c)    the details of the steps taken/being taken by the Government to ensure that the revised 
-norms continue to promote sustainable industrial growth; 
-(d)    whether the Government is also revising greenb elt and distance norms for new oil and 
-gas terminals in view of rapid urbanisation in the cities; and 
-(e)    if so, the details thereof and the manner in which the said project is likely to benefit 
-Jabalpur and Mewar Lok Sabha Constituencies in Madhya Prad esh and Rajasthan 
-respectively?
-ANSWER: ANSWER 
+UNSTARRED QUESTION NO. 1651
  
-MINISTER OF STATE IN THE MINISTRY OF ENVIRONMENT, FOREST AND 
-CLIMATE CHANGE  
-(SHRI KIRTI VARDHAN SINGH) 
+TO BE ANSWERED ON 01.08.2024
  
- (a)  In order to rationalise  the green belt requirement based on pollution potential, the 
-Ministry vide OM dated 29.10.2025 has directed that the revised criteria for developing green 
-belt/green cover for Industrial Estates/Parks and individual industries may be adhered to in 
-supersession of the OM dated 27th October, 2020. The revised criteria, inter -alia, mandates 
-that in Industrial Estates a minimum of 10% of the area of the industrial estate shall be 
-designated as common green area and respective red categor y and orange category Industrial  
  
-units within the Estate shall develop 15% and 10% of the area of their premises as  green 
-belt/green cover respectively. Further , for individual industrial units outside the Industrial 
-Estates, red and orange category industries are required to de velop 25% and 20% green 
-belt/green cover in their respective premises which may be reduced by 5% each if they are not 
-predominantly air polluting industries. With regard to green and white industries it has been 
-directed that development of green belt/green cover is optional with no mandatory requirement, 
-except for green category industries with air pollution score ≥25, in which case such industries 
-shall develop 10% green belt/green cover within their respective premises. 
+NATIONAL SMALL INDUSTRIES CORPORATION 
  
-(b)  There was a need to strike a balance between the requirement of land for the 
-Projects/Activities and the environmental needs of the green belt  along with the existing 
-pollution control and abatement measures prescribed under the general and specific conditions 
-forming part of the prior Environmental Clearance issued in accordance with the provisions of 
-EIA Notification 2006 as amended, so as to optimize the use of available land . Therefore, it 
-was decided to rationalize the green belt requirement based on pollution potential.  The 
-rationalization of green belt/green cover was done based on the recommendations of a 
-Committee, which was, inter alia , based on examining various International norms for 
-developing green belt/green cover.    The rationale for the revised green belt/green cover norms 
-is that industries with higher pollution potential such as red category industries and orange 
-category industries need to develop more percentage of green belt in order to mitigate the 
-pollution that emerges from the industrial activity.     
  
-(c) to (e)  The Central Government has ensured that the revised green belt/green cover norms 
-are implemented with a monitoring mechanism which ensures that the industrial estates shall 
-submit a half yearly green belt status report to the State Pollution Control Boards 
-(SPCB)/Pollution Control Committees (PCC) and the Integrated Regional Office (IRO) of 
-MoEFCC, informing canopy coverage, number of living trees, height and species, survival rate, 
-etc. with drone imagery. The individual industrial units also need to submit half yearly reports 
-on their green belt areas, including total area covered, number of trees, species types, and other 
-relevant details, as part of their environmental statements to the respective SPCB/PCC. The 
-green belt details submitted by the Industrial Estate will be verified by IRO and SPCB/ PCC 
-on yearly basis. The green belt details of individual units will also be verified by SPCB/PCC 
-on random basis at time of inspections. 
+1651.  
  
-The revised green belt norms shall be applicable to all the projects across the country, 
-including those in Jabalpur and Mewar Lok  Sabha Constituencies in Madhya Pradesh and 
-Rajasthan respectively. The revised norms provide the benefit of additional land area to 
-industries to expand their operations  without compromising the environmental needs of 
-developing green belt/ green cover.   
-********
+ 
+DR. 
+ 
+JAYANTA KUMAR ROY:
+ 
+ 
+ 
+Will the Minister of MICRO, SMALL AND MEDIUM ENTERPRISES be pleased to state:
+ 
+ 
+(
+a
+)
+ 
+whether the National Small Industries Corporation (NSIC) provides integrated support services 
+to MSMEs and if so, the details thereof; 
+ 
+(
+b
+)
+ 
+the details of projects/schemes being imp
+lemented and the physical achievements/progress 
+made
+ 
+in this regard during the last three years, scheme and State
+-
+wise;
+ 
+(
+c
+)
+ 
+the details of the funds sanctioned under various schemes by NSIC during the last three years, 
+scheme and State
+-
+wise;
+ 
+(
+d
+)
+ 
+the details of the
+ 
+beneficiaries under the National Scheduled Caste and Scheduled Tribe Hub 
+for
+ 
+establishment of new enterprises during the last three years;
+ 
+(
+e
+)
+ 
+whether the Government has reviewed the functioning of NSIC to make it more effective; and
+ 
+(
+f
+)
+ 
+if
+ 
+so, the steps being taken by the Government in this regard?
+ANSWER: ANSWER: ANSWER
+ 
+ 
+MINISTER OF STATE FOR MICRO, SMALL AND MEDIUM ENTERPRISES
+ 
+ 
+(SUSHRI SHOBHA KARANDLAJE)
+ 
+ 
+(a) to (c):
+ 
+National Small Industries Corporation Limited (NSIC), a CPSE under the Ministry of 
+Micro, Small and Medium Enterprises, provides integrated support services to MSMEs through its 
+various programmes which inter
+-
+alia include:
+ 
+ 
+(
+i
+)
+ 
+Raw Material Assistance (RMA) Sc
+heme:
+-
+ 
+Under RMA Scheme, NSIC provides financial 
+assistance to MSMEs against bank guarantee for payment to the suppliers for procurement of raw 
+material. NSIC also facilitates MSMEs to meet their raw material requirement by making 
+arrangements with bulk ma
+nufacturers for procuring the material and supplying the same to MSMEs.
+ 
+ 
+(
+ii
+)
+ 
+Single Point Registration Scheme (SPRS)
+:
+-
+ 
+NSIC registers Micro and Small Enterprises 
+(MSEs) under its SPRS. The units registered under SPRS are eligible to get the
+ 
+benefits under Publ
+ic 
+Procurement Policy for Micro & Small Enterprises Order 2012 as amended from time to time.
+ 
+ 
+(
+iii
+)
+ 
+MSME GlobalMart Portal
+:
+-
+ 
+NSIC is offering in
+f
+omediary services through its B2B portal 
+http://www.MSMEMart.com
+ 
+which is a one
+-
+stop one
+-
+window bouquet of aids that provides 
+information on business, technology and finance and also exhibit the core competence of Indian SMEs 
+by way of enabling their digital presence for sustenance and growth.
+ 
+ 
+ 
+ 
+ 
+ : 2 :
+ 
+ 
+ 
+ 
+ 
+(
+iv
+)
+ 
+NSIC Technical Services 
+Centres
+:
+-
+ 
+NSIC through its Technical Services Centres and 
+Incubation Centres offer industry oriented demand driven entrepreneurship/skill development training 
+programmes (ESDP). The salient features of ESDP Training Programmes are self
+-
+employment 
+generatio
+n and skill development, providing opportunity to first generation entrepreneurs to acquire 
+skills for enterprise building and integrated support by way of providing hands on training and 
+entrepreneurship development.
+ 
+ 
+State
+-
+wise details of credit facilita
+tion under RMA and achievement under the above 
+programmes during the last three years are given at Annexure
+-
+I, II, III and IV respectively.
+ 
+ 
+(d):
+ 
+NSIC implements National Scheduled Caste and Scheduled Tribe Hub (NSSH) Scheme across 
+the country to promote e
+ntrepreneurship among the SC
+-
+ST and to fulfill the obligations under the 
+Public Procurement Policy for Micro and Small Enterprises. To boost entrepreneurship among SC
+-
+ST, 
+the Hub has taken several interventions which include capacity building programmes, m
+arket linkage 
+programmes viz, participation in domestic and foreign exhibitions, organization of Special Vendor 
+Development programmes, workshops/awareness programmes, subsidy on purchase of 
+machinery/equipment, subsidy for registration under Single Point 
+Registration Scheme, subsidy for 
+enrollment on Government promoted e
+-
+commerce portals such as GeM, e
+-
+khadi, TRIFED, Tribes 
+India, MSME Mart, etc. 
+ 
+ 
+Funds allocated and released to NSIC for meeting the expenditure under NSSH during the last 
+three years is g
+iven below:
+ 
+                                                                                                            
+(Rs. in crore)
+ 
+Year
+ 
+BE
+ 
+RE
+ 
+Actual
+ 
+2021
+-
+22
+ 
+150.00
+ 
+120.00
+ 
+101.87
+ 
+2022
+-
+23
+ 
+150.00
+ 
+135.00
+ 
+135.00
+ 
+2023
+-
+24
+ 
+100.00
+ 
+100.00
+ 
+100.00
+ 
+ 
+State
+-
+wise 
+details of beneficiaries under NSSH during the last three years is given at 
+Annexure
+-
+V.
+ 
+ 
+(e) and (f): 
+ 
+As per the guidelines of Department of Public Enterprises, MoU is signed every year 
+between the Ministry of MSME and NSIC. The purpose of the MoU is to m
+easure the performance of 
+the management of the CPSE on key selected parameters against the targets agreed upon so as to 
+improve the critical performance indicators of the organization. The MoU rating of NSIC during the 
+last three years is as under:
+ 
+ 
+Year
+ 
+MoU Rating
+ 
+2020
+-
+21
+ 
+Excellent
+ 
+2021
+-
+22
+ 
+Very Good
+ 
+2022
+-
+23
+ 
+Very Good
+ 
+ 
+****
+ 
+  
+ 
+ 
+Annexure
+-
+I 
+ 
+ 
+Annex ... [Truncated to fit context budget]
 
 ----------------------------------------------------------------------
-[Source 5] (ID: 18-5-1526)
-Ministry: AGRICULTURE AND FARMERS WELFARE
-Subject: Increasing the Ambit of PMFBY
+[Source 4] (ID: 18-2-0682)
+Ministry: MICRO, SMALL AND MEDIUM ENTERPRISES
+Subject: Promotion of MSME Sector
 
-QUESTION: GOVERNMENT OF INDIA 
-MINISTRY OF AGRICULTURE AND FARMERS WELFARE 
-DEPARTMENT OF AGRICULTURE AND FARMERS WELFARE 
+QUESTION: QUESTION: GOVERNMENT OF INDIA
  
-LOK SABHA 
-UNSTARRED QUESTION NO. 1526 
-TO BE ANSWERED ON THE 29TH JULY, 2025 
+MINISTRY OF MICRO, SMALL AND MEDIUM ENTERPRISES
  
-INCREASING THE AMBIT OF PMFBY 
  
-1526  SHRI MANISH JAISWAL 
-            SHRI CHAVAN RAVINDRA VASANTRAO 
-            SHRI SUDHEER GUPTA 
+LOK SABHA
  
-Will the Minister of AGRICULTURE AND FARMERS WELFARE कृ ͪष एवं ͩकसान कãयाण मंğी be 
-pleased to state:  
+UNSTARRED QUESTION NO. 682
  
-(a)  whether many States and Union Territories are still out of the ambit of Pradhan Mantri Fasal 
-Bima Yojana (PMFBY) ; 
+TO BE 
+ANSWERED ON 25.
+0
+7.2024
  
-(b) if so, whether the Union Government has held any meetings/deliberations with the 
-States/Union Territories which have not adopted the PMFBY; 
  
-(c)  if so, the details thereof and the outcome of the said deliberations; 
+PROMOTION OF MSME SECTOR
  
-(d)  whether the Union Government has conducted any survey to find the lacunae in the PMFBY 
-and if so, the details thereof; and 
-< (e)  the details of changes incorporated by the Union Government to increase the ambit of this 
-scheme along with the funds sanctioned for the said scheme during the present financial year?
-ANSWER: ANSWER 
  
-THE MINISTER OF STATE FOR AGRICULTURE AND FARMERS WELFARE  
+682. 
  
-कृ ͪष एवं ͩकसान कãयाण राÏय मंğी   (SHRI  RAMNATH THAKUR) 
  
-(a) to (c): The PMFBY, introduced in the country from Kharif 2016 season, is available for all 
-States/UTs and is voluntary for States as well as farmers. States/UTs are free to subscribe 
-under the scheme keeping in view their risk perception and financial considerations etc. Since 
-inception of the scheme 27 States/UTs have implemented the scheme in one or more seasons. 
-Some States/UTs like Bihar, Telangana, Andhra Pradesh, Jharkhand, West Bengal and Gujarat 
-have opted out of the scheme after implementing it for some seasons due to their own reasons. 
-Due to the efforts of Ministry of Agriculture & Farmers Welfare, Andhra Pradesh and Jharkhand 
-have re-joined the scheme while Telangana has announced joining the scheme.  
-       Department is regularly persuading the non-implementing States to participate in the 
-scheme by writing at the highest levels, in one to one meetings as well as National Review 
-Conferences. As a result, many States/UTs including Bihar, Mizoram and Ladakh have 
-expressed keenness in joining the scheme. 
-   
-(d) & (e): The review/revisions / rationalization / improvements in the crop insurance schemes 
-is a continuous process and decision on suggestion/ representations/ recommendations of the 
-stakeholders/studies are taken from time to time.   Based on the experience gained, views of 
-various stakeholders and with a view to ensure better transparency, accountability, timely 
-payment of claims to the farmers and to make the scheme more farmer friendly, Government 
-has periodically revised the Operational Guidelines of the PMFBY comprehensively to ensure 
-that the eligible benefits under the scheme reach the farmers timely and transparently. Various 
-performance evaluation studies have also been conducted on the implementation of crop 
-insurance to examine various aspects of implementation of crop insurance Scheme. Based on 
-the recommendations of the various studies/ reports, the Scheme has brought in various 
-technological interventions like YES-TECH, WINDS, etc. The details of technological 
-interventions in the Scheme are as under:   
+DR. D RAVI KUMAR: 
  
-a)  YES-Tech (Yield Estimation based on Technology)- is a technology based yield 
-estimation mechanism which has been developed after 2 years of rigorous testing and pilot runs 
-across 100 districts of the country. Crop Loss assessment and Yield estimation assisted by data 
-inputs from such as Remote Sensing indices, Weather indices, crop phenological information, 
-soil types etc. using approved Technologies/Approaches   
+SHRI SELVAM G: 
  
-b)  WINDS (Weather Information Network & Data System)- is again a pioneering initiative of 
-the country to set-up a network of Automatic Weather Stations & Rain Gauges at Taluk/Block 
-and Gram Panchayat level to create a strong database of hyper-local weather data for the 
-different Govt. and other entities to use for all farmer and farming oriented services.  
+SHRI C N ANNADURAI: 
  
-c)  National Crop Insurance Portal (NCIP)- is developed by the government as a single 
-source of data which ensures subsidy payment, coordination, transparency, dissemination of 
-information and delivery of services including direct online enrolment of farmers, 
-uploading/obtaining individual insured farmer’s details for better monitoring and to ensure 
-transfer of claim amount electronically to the individual farmer’s Bank Account. 
+SHRI NAVASKANI K: 
  
-d)  Digi-Claim-Payment Module – is a dedicated module operationalised for payment of claims 
-from Kharif 2022 onwards in order to rigorously monitor the claim disbursal process. It involves 
-the integration of National Crop Insurance Portal (NCIP) with Public Finance Management 
-System (PFMS) and accounting system of Insurance Companies to provide timely & transparent 
-processing of all claims. 
+DR. THIRUMAAVALAVAN THOLKAPPIYAN: 
  
-e)  AIDE (App for Intermediary Enrolment): A smart-phone App has been designed and rolled 
-out in Kharif 2023 for enrolment of far ... [Truncated to fit context budget]
+SHRI RAJA A:
+ 
+ 
+Will the MINISTER OF MICRO, SMALL AND MEDIUM ENTERPRISES be pleased to state:
+ 
+ 
+(a) 
+ 
+the
+ 
+details of various schemes being implemented by the Government for the promotion of 
+MSME sector in the country particularly in Tamil Nadu during the last five years; 
+ 
+(b) 
+ 
+whether Union Government has taken any step to promote MSME industries in the count
+ry 
+particularly in Tamil Nadu during the last last five years and if so, the details thereof; 
+ 
+(c) 
+ 
+the current status of projects being incubated under A Scheme for Promotion of Innovation, 
+Rural Industries and Entrepreneurship (ASPIRE) in Tamil Nadu; 
+ 
+(d
+) 
+ 
+the number of beneficiaries trained, employed on wage basis and self
+-
+employed under the said 
+scheme, State/UT
+-
+wise; and 
+ 
+(e) 
+ 
+the list of incubation centers in Tamil Nadu along with their achievements, scheme
+-
+wise?
+ANSWER: ANSWER: ANSWER
+ 
+ 
+MINISTER OF MICRO, SMALL AND 
+MEDIUM ENTERPRISES
+ 
+(SHRI JITAN RAM MANJHI)
+ 
+ 
+ 
+(a) 
+&
+ 
+(b):
+ 
+Government implements various schemes and programmes aimed at promotion and 
+development of MSME sector in the country including Tamil Nadu. These schemes and programmes
+ 
+include MSME Champions Scheme, Credit Guarantee Fund Trust for Micro and Small Enterprises 
+(CGTMSE), Prime Minister's Employment Generation Programme (PMEGP), Micro and Small 
+Enterprises 
+-
+ 
+Cluster Development Programme (MSE
+-
+CDP) and Raising and Accelerati
+ng MSME 
+Performance (RAMP).
+ 
+ 
+ 
+Further, Government has taken a number of initiatives to support the MSME sector in last five 
+years. Some of them are:
+ 
+ 
+i
+.
+ 
+Collateral free loan up to a limit of Rs. 500 lakh (w.e.f. 01.04.23) to MSEs with guarantee 
+coverage up to
+ 
+85 % for various categories of loan through Credit Guarantee Fund Trust for 
+Micro and Small Enterprises (CGTMSE) under Credit Guarantee Scheme.
+ 
+ 
+ 
+  
+: 2 :
+ 
+ 
+ii
+.
+ 
+Rs. 50,000 crore equity infusion through Self Reliant India Fund. This scheme has a provision 
+for co
+rpus of Rs.10,000 crore from Government of India.
+ 
+iii
+.
+ 
+New criteria for classification of MSMEs with enhanced thresholds.
+ 
+iv
+.
+ 
+Registration of MSMEs through ''Udyam Registration Portal'' for Ease of Doing Business.
+ 
+v
+.
+ 
+  
+No global tenders for procurement up to Rs. 200 
+crore
+ 
+vi
+.
+ 
+Non
+-
+tax benefits extended for 3 years in case of an upward change in status of MSMEs.
+ 
+vii
+.
+ 
+Roll out of Raising and Accelerating MSME Performance (RAMP) programme with an outlay of 
+Rs. 6,000 crore over 5 years.
+ 
+viii
+.
+ 
+Integration of Udyam Registration Portal with
+ 
+National Career Service (NCS) of Ministry of 
+Labour & Employment and Skill India Digital of Ministry of Skill Development and 
+Entrepreneurship. Registered MSMEs are enabled to reach out to trained manpower and capacity 
+building.  
+ 
+ix
+.
+ 
+Under Vivad se Vishwas 
+–
+ 
+I, relief by way of refund of 95% of the deducted performance 
+security, bid security and liquidated damages was provided to MSMEs. Relief was also provided 
+to MSMEs debarred for default in execution of contracts.
+ 
+x
+.
+ 
+Launch of Udyam Assist Platform (UAP) to b
+ring the Informal Micro Enterprises (IMEs) under 
+the formal ambit for availing the benefit under Priority Sector Lending (PSL).
+ 
+xi
+.
+ 
+ 
+Launch of ‘PM Vishwakarma’ Scheme on 17.09.2023 to provide end to end holistic support to 
+artisans and craftspeople engaged in 
+18 traditional trades.
+ 
+ 
+(c) 
+and (e)
+: 
+ 
+Under the Scheme, 'A Scheme for Promotion of Innovation, Rural Industries and 
+Entrepreneurship' (ASPIRE), as on 30.06.2024, seven Livelihood Business Incubators (LBIs) and one 
+Technology Business Incubator (TBI) have b
+een approved in Tamil Nadu. Details of the LBIs and TBI 
+in Tamil Nadu along with the achievements and status of projects are given at 
+Annexure
+-
+I.
+ 
+ 
+(d)
+:
+ 
+State/UT
+-
+wise number of beneficiaries trained, employed on wage basis, self
+-
+employed under 
+the ASPIRE sc
+heme are given at 
+Annexure
+-
+II.
+ 
+ 
+ 
+*****
+ 
+ 
+  
+ANNEXURE
+-
+I
+ 
+ 
+Annexure
+-
+I referred to in reply to part (c) & (e) of the Lok Sabha Unstarred Question No. 682 due 
+for answer on 25.07.2024.
+ 
+ 
+(
+i
+)
+ 
+Livelihood Business Incubators (LBIs):
+Details and current status of the seven
+ 
+LBIs in the State of 
+Tamil Nadu as on 30.06.2024 along with the achievements are given below:
+ 
+ 
+S. 
+No.
+ 
+Component
+ 
+Implementing Agency
+ 
+Thrust area/project area
+ 
+Number of trainees
+ 
+Passed 
+out
+ 
+Employed 
+in other 
+units
+ 
+Self 
+employed
+ 
+1
+.
+ 
+LBI
+-
+ 
+Govt.
+ 
+NSIC
+-
+Technical 
+Services Centre, 
+Chennai, Tamil Nadu
+ 
+Tomato ketchup 
+processing,bakery, 
+packaging, 3D printing 
+& scanning
+ 
+3,989
+ 
+442
+ 
+206
+ 
+2
+.
+ 
+LBI
+-
+Govt.
+ 
+Coir Board, Regional 
+Extension Center, Coir 
+Board,Thanjavur, Tamil 
+Nadu
+ 
+Coir Based Multi 
+Product
+ 
+592
+ 
+0
+ 
+33
+ 
+3
+.
+ 
+LBI
+-
+PPP
+ 
+NIFT
+-
+TEA Knitwear 
+Fashion Institute, 
+Tiruppur, Tamil Nadu
+ 
+Textiles & Apparels
+ 
+1,993
+ 
+1,353
+ 
+240
+ 
+4
+ ... [Truncated to fit context budget]
 
 ----------------------------------------------------------------------
 
 ======================================================================
 USER QUESTION:
 ======================================================================
-GST collection
+MSME credit support
 
 ======================================================================
 ANSWER:

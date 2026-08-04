@@ -21,6 +21,7 @@ Design Decisions
 """
 
 from __future__ import annotations
+import torch
 
 from pathlib import Path
 
@@ -69,7 +70,7 @@ class Embedder:
             Required for IndexFlatIP to equal cosine similarity.
         """
         self.model_name = model_name
-        self.device = device or "cpu"
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.normalize = normalize
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None

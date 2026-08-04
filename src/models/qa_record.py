@@ -67,6 +67,11 @@ class QARecordMetadata(BaseModel):
         description="Ministry/department to which the question was addressed",
         examples=["Finance", "Health and Family Welfare"],
     )
+    member: str | None = Field(
+        default=None,
+        description="The Member of Parliament raising the question",
+        examples=["Dr. Shashi Tharoor", "Shri Sunil Kumar Singh"],
+    )
     date: str | None = Field(
         default=None,
         description="Date the question was asked (or answered session date)",
@@ -277,3 +282,28 @@ class QARecord(BaseModel):
             datetime: lambda v: v.isoformat(),
         },
     }
+
+
+class ChunkType(str, Enum):
+    QUESTION = "question"
+    ANSWER = "answer"
+    ANNEXURE = "annexure"
+    METADATA = "metadata"
+
+
+class QAChunk(BaseModel):
+    """
+    A single chunk retrieved from a parent Q&A record.
+    Houses chunk-level retrieval properties and references its parent document.
+    """
+    chunk_id: str = Field(..., description="Unique chunk identifier, e.g. '18-4-0303_Q'")
+    parent_doc_id: str = Field(..., description="The parent document's unique ID")
+    chunk_type: ChunkType = Field(..., description="The type of text in this chunk")
+    chunk_text: str = Field(..., description="The core text of the chunk")
+    metadata: QARecordMetadata = Field(default_factory=QARecordMetadata)
+
+    @computed_field
+    @property
+    def document_content(self) -> str:
+        """Required for matching the downstream indexing pipeline interface."""
+        return self.chunk_text

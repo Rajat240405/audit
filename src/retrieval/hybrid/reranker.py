@@ -34,7 +34,7 @@ Nogueira et al. (2020). "Document Ranking with a Pretrained Sequence-to-Sequence
 """
 
 from __future__ import annotations
-
+import torch
 import numpy as np
 from sentence_transformers import CrossEncoder
 
@@ -83,7 +83,7 @@ class CrossEncoderReranker:
             Default 512 handles most Q&A pairs.
         """
         self.model_name = model_name
-        self.device = device or "cpu"
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_length = max_length
         self._model: CrossEncoder | None = None
 

@@ -643,6 +643,7 @@ class RealArchiveScraper(Scraper):
                             answer_text=answer_text,
                             metadata=QARecordMetadata(
                                 ministry=ministry,
+                                member=member,  # Save the MP name!
                                 date=date_str,
                                 session=session_no,
                                 question_number=ques_no,
@@ -687,6 +688,7 @@ class RealArchiveScraper(Scraper):
                         answer_text=item["answer"],
                         metadata=QARecordMetadata(
                             ministry=item["ministry"],
+                            member=item.get("member"), # Save the fallback MP name!
                             date=item["date"],
                             session=item["session"],
                             question_number=random.randint(100, 9999),

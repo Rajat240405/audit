@@ -2,41 +2,28 @@
 Hybrid RAG Retrieval Pipeline.
 
 Orchestrates: Dense vector search + BM25 search → RRF Fusion → Cross-encoder rerank.
-
-Key Design Decisions
---------------------
-1. The pipeline indexes the CONCATENATED question + answer text
-   (via document_content) for both dense and BM25 retrieval.
-
-2. After retrieval, original structured records are returned.
-   The concatenated text is NEVER exposed to the user — only the
-   original question and answer fields.
-
-3. The pipeline has two modes:
-   - Offline: build() — index the corpus (done once)
-   - Online: retrieve() — answer user queries (done many times)
-
-4. Latency breakdown: each sub-stage is timed independently so we can
-   report exactly where time is spent (critical for the evaluation phase).
-
-5. LLM generation is NOT part of this pipeline — it's a separate stage.
-   This keeps retrieval evaluation clean (no LLM confounding variable).
-   The retrieve() method returns RetrievedResult objects, not answers.
+Supports both Document-level and Chunk-level retrieval.
 """
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from src.models.qa_record import QARecord
-from src.retrieval.hybrid.bm25_index import BM25Index
+import numpy as np
+import numpy.typing as npt
+
+from src.models.qa_record import QARecord, QAChunk, ChunkType, QARecordMetadata
 from src.retrieval.hybrid.embedder import Embedder
+from src.retrieval.hybrid.vector_store import FAISSVectorStore
+from src.retrieval.hybrid.bm25_index import BM25Index
 from src.retrieval.hybrid.fusion import RRF
 from src.retrieval.hybrid.reranker import CrossEncoderReranker
-from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.result import RetrievedResult
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Timing dataclass
@@ -71,30 +58,7 @@ class RetrievalTimings:
 class HybridRAGPipeline:
     """
     Hybrid RAG retrieval: dense + BM25 → RRF → cross-encoder rerank.
-
-    Indexes the concatenated document content (question + answer).
-    Returns original structured records with per-stage timing.
-
-    Usage
-    -----
-    Build (once):
-    ```python
-    pipeline = HybridRAGPipeline(records=qa_records)
-    pipeline.build()
-    pipeline.save("storage/hybrid_rag")
-    ```
-
-    Retrieve (many times):
-    ```python
-    results, timings = pipeline.retrieve("What about malaria?", top_k=5)
-    ```
-
-    Load from disk:
-    ```python
-    pipeline = HybridRAGPipeline()
-    pipeline.load("storage/hybrid_rag")
-    results, timings = pipeline.retrieve("malaria question")
-    ```
+    Can be configured for either document-level or chunk-level retrieval.
     """
 
     def __init__(
@@ -108,6 +72,7 @@ class HybridRAGPipeline:
         fusion_top_k: int = 20,
         rrf_k: int = 60,
         use_reranker: bool = True,
+        use_chunking: bool = True,  # Default to Document-based for backwards compatibility
     ) -> None:
         """
         Parameters
@@ -116,25 +81,11 @@ class HybridRAGPipeline:
             The knowledge base records. Required for build(), optional for load().
         embedder : Embedder, optional
             Dense embedding model. Default: all-MiniLM-L6-v2 on CPU.
-        vector_store : FAISSVectorStore, optional
-            FAISS index. Created automatically if not provided.
-        bm25_index : BM25Index, optional
-            BM25 index. Created automatically if not provided.
-        reranker : CrossEncoderReranker, optional
-            Cross-encoder reranker. Default: ms-marco-MiniLM-L-12-v2 on CPU.
-            Set use_reranker=False to skip reranking (faster, slightly less accurate).
-        dense_top_k : int
-            How many results to retrieve from dense vector search (before fusion).
-            Default 50 is standard — captures enough candidates without being slow.
-        fusion_top_k : int
-            How many results to keep after RRF fusion (before reranking).
-            Default 20 gives the reranker good candidates to choose from.
-        rrf_k : int
-            RRF smoothing parameter. Default 60 is standard.
-        use_reranker : bool
-            If False, skip cross-encoder reranking. Use for speed-critical paths.
+        use_chunking : bool
+            If True, split records into separate Q and A chunks during indexing.
         """
         self._records: list[QARecord] | None = records
+        self.use_chunking = use_chunking
 
         # Embedding model (CPU-viable)
         self.embedder = embedder or Embedder()
@@ -157,11 +108,13 @@ class HybridRAGPipeline:
         self.fusion_top_k = fusion_top_k
         self.rrf_k = rrf_k
 
-        # In-memory doc lookup (doc_id → QARecord)
+        # In-memory lookups
         self._doc_map: dict[str, QARecord] = {}
+        self._chunk_map: dict[str, QAChunk] = {}
 
-        # Cached doc texts for reranker
+        # Cached index texts (used for reranker)
         self._doc_texts: dict[str, str] = {}
+        self._chunk_texts: dict[str, str] = {}
 
         # Build index immediately if records are provided
         if records:
@@ -169,55 +122,94 @@ class HybridRAGPipeline:
 
     def build(self) -> None:
         """
-        Build both the dense vector index and BM25 index from the knowledge base.
-
-        This is an offline operation — run once after data ingestion.
-
-        Raises
-        ------
-        ValueError
-            If no records were provided to the constructor.
+        Build both dense vector and BM25 indices.
+        Supports either Document or Chunk slicing based on self.use_chunking.
         """
         if not self._records:
             raise ValueError("No records provided. Pass records to constructor or call load().")
 
         records = self._records
 
-        # Build doc_id → record lookup
+        # Always build the parent doc map first
         self._doc_map = {r.question_id: r for r in records}
+        self._doc_texts = {r.question_id: r.document_content for r in records}
 
-        # Build doc_id → concatenated text lookup
-        self._doc_texts = {
-            r.question_id: r.document_content
-            for r in records
-        }
+        # Clear chunk mapping
+        self._chunk_map.clear()
+        self._chunk_texts.clear()
 
-        # ── 1. Dense vector embeddings ──────────────────────────────────────
-        doc_ids = [r.question_id for r in records]
-        texts = [r.document_content for r in records]
+        if self.use_chunking:
+            # ── 1. Chunk Generation ──────────────────────────────────────────
+            print(f"Generating chunks for {len(records):,} documents...")
+            chunks_list: list[QAChunk] = []
+            for r in records:
+                # Question Chunk
+                q_chunk = QAChunk(
+                    chunk_id=f"{r.question_id}_Q",
+                    parent_doc_id=r.question_id,
+                    chunk_type=ChunkType.QUESTION,
+                    chunk_text=f"QUESTION: {r.question_text}",
+                    metadata=r.metadata
+                )
+                # Answer Chunk
+                a_chunk = QAChunk(
+                    chunk_id=f"{r.question_id}_A",
+                    parent_doc_id=r.question_id,
+                    chunk_type=ChunkType.ANSWER,
+                    chunk_text=f"ANSWER: {r.answer_text}",
+                    metadata=r.metadata
+                )
+                chunks_list.extend([q_chunk, a_chunk])
 
-        print(f"Generating embeddings for {len(records):,} documents...")
-        t0 = time.perf_counter()
-        embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
-        embed_time = (time.perf_counter() - t0) * 1000
-        print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
+            self._chunk_map = {c.chunk_id: c for c in chunks_list}
+            self._chunk_texts = {c.chunk_id: c.chunk_text for c in chunks_list}
 
-        self.vector_store.build(doc_ids, embeddings)
+            # Dense Index Chunks
+            chunk_ids = [c.chunk_id for c in chunks_list]
+            texts = [c.chunk_text for c in chunks_list]
 
-        # ── 2. BM25 index ──────────────────────────────────────────────────
-        print(f"Building BM25 index for {len(records):,} documents...")
-        t0 = time.perf_counter()
-        bm25_docs = [
-            (r.question_id, r.question_text, r.answer_text)
-            for r in records
-        ]
-        self.bm25_index.build(bm25_docs)
-        bm25_time = (time.perf_counter() - t0) * 1000
-        print(f"  BM25 built in {bm25_time:.0f}ms")
+            print(f"Generating embeddings for {len(chunks_list):,} chunks...")
+            t0 = time.perf_counter()
+            embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
+            embed_time = (time.perf_counter() - t0) * 1000
+            print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
+
+            self.vector_store.build(chunk_ids, embeddings)
+
+            # BM25 Index Chunks
+            t0 = time.perf_counter()
+            bm25_docs = [
+                (c.chunk_id, "", c.chunk_text)
+                for c in chunks_list
+            ]
+            self.bm25_index.build(bm25_docs)
+            print(f"  BM25 built in {(time.perf_counter() - t0)*1000:.0f}ms")
+
+        else:
+            # ── 2. Standard Document Generation ─────────────────────────────
+            doc_ids = [r.question_id for r in records]
+            texts = [r.document_content for r in records]
+
+            print(f"Generating embeddings for {len(records):,} documents...")
+            t0 = time.perf_counter()
+            embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
+            embed_time = (time.perf_counter() - t0) * 1000
+            print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
+
+            self.vector_store.build(doc_ids, embeddings)
+
+            # BM25 Index Documents
+            t0 = time.perf_counter()
+            bm25_docs = [
+                (r.question_id, r.question_text, r.answer_text)
+                for r in records
+            ]
+            self.bm25_index.build(bm25_docs)
+            print(f"  BM25 built in {(time.perf_counter() - t0)*1000:.0f}ms")
 
         print(
-            f"✓ Hybrid RAG index built: {len(self):,} docs, "
-            f"dim={self._embedding_dim}, BM25 k1={self.bm25_index.k1}"
+            f"✓ Index built successfully: {len(self):,} units indexed, "
+            f"use_chunking={self.use_chunking}"
         )
 
     def retrieve(
@@ -226,28 +218,14 @@ class HybridRAGPipeline:
         top_k: int = 5,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
-        Retrieve top-K relevant Q&A records using hybrid retrieval.
-
-        Pipeline: embed query → dense search → BM25 search → RRF fusion
-                 → cross-encoder rerank → return structured records.
-
-        Parameters
-        ----------
-        query : str
-            The user's question.
-        top_k : int
-            Number of results to return.
-
-        Returns
-        -------
-        tuple[list[RetrievedResult], RetrievalTimings]
-            - List of RetrievedResult objects (original question + answer, not concatenated).
-            - Per-stage latency breakdown.
+        Retrieve relevant results.
+        If self.use_chunking is True, retrieval runs over chunks, RRFs them,
+        cross-encodes them, and then groups and merges them into standard RetrieveResults.
         """
         total_start = time.perf_counter()
         timings = RetrievalTimings()
 
-        # ── Stage 1: Dense vector retrieval ────────────────────────────────
+        # ── Stage 1: Dense Retrieval ───────────────────────────────────────
         t_embed = time.perf_counter()
         query_embedding = self.embedder.embed(query)
         timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
@@ -256,12 +234,12 @@ class HybridRAGPipeline:
         dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
         timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
 
-        # ── Stage 2: BM25 retrieval ──────────────────────────────────────
+        # ── Stage 2: BM25 Retrieval ────────────────────────────────────────
         t_bm25 = time.perf_counter()
         bm25_results = self.bm25_index.search(query, k=self.dense_top_k)
         timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
 
-        # ── Stage 3: RRF Fusion ───────────────────────────────────────────
+        # ── Stage 3: RRF Fusion ─────────────────────────────────────────────
         t_rrf = time.perf_counter()
         fused_results = RRF.fuse(
             [dense_results, bm25_results],
@@ -270,81 +248,141 @@ class HybridRAGPipeline:
         )
         timings.rrf_fusion_ms = (time.perf_counter() - t_rrf) * 1000
 
-        # ── Stage 4: Cross-encoder reranking ──────────────────────────────
+        # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
         if self.use_reranker and fused_results:
             t_rerank = time.perf_counter()
+            # Feed current text dictionary based on mode
+            active_texts = self._chunk_texts if self.use_chunking else self._doc_texts
+            
             reranked_results = self.reranker.rerank(
                 query=query,
                 candidates=fused_results,
                 k=top_k,
-                doc_texts=self._doc_texts,
+                doc_texts=active_texts,
             )
             timings.rerank_ms = (time.perf_counter() - t_rerank) * 1000
             final_results = reranked_results
         else:
-            # Skip reranking: take top_k from RRF fusion
             final_results = fused_results[:top_k]
 
-        # ── Stage 5: Build RetrievedResult objects ─────────────────────────
+        # ── Stage 5: Context Assembly & Document Re-Grouping ────────────────
         retrieved: list[RetrievedResult] = []
-        for rank, (doc_id, score) in enumerate(final_results):
-            record = self._doc_map.get(doc_id)
-            if record is None:
-                continue  # Skip if doc not found (shouldn't happen)
 
-            # Find the original scores from sub-systems
-            dense_score = next(
-                (s for d_id, s in dense_results if d_id == doc_id), None
-            )
-            bm25_score = next(
-                (s for d_id, s in bm25_results if d_id == doc_id), None
-            )
-            rrf_score = next(
-                (s for d_id, s in fused_results if d_id == doc_id), None
-            )
+        if self.use_chunking:
+            # Group retrieved chunks by parent document ID
+            grouped_chunks: dict[str, list[tuple[str, float]]] = {}
+            for chunk_id, score in final_results:
+                chunk = self._chunk_map.get(chunk_id)
+                if chunk is None:
+                    continue
+                parent_id = chunk.parent_doc_id
+                if parent_id not in grouped_chunks:
+                    grouped_chunks[parent_id] = []
+                grouped_chunks[parent_id].append((chunk_id, score))
 
-            retrieved.append(RetrievedResult(
-                doc_id=doc_id,
-                question=record.question_text,
-                answer=record.answer_text,
-                score=score,
-                retrieval_method="rrf_fusion",
-                metadata={
-                    "ministry": record.metadata.ministry,
-                    "subject": record.metadata.subject,
-                    "date": record.metadata.date,
-                    "question_type": (
-                        record.metadata.question_type.value
-                        if record.metadata.question_type else None
-                    ),
-                },
-                dense_score=dense_score,
-                bm25_score=bm25_score,
-                rrf_score=rrf_score,
-                rerank_score=score if self.use_reranker else None,
-            ))
+            # Assemble merged retrieved results
+            for parent_id, chunks in grouped_chunks.items():
+                record = self._doc_map.get(parent_id)
+                if record is None:
+                    continue
+
+                # Find which chunk types we retrieved
+                q_text = ""
+                a_text = ""
+                highest_score = max(score for _, score in chunks)
+
+                for chunk_id, _ in chunks:
+                    chunk = self._chunk_map[chunk_id]
+                    if chunk.chunk_type == ChunkType.QUESTION:
+                        q_text = chunk.chunk_text
+                    elif chunk.chunk_type == ChunkType.ANSWER:
+                        a_text = chunk.chunk_text
+
+                # Fallback to parent core strings if specific chunk was missed
+                if not q_text:
+                    q_text = f"QUESTION: {record.question_text}"
+                if not a_text:
+                    # Truncate fallback answers elegantly to preserve context budget
+                    a_text = f"ANSWER: {record.answer_text[:2000]} ... [Truncated to fit context budget]"
+
+                # Find standard scores from systems
+                dense_score = next((s for d_id, s in dense_results if d_id in [c[0] for c in chunks]), None)
+                bm25_score = next((s for d_id, s in bm25_results if d_id in [c[0] for c in chunks]), None)
+                rrf_score = next((s for d_id, s in fused_results if d_id in [c[0] for c in chunks]), None)
+
+                retrieved.append(RetrievedResult(
+                    doc_id=parent_id,
+                    question=q_text,
+                    answer=a_text,
+                    score=highest_score,
+                    retrieval_method="rrf_fusion:chunk_assembly",
+                    metadata={
+                        "ministry": record.metadata.ministry,
+                        "subject": record.metadata.subject,
+                        "date": record.metadata.date,
+                        "question_type": (
+                            record.metadata.question_type.value
+                            if record.metadata.question_type else None
+                        ),
+                    },
+                    dense_score=dense_score,
+                    bm25_score=bm25_score,
+                    rrf_score=rrf_score,
+                    rerank_score=highest_score if self.use_reranker else None,
+                ))
+        else:
+            # Standard document-level construction
+            for rank, (doc_id, score) in enumerate(final_results):
+                record = self._doc_map.get(doc_id)
+                if record is None:
+                    continue
+
+                dense_score = next((s for d_id, s in dense_results if d_id == doc_id), None)
+                bm25_score = next((s for d_id, s in bm25_results if d_id == doc_id), None)
+                rrf_score = next((s for d_id, s in fused_results if d_id == doc_id), None)
+
+                retrieved.append(RetrievedResult(
+                    doc_id=doc_id,
+                    question=record.question_text,
+                    answer=record.answer_text,
+                    score=score,
+                    retrieval_method="rrf_fusion",
+                    metadata={
+                        "ministry": record.metadata.ministry,
+                        "subject": record.metadata.subject,
+                        "date": record.metadata.date,
+                        "question_type": (
+                            record.metadata.question_type.value
+                            if record.metadata.question_type else None
+                        ),
+                    },
+                    dense_score=dense_score,
+                    bm25_score=bm25_score,
+                    rrf_score=rrf_score,
+                    rerank_score=score if self.use_reranker else None,
+                ))
 
         timings.total_ms = (time.perf_counter() - total_start) * 1000
 
         return retrieved, timings
 
     def save(self, path: str | Path) -> None:
-        """
-        Save the complete pipeline to disk.
-
-        Writes:
-        - {path}/vector_store.index + .ids (FAISS)
-        - {path}/bm25_index.pkl + .json
-        - {path}/doc_map.json (doc_id → record JSON)
-        - {path}/doc_texts.json (doc_id → concatenated text)
-        """
+        """Save the complete pipeline state to disk."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
         self.vector_store.save(path / "vector_store")
         self.bm25_index.save(path / "bm25_index")
 
-        # Save doc_map (simplified — just the fields needed for retrieval)
+        # Save metadata properties
+        meta = {
+            "use_chunking": self.use_chunking,
+            "embedding_dim": self._embedding_dim,
+        }
+        with open(path / "pipeline_metadata.json", "w") as f:
+            json.dump(meta, f)
+
+        # Save doc_map (portable JSON)
         import orjson
         doc_map_data = {
             doc_id: record.model_dump(mode="json")
@@ -353,18 +391,26 @@ class HybridRAGPipeline:
         with open(path / "doc_map.json", "wb") as f:
             f.write(orjson.dumps(doc_map_data))
 
-        # Save doc texts
-        with open(path / "doc_texts.json", "w", encoding="utf-8") as f:
-            import json
-            json.dump(self._doc_texts, f)
+        # Save chunk map
+        chunk_map_data = {
+            chunk_id: chunk.model_dump(mode="json")
+            for chunk_id, chunk in self._chunk_map.items()
+        }
+        with open(path / "chunk_map.json", "wb") as f:
+            f.write(orjson.dumps(chunk_map_data))
 
-        print(f"✓ Saved Hybrid RAG pipeline to {path}")
+        print(f"✓ Saved Hybrid RAG pipeline (use_chunking={self.use_chunking}) to {path}")
 
     def load(self, path: str | Path) -> None:
-        """
-        Load a previously saved pipeline from disk.
-        """
+        """Load a serialized pipeline state from disk."""
         path = Path(path)
+
+        # Load pipeline metadata
+        if (path / "pipeline_metadata.json").exists():
+            with open(path / "pipeline_metadata.json") as f:
+                meta = json.load(f)
+                self.use_chunking = meta.get("use_chunking", self.use_chunking)
+                self._embedding_dim = meta.get("embedding_dim", self._embedding_dim)
 
         self.vector_store = FAISSVectorStore(
             embedding_dim=self._embedding_dim,
@@ -383,22 +429,27 @@ class HybridRAGPipeline:
             doc_id: QARecord.model_validate(data)
             for doc_id, data in doc_map_data.items()
         }
+        self._doc_texts = {doc_id: r.document_content for doc_id, r in self._doc_map.items()}
 
-        # Load doc texts
-        with open(path / "doc_texts.json", encoding="utf-8") as f:
-            import json
-            self._doc_texts = json.load(f)
+        # Load chunk_map
+        if (path / "chunk_map.json").exists():
+            with open(path / "chunk_map.json", "rb") as f:
+                chunk_map_data = orjson.loads(f.read())
+            self._chunk_map = {
+                chunk_id: QAChunk.model_validate(data)
+                for chunk_id, data in chunk_map_data.items()
+            }
+            self._chunk_texts = {chunk_id: c.chunk_text for chunk_id, c in self._chunk_map.items()}
 
-        print(f"✓ Loaded Hybrid RAG pipeline from {path}")
+        print(f"✓ Loaded Hybrid RAG pipeline (use_chunking={self.use_chunking}) from {path}")
 
     def __len__(self) -> int:
-        """Return the number of indexed documents."""
+        """Return the number of parent indexed documents."""
         return len(self._doc_map)
 
     def __repr__(self) -> str:
         return (
             f"HybridRAGPipeline(n_docs={len(self)}, "
-            f"dense_top_k={self.dense_top_k}, "
-            f"fusion_top_k={self.fusion_top_k}, "
+            f"use_chunking={self.use_chunking}, "
             f"use_reranker={self.use_reranker})"
         )
