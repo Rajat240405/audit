@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -57,8 +55,8 @@ class ScrapingStats:
     http_errors: int = 0
     parse_errors: int = 0
     rate_limit_hits: int = 0
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
     @property
     def success_rate(self) -> float:
@@ -82,7 +80,7 @@ class IngestionStats(BaseModel):
     # Pipeline info
     pipeline_version: str = "1.0.0"
     generated_at: datetime = Field(default_factory=datetime.utcnow)
-    config_file: Optional[str] = None
+    config_file: str | None = None
     raw_data_source: str = "unknown"
 
     # Raw scraping stats (if scraped)
@@ -120,9 +118,9 @@ class IngestionStats(BaseModel):
     question_type_distribution: dict[str, int] = Field(default_factory=dict)
 
     # Files produced
-    raw_file: Optional[str] = None
-    processed_file: Optional[str] = None
-    enriched_file: Optional[str] = None
+    raw_file: str | None = None
+    processed_file: str | None = None
+    enriched_file: str | None = None
 
     # Errors and warnings
     validation_errors: list[str] = Field(default_factory=list)

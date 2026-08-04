@@ -15,7 +15,6 @@ The concatenated text is only used for indexing, never returned.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -48,19 +47,19 @@ class RetrievedResult:
     )
 
     # Optional: scores from each sub-system (for analysis)
-    dense_score: Optional[float] = field(
+    dense_score: float | None = field(
         default=None,
         metadata={"description": "Score from dense vector retrieval (if applicable)"}
     )
-    bm25_score: Optional[float] = field(
+    bm25_score: float | None = field(
         default=None,
         metadata={"description": "Score from BM25 retrieval (if applicable)"}
     )
-    rrf_score: Optional[float] = field(
+    rrf_score: float | None = field(
         default=None,
         metadata={"description": "RRF fusion score (if applicable)"}
     )
-    rerank_score: Optional[float] = field(
+    rerank_score: float | None = field(
         default=None,
         metadata={"description": "Cross-encoder rerank score (if applicable)"}
     )

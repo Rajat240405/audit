@@ -15,25 +15,21 @@ Run with: pytest tests/test_data_ingestion.py -v
 from __future__ import annotations
 
 import json
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-from dirty_equals import IsDatetime, IsPositive, IsStr
 
+from src.data.enricher import DataEnricher
+from src.data.loader import DataLoader
+from src.data.scraper import MockDataGenerator
+from src.data.validator import DataValidator
 from src.models.qa_record import (
     QARecord,
     QARecordMetadata,
     QuestionType,
-    AnswerStatus,
 )
-from src.models.statistics import IngestionStats, FieldStats, ScrapingStats
-from src.data.validator import DataValidator, ValidationReport, ValidationError_
-from src.data.enricher import DataEnricher, KNOWN_MINISTRIES
-from src.data.scraper import MockDataGenerator
-from src.data.loader import DataLoader
-
+from src.models.statistics import IngestionStats
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QARecord Model Tests

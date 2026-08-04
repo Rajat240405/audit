@@ -7,9 +7,8 @@ a unified interface for loading records for downstream pipelines.
 
 from __future__ import annotations
 
-import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator, Optional
 
 import orjson
 
@@ -34,7 +33,7 @@ class DataLoader:
     @staticmethod
     def load_jsonl(
         path: str | Path,
-        limit: Optional[int] = None,
+        limit: int | None = None,
     ) -> list[QARecord]:
         """
         Load records from a JSONL file.

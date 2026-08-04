@@ -15,25 +15,18 @@ Run with: pytest tests/test_hybrid_rag.py -v
 
 from __future__ import annotations
 
-import json
-import pickle
-import tempfile
-from pathlib import Path
-
 import numpy as np
 import pytest
 
+from src.generation.client import LLMResponse
+from src.generation.generator import SYSTEM_PROMPT, AnswerGenerator, build_user_prompt
 from src.models.qa_record import QARecord, QARecordMetadata
-from src.retrieval.result import RetrievedResult
-from src.retrieval.hybrid.embedder import Embedder
-from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.hybrid.bm25_index import BM25Index
+from src.retrieval.hybrid.embedder import Embedder
 from src.retrieval.hybrid.fusion import RRF
-from src.retrieval.hybrid.reranker import CrossEncoderReranker
-from src.retrieval.hybrid.pipeline import HybridRAGPipeline, RetrievalTimings
-from src.generation.generator import AnswerGenerator, build_user_prompt, SYSTEM_PROMPT
-from src.generation.client import LLMClient, LLMResponse
-
+from src.retrieval.hybrid.pipeline import HybridRAGPipeline
+from src.retrieval.hybrid.vector_store import FAISSVectorStore
+from src.retrieval.result import RetrievedResult
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures

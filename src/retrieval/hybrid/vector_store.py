@@ -30,13 +30,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import faiss
 import numpy as np
 import numpy.typing as npt
-
-from src.retrieval.result import RetrievedResult
 
 
 class FAISSVectorStore:
@@ -61,7 +58,7 @@ class FAISSVectorStore:
     def __init__(
         self,
         embedding_dim: int,
-        index_path: Optional[str] = None,
+        index_path: str | None = None,
     ) -> None:
         """
         Parameters
@@ -73,7 +70,7 @@ class FAISSVectorStore:
         """
         self.embedding_dim = embedding_dim
         self.index_path = Path(index_path) if index_path else None
-        self._index: Optional[faiss.Index] = None
+        self._index: faiss.Index | None = None
         self._doc_ids: list[str] = []
 
     def build(

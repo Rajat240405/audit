@@ -27,21 +27,16 @@ Key Design Decisions
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
-import numpy.typing as npt
 
 from src.models.qa_record import QARecord
-from src.retrieval.hybrid.embedder import Embedder
-from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.hybrid.bm25_index import BM25Index
+from src.retrieval.hybrid.embedder import Embedder
 from src.retrieval.hybrid.fusion import RRF
 from src.retrieval.hybrid.reranker import CrossEncoderReranker
+from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.result import RetrievedResult
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Timing dataclass
@@ -104,11 +99,11 @@ class HybridRAGPipeline:
 
     def __init__(
         self,
-        records: Optional[list[QARecord]] = None,
-        embedder: Optional[Embedder] = None,
-        vector_store: Optional[FAISSVectorStore] = None,
-        bm25_index: Optional[BM25Index] = None,
-        reranker: Optional[CrossEncoderReranker] = None,
+        records: list[QARecord] | None = None,
+        embedder: Embedder | None = None,
+        vector_store: FAISSVectorStore | None = None,
+        bm25_index: BM25Index | None = None,
+        reranker: CrossEncoderReranker | None = None,
         dense_top_k: int = 50,
         fusion_top_k: int = 20,
         rrf_k: int = 60,
@@ -139,7 +134,7 @@ class HybridRAGPipeline:
         use_reranker : bool
             If False, skip cross-encoder reranking. Use for speed-critical paths.
         """
-        self._records: Optional[list[QARecord]] = records
+        self._records: list[QARecord] | None = records
 
         # Embedding model (CPU-viable)
         self.embedder = embedder or Embedder()
@@ -202,22 +197,22 @@ class HybridRAGPipeline:
         texts = [r.document_content for r in records]
 
         print(f"Generating embeddings for {len(records):,} documents...")
-        t0 = time.monotonic()
+        t0 = time.perf_counter()
         embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
-        embed_time = (time.monotonic() - t0) * 1000
+        embed_time = (time.perf_counter() - t0) * 1000
         print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
 
         self.vector_store.build(doc_ids, embeddings)
 
         # ── 2. BM25 index ──────────────────────────────────────────────────
         print(f"Building BM25 index for {len(records):,} documents...")
-        t0 = time.monotonic()
+        t0 = time.perf_counter()
         bm25_docs = [
             (r.question_id, r.question_text, r.answer_text)
             for r in records
         ]
         self.bm25_index.build(bm25_docs)
-        bm25_time = (time.monotonic() - t0) * 1000
+        bm25_time = (time.perf_counter() - t0) * 1000
         print(f"  BM25 built in {bm25_time:.0f}ms")
 
         print(
@@ -253,38 +248,38 @@ class HybridRAGPipeline:
         timings = RetrievalTimings()
 
         # ── Stage 1: Dense vector retrieval ────────────────────────────────
-        t_embed = time.monotonic()
+        t_embed = time.perf_counter()
         query_embedding = self.embedder.embed(query)
-        timings.embed_query_ms = (time.monotonic() - t_embed) * 1000
+        timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
 
-        t_dense = time.monotonic()
+        t_dense = time.perf_counter()
         dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
-        timings.dense_search_ms = (time.monotonic() - t_dense) * 1000
+        timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
 
         # ── Stage 2: BM25 retrieval ──────────────────────────────────────
-        t_bm25 = time.monotonic()
+        t_bm25 = time.perf_counter()
         bm25_results = self.bm25_index.search(query, k=self.dense_top_k)
-        timings.bm25_search_ms = (time.monotonic() - t_bm25) * 1000
+        timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
 
         # ── Stage 3: RRF Fusion ───────────────────────────────────────────
-        t_rrf = time.monotonic()
+        t_rrf = time.perf_counter()
         fused_results = RRF.fuse(
             [dense_results, bm25_results],
             k=self.rrf_k,
             top_k=self.fusion_top_k,
         )
-        timings.rrf_fusion_ms = (time.monotonic() - t_rrf) * 1000
+        timings.rrf_fusion_ms = (time.perf_counter() - t_rrf) * 1000
 
         # ── Stage 4: Cross-encoder reranking ──────────────────────────────
         if self.use_reranker and fused_results:
-            t_rerank = time.monotonic()
+            t_rerank = time.perf_counter()
             reranked_results = self.reranker.rerank(
                 query=query,
                 candidates=fused_results,
                 k=top_k,
                 doc_texts=self._doc_texts,
             )
-            timings.rerank_ms = (time.monotonic() - t_rerank) * 1000
+            timings.rerank_ms = (time.perf_counter() - t_rerank) * 1000
             final_results = reranked_results
         else:
             # Skip reranking: take top_k from RRF fusion
@@ -329,7 +324,7 @@ class HybridRAGPipeline:
                 rerank_score=score if self.use_reranker else None,
             ))
 
-        timings.total_ms = (time.monotonic() - total_start) * 1000
+        timings.total_ms = (time.perf_counter() - total_start) * 1000
 
         return retrieved, timings
 

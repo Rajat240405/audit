@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from rich.console import Console
 
-from src.generation.client import LLMClient, LLMResponse
+from src.generation.client import LLMClient
 from src.retrieval.result import RetrievedResult
 
+console = Console()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt Templates
@@ -58,6 +59,7 @@ RULES:
 def build_user_prompt(
     question: str,
     retrieved_results: list[RetrievedResult],
+    max_doc_chars: int = 4000,  # Context budgeting character limit per document
 ) -> str:
     """
     Build the user prompt with retrieved context.
@@ -71,6 +73,8 @@ def build_user_prompt(
         The user's question.
     retrieved_results : list[RetrievedResult]
         Top-K retrieved Q&A records.
+    max_doc_chars : int
+        Maximum characters allowed per retrieved document's answer to enforce context budgeting.
 
     Returns
     -------
@@ -93,8 +97,15 @@ def build_user_prompt(
         if result.metadata.get("subject"):
             parts.append(f"Subject: {result.metadata['subject']}")
         parts.append("")
-        parts.append(f"QUESTION: {result.question}")
-        parts.append(f"ANSWER: {result.answer}")
+
+        # Enforce context budgeting via intelligent truncation
+        q_text = result.question
+        a_text = result.answer
+        if len(a_text) > max_doc_chars:
+            a_text = a_text[:max_doc_chars] + " ... [Truncated to fit context budget]"
+
+        parts.append(f"QUESTION: {q_text}")
+        parts.append(f"ANSWER: {a_text}")
         parts.append("")
         parts.append("-" * 70)
 
@@ -173,9 +184,10 @@ class AnswerGenerator:
 
     def __init__(
         self,
-        llm_client: Optional[LLMClient] = None,
-        system_prompt: Optional[str] = None,
+        llm_client: LLMClient | None = None,
+        system_prompt: str | None = None,
         max_context_docs: int = 5,
+        max_doc_chars: int = 4000,  # Enforce context budget character limit per document
     ) -> None:
         """
         Parameters
@@ -188,10 +200,13 @@ class AnswerGenerator:
             Maximum number of retrieved docs to include in context.
             More docs = better coverage but higher prompt tokens.
             Default 5 is a good balance.
+        max_doc_chars : int
+            Maximum characters allowed per retrieved document to preserve relevant context.
         """
         self.llm_client = llm_client or LLMClient()
         self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.max_context_docs = max_context_docs
+        self.max_doc_chars = max_doc_chars
 
     def generate(
         self,
@@ -231,8 +246,33 @@ class AnswerGenerator:
                 prompt="",
             )
 
-        # Build prompt
-        user_prompt = build_user_prompt(question, context)
+        # Build user prompt with our intelligent character truncation limit
+        user_prompt = build_user_prompt(question, context, self.max_doc_chars)
+
+        # ── Audit timing, sizes, and context window compatibility ──
+        total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+        char_count = len(total_prompt_text)
+        token_estimate = char_count // 4
+
+        console.print(f"[bold cyan][Generation Audit][/bold cyan] Prompt size: {char_count:,} chars | Estimated tokens: {token_estimate:,}")
+        
+        # Check context window constraint safely (defends against MagicMock during tests)
+        effective_window = getattr(self.llm_client, "num_ctx", 8192)
+        if not isinstance(effective_window, (int, float)):
+            effective_window = 8192
+
+        if token_estimate > effective_window:
+            console.print(f"[bold yellow]⚠ Warning: Prompt size ({token_estimate:,} tokens) exceeds effective context window ({effective_window:,} tokens)! Silent truncation may occur on the client server.[/bold yellow]")
+        else:
+            console.print(f"[green]✓ Prompt size is well within effective context window ({token_estimate:,} / {effective_window:,} tokens).[/green]")
+
+        # Save exact prompt sent to LLM to the root directory for immediate audit inspection
+        try:
+            with open("generation_prompt_debug.txt", "w", encoding="utf-8") as f:
+                f.write(total_prompt_text)
+            console.print("[dim green]✓ Saved exact prompt to 'generation_prompt_debug.txt' for audit.[/dim green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not save prompt to debug file: {e}[/yellow]")
 
         # Generate
         start_time = time.monotonic()

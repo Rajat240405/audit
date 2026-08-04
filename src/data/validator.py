@@ -25,18 +25,16 @@ Design Decisions
 
 from __future__ import annotations
 
-import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any
 
 from pydantic import ValidationError
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.models.qa_record import QARecord
-from src.models.statistics import FieldStats, IngestionStats, ScrapingStats
+from src.models.statistics import FieldStats, IngestionStats
 
 console = Console()
 
@@ -48,7 +46,7 @@ class ValidationError_:
     question_id: str
     field: str
     message: str
-    raw_value: Optional[str] = None
+    raw_value: str | None = None
 
 
 @dataclass

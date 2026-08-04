@@ -31,8 +31,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from src.retrieval.result import RetrievedResult
-
 
 class RRF:
     """
@@ -58,7 +56,7 @@ class RRF:
     def fuse(
         result_lists: list[list[tuple[str, float]]],
         k: int = DEFAULT_K,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> list[tuple[str, float]]:
         """
         Combine ranked result lists using Reciprocal Rank Fusion.
@@ -116,7 +114,7 @@ class RRF:
     def fuse_with_metadata(
         result_lists: list[list[tuple[str, float, dict]]],
         k: int = DEFAULT_K,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> list[tuple[str, float]]:
         """
         RRF fusion when results carry additional metadata (scores per system).
@@ -142,4 +140,3 @@ class RRF:
 
 
 # Re-export Optional from typing for the class
-from typing import Optional

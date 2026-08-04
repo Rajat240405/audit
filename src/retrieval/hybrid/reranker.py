@@ -35,11 +35,7 @@ Nogueira et al. (2020). "Document Ranking with a Pretrained Sequence-to-Sequence
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
-
 import numpy as np
-import numpy.typing as npt
 from sentence_transformers import CrossEncoder
 
 from src.retrieval.result import RetrievedResult
@@ -68,7 +64,7 @@ class CrossEncoderReranker:
     def __init__(
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
-        device: Optional[str] = None,
+        device: str | None = None,
         max_length: int = 512,
     ) -> None:
         """
@@ -89,7 +85,7 @@ class CrossEncoderReranker:
         self.model_name = model_name
         self.device = device or "cpu"
         self.max_length = max_length
-        self._model: Optional[CrossEncoder] = None
+        self._model: CrossEncoder | None = None
 
     @property
     def model(self) -> CrossEncoder:
@@ -107,7 +103,7 @@ class CrossEncoderReranker:
         query: str,
         candidates: list[tuple[str, float] | RetrievedResult],
         k: int = 5,
-        doc_texts: Optional[dict[str, str]] = None,
+        doc_texts: dict[str, str] | None = None,
     ) -> list[tuple[str, float]]:
         """
         Re-rank candidates using the cross-encoder.
@@ -158,9 +154,7 @@ class CrossEncoderReranker:
         )
 
         # Handle numpy array return type
-        if hasattr(scores, "tolist"):
-            scores = scores.tolist()
-        elif isinstance(scores, np.ndarray):
+        if hasattr(scores, "tolist") or isinstance(scores, np.ndarray):
             scores = scores.tolist()
 
         # Pair with doc_ids and sort by cross-encoder score
@@ -203,9 +197,7 @@ class CrossEncoderReranker:
             query_doc_pairs,
             show_progress_bar=False,
         )
-        if hasattr(scores, "tolist"):
-            scores = scores.tolist()
-        elif isinstance(scores, np.ndarray):
+        if hasattr(scores, "tolist") or isinstance(scores, np.ndarray):
             scores = scores.tolist()
 
         results = [

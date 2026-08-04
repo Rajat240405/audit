@@ -1,0 +1,545 @@
+SYSTEM PROMPT:
+You are an expert parliamentary research assistant answering questions about Indian government policies, schemes, and administrative matters based ONLY on the provided Question & Answer context.
+
+RULES:
+1. Answer using ONLY the information in the provided context below.
+2. If the context does not contain enough information to answer, say: "The provided context does not contain sufficient information to answer this question."
+3. Do NOT hallucinate or make up facts, statistics, or claims not present in the context.
+4. Quote or paraphrase relevant passages from the context in your answer.
+5. If multiple context items are relevant, synthesize information from all of them.
+6. Keep your answer concise, factual, and directly responsive to the question.
+
+USER PROMPT:
+Below is the most relevant parliamentary Question & Answer context retrieved for your question.
+
+======================================================================
+RETRIEVED CONTEXT (5 records):
+======================================================================
+
+[Source 1] (ID: 18-6-1392)
+Ministry: COMMERCE AND INDUSTRY
+Subject: Industrial Parks
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF COMMERCE & INDUSTRY 
+DEPARTMENT FOR PROMOTION OF INDUSTRY AND INTERNAL TRADE 
+ 
+LOK SABHA 
+ 
+UNSTARRED QUESTION NO. 1392. 
+TO BE ANSWERED ON TUESDAY, THE 09TH DECEMBER, 2025. 
+ 
+INDUSTRIAL PARKS 
+ 
+1392.  SHRI PUTTA MAHESH KUMAR: 
+SHRI PRABHAKAR REDDY VEMIREDDY: 
+ 
+Will the Minister of COMMERCE AND INDUSTRY be pleased to state: 
+वाणिज्य  एवं उद्योग मंत्री 
+(a)  the details and total number of Industrial Parks proposed, under construction 
+and presently functional in the country, State-wise, especially in Andhra 
+Pradesh; 
+ 
+(b)  the details regarding the total volume and value of products manufactured at 
+Industrial Parks in the country during the last five years, State -wise especially 
+in Andhra Pradesh; 
+ 
+(c)  whether the Government has designated any industrial parks for the  
+production/manufacture of specific products, if so, the details thereof, State -
+wise especially in Andhra Pradesh; and 
+ 
+(d)  whether the Government has any plans on increasing the number of industr ial 
+parks in the country, if so, the details of the potential locations being considered, 
+State-wise especially in Andhra Pradesh?
+ANSWER: ANSWER 
+ 
+वाणिज्य  एवं उद्योग मंत्रालय में राज्य मंत्री (श्री णिणिन प्रसाद)   
+THE MINISTER OF STATE IN THE MINISTRY OF COMMERCE & INDUSTRY 
+(SHRI JITIN PRASADA) 
+ 
+(a) to (d): Industries is a state subject. Government of India, through Department for 
+Promotion of Industry and Internal Trade (DPIIT) and other Central 
+Ministries/Departments provides an enabling ecosystem for overall industrial 
+development in the country through appropriate policy interventions. 
+DPIIT has built a centralized system for capturing information regarding 
+industrial parks through the India Industrial Land Bank portal wherein details 
+are updated by concerned States at regular intervals. The state -wise and 
+sector-wise details of Industrial Parks is available on the portal and can be 
+accessed at https://indiaindustriallandbank.gov.in/exploreParkReport. 
+The state wise details of industrial parks across the country and sector wise 
+details of industrial parks in Andhra Pradesh are enclosed at Annexure -I and 
+Annexure-II respect ively. Various ministries have reported funding 
+establishment of sector specific parks across the country including in Andhra 
+Pradesh. The list of these parks is enclosed at Annexure-III. 
+****** 
+ 
+ 
+ 
+ ANNEXURE-I 
+ 
+ANNEXURE REFERRED TO IN REPLY TO PARTS (a ) to (d) OF THE LOK SABHA  
+UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
+ 
+The state wise details of number of Industrial Parks across the country:  
+ 
+S. 
+No. Name of state  Number of parks 
+1 ANDAMAN & NICOBAR 6 
+2 ANDHRA PRADESH 638 
+3 ARUNACHAL PRADESH 18 
+4 ASSAM 58 
+5 BIHAR 82 
+6 CHANDIGARH 7 
+7 CHHATTISGARH 114 
+8 DADRA & NAGAR HAVELI and DAMAN & DIU 10 
+9 DELHI 68 
+10 GOA 27 
+11 GUJARAT 285 
+12 HARYANA 46 
+13 HIMACHAL PRADESH 64 
+14 JAMMU & KASHMIR 137 
+15 JHARKHAND 206 
+16 KARNATAKA 384 
+17 KERALA 140 
+18 LADAKH 9 
+19 LAKSHADWEEP 9 
+20 MADHYA PRADESH 145 
+21 MAHARASHTRA 527 
+22 MANIPUR 7 
+23 MEGHALAYA 9 
+24 MIZORAM 8 
+25 NAGALAND 6 
+26 ODISHA 147 
+27 PUDUCHERRY 11 
+28 PUNJAB 67 
+29 RAJASTHAN 460 
+30 SIKKIM 5 
+31 TAMIL NADU 372 
+32 TELANGANA 169 
+33 TRIPURA 20 
+34 UTTAR PRADESH 284 
+35 UTTARAKHAND 35 
+36 WEST BENGAL 17 
+Grand Total 4597 
+ 
+******* ANNEXURE-II 
+ 
+ANNEXURE REFERRED TO IN REPLY TO PARTS (a ) to (d) OF THE LOK SABHA  
+UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
+ 
+Sector wise details of Industrial Parks in Andhra Pradesh: 
+ 
+S. 
+No. Sector No. of Parks 
+1 Automobiles 2 
+2 Chemicals 2 
+3 Construction 1 
+4 Electronics Hardware 7 
+5 Engineering 1 
+6 Food Processing 12 
+7 Gems and Jewellery 1 
+8 Leather 1 
+9 Metals 553 
+10 Mixed 36 
+11 Pharmaceuticals 8 
+12 Renewable Energy 1 
+13 Textiles 13 
+                        Total 638 
+ 
+******* 
+ 
+  ANNEXURE-III 
+ 
+ANNEXURE REFERRED TO IN REPLY TO PARTS (a) to (d) OF THE LOK SABHA 
+UNSTARRED QUESTION NO. 1392 FOR ANSWER ON 09.12.2025. 
+Sector specific parks reported by various Ministries across the country including Andhra 
+Pradesh:  
+ 
+A. Ministry of Food Processing Industries: 
+ 
+S. No. SPV/IA Name State/ UT Name 
+1 Srini Food Park Pvt Ltd Andhra Pradesh 
+2 Godavari Mega Aqua Food Park Pvt Ltd Andhra Pradesh 
+3 Andhra Pradesh Industrial Infrastructure Corporation Ltd (APIIC) Andhra Pradesh 
+4 Rongoge Mega Food Park Pvt Ltd Arunachal Pradesh 
+5 North East Mega Food Park Ltd Assam 
+6 Bihar Industrial Area Development Authority (BIADA) Bihar 
+7 Pristine Mega Food Park Pvt Ltd Bihar 
+8 Indus Best Mega Food Park Pvt Ltd Chhattisgarh 
+9 Gujarat Agro Infrastructure Mega Food Park Pvt Ltd Gujarat 
+10 Fanidhar Mega Food Park Pvt Ltd Gujarat 
+11 Haryana State Cooperative Supply and Marketing Federation Ltd 
+(HAFED) 
+Haryana 
+12 Haryana State Industrial and Infrastructure Development 
+Corporation Ltd (HSIIDC) 
+Haryana 
+13 Cremica Food Park Pvt Ltd Himachal Pradesh 
+14 RFK Greens Food Park Pvt Ltd Jammu & Kashmir 
+15 Integrated Food Park Ltd Karnataka 
+16 Favorich Infra Pvt Ltd Karnataka 
+17 Kerala Industrial Infrastructure 
+Development Corporation (KINFRA) 
+Kerala 
+18 Kerala State Industrial De ... [Truncated to fit context budget]
+
+----------------------------------------------------------------------
+[Source 2] (ID: 18-4-3628)
+Ministry: HEALTH AND FAMILY WELFARE
+Subject: Multi-Drug Resistant Tuberculosis
+
+QUESTION: GOVERNMENT OF INDIA
+MINISTRY OF HEALTH AND FAMILYWELFARE
+DEPARTMENT OF HEALTH AND FAMILYWELFARE
+LOK SABHA
+UNSTARRED QUESTION NO. 3628
+TO BE ANSWERED ON 21ST MARCH, 2025
+MULTI-DRUG RESISTANT TUBERCULOSIS
+†3628. SMT. KAMLESH JANGDE:
+SHRI BALABHADRA MAJHI:
+SHRI RAJKUMAR CHAHAR:
+DR. HEMANT VISHNU SA V ARA:
+SHRI SHANKAR LALWANI:
+SHRI NABA CHARAN MAJHI:
+SHRI TAPIR GAO:
+SHRI DHARAMBIR SINGH:
+DR. RAJESH MISHRA:
+SHRI CAPTAIN BRIJESH CHOWTA:
+SHRI SHRIRANG APPACHANDU BARNE:
+SHRI PRA VEENPATEL:
+SHRI JANARDAN MISHRA:
+SHRI SURESH KUMAR KASHYAP:
+SHRI ARUN GOVIL:
+SHRI JASWANTSINH SUMANBHAI BHABHOR:
+SHRI BIDYUT BARAN MAHATO:
+SHRI LUMBA RAM CHAUDHARY:
+SHRI GAJENDRA SINGH PATEL:
+SMT. MAHIMA KUMARI MEWAR:
+SHRI CHA VDAVINOD LAKHAMSHI:
+SMT. KAMALJEET SEHRAWAT:
+SHRI PRADEEP KUMAR SINGH:
+SHRI KANWAR SINGH TANWAR:
+SMT. BHARTI PARDHI:
+SHRI BHOJRAJ NAG:
+SHRI YOGENDER CHANDOLIA:
+SHRI TRIVENDRA SINGH RAWAT:
+SHRI P P CHAUDHARY:
+DR. K SUDHAKAR:
+SHRI DINESHBHAI MAKWANA:
+SHRI JAI PRAKASH:
+SHRI DILIP SAIKIA:
+SHRI MANOJ TIWARI:
+Will the Minister of HEALTH AND FAMILYWELFARE be pleased to state:
+(a) whether the Government has launched TB Free India Campaign across the country and if
+so, the details thereof;
+(b) the steps taken/proposed to be taken by the Government to ensure that TB patients
+complete their treatment plan in cases of Multi Drug-resistant tuberculosis (MDR-TB)where completing the full course of treatment is a significant challenge alongwith the
+details of funding being made available in this regard;
+(c) the primary target for TB Free India Campaign alongwith the targeted year for achieving
+the same;
+(d) the manner in which TB Free India Campaign addresses the challenges of Multi Drug
+resistant tuberculosis (MDR-TB);
+(e) the specific awareness campaigns and interventions being undertaken to reduce TB
+stigma and encourage seeking early healthcare behaviour particularly in Amroha
+Parliamentary Constituency of Uttar Pradesh along with the number of awareness or
+health camps organised in Sidhi Parliamentary Constituency under the TB Free India
+Campaign; and
+(f) whether the Government is considering procurement and deployment of additional
+portable/handheld X-ray equipments in areas with higher number of TB disease
+particularly in the said Constituency and if so, the details thereof?
+ANSWER: ANSWER
+THE MINISTER OF STATEIN THE MINISTRY OF HEALTH AND FAMILYWELFARE
+(SMT. ANUPRIYAPATEL)
+(a) to (f) The Government has launched a 100-Day TB Mukt Bharat Abhiyan in identified
+347 priority districts across 33 State/UTs, to accelerate the endeavour to achieve Sustainable
+Development Goals related to TB. Under the campaign in 347 districts (7th Dec 2024 – 14th
+Mar 2025), 9.02 crore vulnerable individuals were screened and 3.01 lakh new TB cases
+identified, while 1.58 lakh TB patients successfully completed their treatment.
+The Government, under the National TB Elimination Program (NTEP), has implemented a
+multi-pronged strategy to ensure Multi Drug Resistant TB (MDR-TB) patients complete their
+treatment. In view of the challenges in diagnosis and treatment to MDR-TB cases, the
+Government has taken following specific measures:
+● Universal Drug Susceptibility Testing (UDST) is implemented to ensure every
+diagnosed TB patient is tested for drug resistance at the time of diagnosis.
+● Scaling up molecular diagnostic laboratories to 8,295 Nucleic Acid Amplification
+Test (NAAT) machines to cover all districts of the country.
+● 100 Line Probe Assay and 69 liquid culture testing laboratories have been established
+for diagnosis of multi drug resistance.
+● 6 National Reference Laboratories and 34 Intermediate Reference Laboratories have
+been established in the country.
+● 826 Drug Resistant TB treatment centres have been established across all districts.
+● In 2021, shorter, safer, all oral drug resistant TB treatment regimen has been
+introduced.
+● In 2024, a newer, shorter and more efficacious treatment regimen (BPaLM) consisting
+of four-drug combination – Bedaquiline, Pretomanid, Linezolid and Moxifloxacin has
+been introduced for management of drug-resistant TB Universal● A nutritional support scheme implemented for providing ₹1000 per month to all TB
+patients, including MDR-TB cases, throughout treatment.
+The primary target of 100 Days intensified TB Mukt Bharat Abhiyan launched on 7th
+December 2024, is to detect TB cases early, reduce TB related mortality and prevent new
+cases among the vulnerable population.
+As part of Jan Bhagidari, efforts have been made for a whole of government approach to raise
+awareness, reduce stigma and improve health seeking behaviour among the vulnerable
+population. Through this campaign, vulnerable population were mobilized with the
+involvement of private sector, civil society organizations, local community volunteers and
+health workers in all focus districts, including Amroha district of Uttar Pradesh and Sidhi
+district of Madhya Pradesh.
+During the campaign period, 4,324 and 2,456 Ni-kshay shivirs were reported to have been
+organised in Amroha and Sidhi districts, respectively, for providing awareness and screening
+the vulnerable population.
+To enhance the availability of hand-held X-rays in high burden areas, the government has
+approved procurement for central supplies. In addition, based on need, adequate provisions
+for procurement have been made through National Health Mission for State/UTs.
+*****
+
+----------------------------------------------------------------------
+[Source 3] (ID: 18-5-4550)
+Ministry: PERSONNEL, PUBLIC GRIEVANCES AND PENSIONS
+Subject: Family Pension to Divorced Daughters
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF PERSONNEL, PUBLIC GRIEVANCES AND PENSIONS 
+(DEPARTMENT OF PENSION & PENSIONERS’ WELFARE) 
+ 
+LOK SABHA  
+UNSTARRED QUESTION NO. 4550 
+(ANSWERED ON 20.08.2025) 
+ 
+FAMILY PENSION TO DIVORCED DAUGHTERS 
+†4550. SHRI ANIL FIROJIYA: 
+SHRI ALOK SHARMA: 
+ 
+Will the PRIME MINISTER be pleased to state: 
+ 
+(a) the steps taken by the Government to ensure that a divorced daughter of a Government servant 
+is eligible to receive family pension; 
+(b) whether the family pension is admissible in case the daughter gets divorced after the death of 
+both parents and if so, the details thereof; 
+(c) whether a daughter is eligible to receive family pension if she is widowed or divorced after the 
+retirement of the Government servant; and 
+(d) if so, the details thereof?
+ANSWER: ANSWER 
+MINISTER OF STATE IN THE MINISTRY OF PERSONNEL, PUBLIC GRIEVANCES 
+AND PENSIONS AND MINISTER OF STATE IN THE PRIME MINISTER’S OFFICE 
+(DR. JITENDRA SINGH) 
+(a) to (d): Department of Pension and Pensioners’ Welfare (DoPPW) has notified the Central 
+Civil Service (Pension) Rules, 2021. Various provisions have been incorporated in these rules 
+and in the Office Memorandum No. F. No.1/1(1)/2022-P&PW(E) dated 26.10.2022 issued 
+subsequently to ensure that a divorced/widowed daughter of a deceased Government employee 
+or pensioner covered under these rules gets family pension on her turn. The same provisions as 
+described hereunder are provided under separate Rules for Railway and Defence employees and 
+pensioners. In terms of these rules: 
+ 
+ Where a deceased Government employee or pensioner is not survived by a spouse or son 
+or daughter eligible for family pension or if they die or cease to fulfil the eligibility conditions 
+for family pension prescribed in the above mentioned rules and there is no disabled child eligible 
+to receive family pension, the family pension shall be granted or continued to be payable to an 
+unmarried or widowed or divorced daughter beyond the age of twenty-five years for life or until 
+she gets married or re-married or until she starts earning her livelihood, whichever is the earliest 
+subject to the conditions like  the unmarried or widowed or divorced daughter was dependent on 
+her parent or parents when he or she or  they were alive.  Further, in the case of widowed 
+daughter, death of her husband and in the case of divorced daughter, her divorce took place or 
+the divorce proceedings filed in a competent court during the lifetime of the Government servant 
+or pensioner or his or her spouse. 
+ 
+******
+
+----------------------------------------------------------------------
+[Source 4] (ID: 18-6-0002)
+Ministry: ENVIRONMENT, FOREST AND CLIMATE CHANGE
+Subject: Revised Greenbelt and Plantation Norms for Sustainable Industrial Growth
+
+QUESTION: OIH 
+GOVERNMENT OF INDIA 
+MINISTRY OF ENVIRONMENT, FOREST AND CLIMATE CHANGE 
+ 
+LOK SABHA 
+UNSTARRED QUESTION NO. 2 
+TO BE ANSWERED ON 01.12.2025 
+ 
+Revised Greenbelt and Plantation Norms for Sustainable Industrial Growth 
+ 
+2.    SHRI DILESHWAR KAMAIT: 
+SHRI NALIN SOREN: 
+SHRI BASAVARAJ BOMMAI: 
+SHRI VISHWESHWAR HEGDE KAGERI: 
+SHRI P C MOHAN: 
+SHRI VIJAY BAGHEL: 
+SMT. KAMALJEET SEHRAWAT: 
+SHRI ALOK SHARMA: 
+SHRI NABA CHARAN MAJHI: 
+SHRI HASMUKHBHAI SOMABHAI PATEL: 
+SHRI MITESH PATEL BAKABHAI: 
+SHRI ASHISH DUBEY: 
+SMT. MAHIMA KUMARI MEWAR: 
+SHRI KALI CHARAN SINGH:  
+ 
+Will the Minister of ENVIRONMENT, FOREST AND CLIMATE CHANGE be pleased  to 
+state:  
+(a)     the details of the revised greenbelt and plantation norms notified by the Government for 
+new  industrial estates, parks and individual industrial projects under the Environmental 
+Clearance framework; 
+(b)    the rationale behind revising the earlier requiremen t of 33 per cent green cover to the 
+present norms; 
+(c)    the details of the steps taken/being taken by the Government to ensure that the revised 
+norms continue to promote sustainable industrial growth; 
+(d)    whether the Government is also revising greenb elt and distance norms for new oil and 
+gas terminals in view of rapid urbanisation in the cities; and 
+(e)    if so, the details thereof and the manner in which the said project is likely to benefit 
+Jabalpur and Mewar Lok Sabha Constituencies in Madhya Prad esh and Rajasthan 
+respectively?
+ANSWER: ANSWER 
+ 
+MINISTER OF STATE IN THE MINISTRY OF ENVIRONMENT, FOREST AND 
+CLIMATE CHANGE  
+(SHRI KIRTI VARDHAN SINGH) 
+ 
+ (a)  In order to rationalise  the green belt requirement based on pollution potential, the 
+Ministry vide OM dated 29.10.2025 has directed that the revised criteria for developing green 
+belt/green cover for Industrial Estates/Parks and individual industries may be adhered to in 
+supersession of the OM dated 27th October, 2020. The revised criteria, inter -alia, mandates 
+that in Industrial Estates a minimum of 10% of the area of the industrial estate shall be 
+designated as common green area and respective red categor y and orange category Industrial  
+ 
+units within the Estate shall develop 15% and 10% of the area of their premises as  green 
+belt/green cover respectively. Further , for individual industrial units outside the Industrial 
+Estates, red and orange category industries are required to de velop 25% and 20% green 
+belt/green cover in their respective premises which may be reduced by 5% each if they are not 
+predominantly air polluting industries. With regard to green and white industries it has been 
+directed that development of green belt/green cover is optional with no mandatory requirement, 
+except for green category industries with air pollution score ≥25, in which case such industries 
+shall develop 10% green belt/green cover within their respective premises. 
+ 
+(b)  There was a need to strike a balance between the requirement of land for the 
+Projects/Activities and the environmental needs of the green belt  along with the existing 
+pollution control and abatement measures prescribed under the general and specific conditions 
+forming part of the prior Environmental Clearance issued in accordance with the provisions of 
+EIA Notification 2006 as amended, so as to optimize the use of available land . Therefore, it 
+was decided to rationalize the green belt requirement based on pollution potential.  The 
+rationalization of green belt/green cover was done based on the recommendations of a 
+Committee, which was, inter alia , based on examining various International norms for 
+developing green belt/green cover.    The rationale for the revised green belt/green cover norms 
+is that industries with higher pollution potential such as red category industries and orange 
+category industries need to develop more percentage of green belt in order to mitigate the 
+pollution that emerges from the industrial activity.     
+ 
+(c) to (e)  The Central Government has ensured that the revised green belt/green cover norms 
+are implemented with a monitoring mechanism which ensures that the industrial estates shall 
+submit a half yearly green belt status report to the State Pollution Control Boards 
+(SPCB)/Pollution Control Committees (PCC) and the Integrated Regional Office (IRO) of 
+MoEFCC, informing canopy coverage, number of living trees, height and species, survival rate, 
+etc. with drone imagery. The individual industrial units also need to submit half yearly reports 
+on their green belt areas, including total area covered, number of trees, species types, and other 
+relevant details, as part of their environmental statements to the respective SPCB/PCC. The 
+green belt details submitted by the Industrial Estate will be verified by IRO and SPCB/ PCC 
+on yearly basis. The green belt details of individual units will also be verified by SPCB/PCC 
+on random basis at time of inspections. 
+ 
+The revised green belt norms shall be applicable to all the projects across the country, 
+including those in Jabalpur and Mewar Lok  Sabha Constituencies in Madhya Pradesh and 
+Rajasthan respectively. The revised norms provide the benefit of additional land area to 
+industries to expand their operations  without compromising the environmental needs of 
+developing green belt/ green cover.   
+********
+
+----------------------------------------------------------------------
+[Source 5] (ID: 18-5-1526)
+Ministry: AGRICULTURE AND FARMERS WELFARE
+Subject: Increasing the Ambit of PMFBY
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF AGRICULTURE AND FARMERS WELFARE 
+DEPARTMENT OF AGRICULTURE AND FARMERS WELFARE 
+ 
+LOK SABHA 
+UNSTARRED QUESTION NO. 1526 
+TO BE ANSWERED ON THE 29TH JULY, 2025 
+ 
+INCREASING THE AMBIT OF PMFBY 
+ 
+1526  SHRI MANISH JAISWAL 
+            SHRI CHAVAN RAVINDRA VASANTRAO 
+            SHRI SUDHEER GUPTA 
+ 
+Will the Minister of AGRICULTURE AND FARMERS WELFARE कृ ͪष एवं ͩकसान कãयाण मंğी be 
+pleased to state:  
+ 
+(a)  whether many States and Union Territories are still out of the ambit of Pradhan Mantri Fasal 
+Bima Yojana (PMFBY) ; 
+ 
+(b) if so, whether the Union Government has held any meetings/deliberations with the 
+States/Union Territories which have not adopted the PMFBY; 
+ 
+(c)  if so, the details thereof and the outcome of the said deliberations; 
+ 
+(d)  whether the Union Government has conducted any survey to find the lacunae in the PMFBY 
+and if so, the details thereof; and 
+< (e)  the details of changes incorporated by the Union Government to increase the ambit of this 
+scheme along with the funds sanctioned for the said scheme during the present financial year?
+ANSWER: ANSWER 
+ 
+THE MINISTER OF STATE FOR AGRICULTURE AND FARMERS WELFARE  
+ 
+कृ ͪष एवं ͩकसान कãयाण राÏय मंğी   (SHRI  RAMNATH THAKUR) 
+ 
+(a) to (c): The PMFBY, introduced in the country from Kharif 2016 season, is available for all 
+States/UTs and is voluntary for States as well as farmers. States/UTs are free to subscribe 
+under the scheme keeping in view their risk perception and financial considerations etc. Since 
+inception of the scheme 27 States/UTs have implemented the scheme in one or more seasons. 
+Some States/UTs like Bihar, Telangana, Andhra Pradesh, Jharkhand, West Bengal and Gujarat 
+have opted out of the scheme after implementing it for some seasons due to their own reasons. 
+Due to the efforts of Ministry of Agriculture & Farmers Welfare, Andhra Pradesh and Jharkhand 
+have re-joined the scheme while Telangana has announced joining the scheme.  
+       Department is regularly persuading the non-implementing States to participate in the 
+scheme by writing at the highest levels, in one to one meetings as well as National Review 
+Conferences. As a result, many States/UTs including Bihar, Mizoram and Ladakh have 
+expressed keenness in joining the scheme. 
+   
+(d) & (e): The review/revisions / rationalization / improvements in the crop insurance schemes 
+is a continuous process and decision on suggestion/ representations/ recommendations of the 
+stakeholders/studies are taken from time to time.   Based on the experience gained, views of 
+various stakeholders and with a view to ensure better transparency, accountability, timely 
+payment of claims to the farmers and to make the scheme more farmer friendly, Government 
+has periodically revised the Operational Guidelines of the PMFBY comprehensively to ensure 
+that the eligible benefits under the scheme reach the farmers timely and transparently. Various 
+performance evaluation studies have also been conducted on the implementation of crop 
+insurance to examine various aspects of implementation of crop insurance Scheme. Based on 
+the recommendations of the various studies/ reports, the Scheme has brought in various 
+technological interventions like YES-TECH, WINDS, etc. The details of technological 
+interventions in the Scheme are as under:   
+ 
+a)  YES-Tech (Yield Estimation based on Technology)- is a technology based yield 
+estimation mechanism which has been developed after 2 years of rigorous testing and pilot runs 
+across 100 districts of the country. Crop Loss assessment and Yield estimation assisted by data 
+inputs from such as Remote Sensing indices, Weather indices, crop phenological information, 
+soil types etc. using approved Technologies/Approaches   
+ 
+b)  WINDS (Weather Information Network & Data System)- is again a pioneering initiative of 
+the country to set-up a network of Automatic Weather Stations & Rain Gauges at Taluk/Block 
+and Gram Panchayat level to create a strong database of hyper-local weather data for the 
+different Govt. and other entities to use for all farmer and farming oriented services.  
+ 
+c)  National Crop Insurance Portal (NCIP)- is developed by the government as a single 
+source of data which ensures subsidy payment, coordination, transparency, dissemination of 
+information and delivery of services including direct online enrolment of farmers, 
+uploading/obtaining individual insured farmer’s details for better monitoring and to ensure 
+transfer of claim amount electronically to the individual farmer’s Bank Account. 
+ 
+d)  Digi-Claim-Payment Module – is a dedicated module operationalised for payment of claims 
+from Kharif 2022 onwards in order to rigorously monitor the claim disbursal process. It involves 
+the integration of National Crop Insurance Portal (NCIP) with Public Finance Management 
+System (PFMS) and accounting system of Insurance Companies to provide timely & transparent 
+processing of all claims. 
+ 
+e)  AIDE (App for Intermediary Enrolment): A smart-phone App has been designed and rolled 
+out in Kharif 2023 for enrolment of far ... [Truncated to fit context budget]
+
+----------------------------------------------------------------------
+
+======================================================================
+USER QUESTION:
+======================================================================
+GST collection
+
+======================================================================
+ANSWER:
+======================================================================

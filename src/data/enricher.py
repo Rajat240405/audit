@@ -26,11 +26,8 @@ Design Decisions
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Optional
 
-from src.models.qa_record import QARecord, QuestionType, AnswerStatus
-
+from src.models.qa_record import QARecord, QuestionType
 
 # Curated list of Lok Sabha ministries — used for validation and extraction
 KNOWN_MINISTRIES = [
@@ -241,7 +238,7 @@ class DataEnricher:
         if self._should_fill(record.metadata.subject):
             record.metadata.subject = self._extract_subject(combined_text)
 
-    def _should_fill(self, current_value: Optional[str | int]) -> bool:
+    def _should_fill(self, current_value: str | int | None) -> bool:
         """Return True if we should try to fill this field."""
         if self.strict:
             return True
@@ -251,7 +248,7 @@ class DataEnricher:
         str_val = str(current_value).strip() if current_value else ""
         return str_val == ""
 
-    def _extract_ministry(self, text: str) -> Optional[str]:
+    def _extract_ministry(self, text: str) -> str | None:
         """Extract ministry name from question text."""
         text_lower = text.lower()
         for pattern in MINISTRY_PATTERNS:
@@ -281,7 +278,7 @@ class DataEnricher:
                         return v
         return None
 
-    def _extract_date(self, text: str) -> Optional[str]:
+    def _extract_date(self, text: str) -> str | None:
         """Extract date from text in ISO format."""
         for pattern, fmt in DATE_PATTERNS:
             match = pattern.search(text)
@@ -306,7 +303,7 @@ class DataEnricher:
                     continue
         return None
 
-    def _extract_question_number(self, text: str) -> Optional[int]:
+    def _extract_question_number(self, text: str) -> int | None:
         """Extract question number from question text."""
         for pattern in QUESTION_NUM_PATTERNS:
             match = pattern.search(text)
@@ -317,7 +314,7 @@ class DataEnricher:
                     continue
         return None
 
-    def _extract_session(self, text: str) -> Optional[int]:
+    def _extract_session(self, text: str) -> int | None:
         """Extract parliamentary session number from text."""
         for pattern in SESSION_PATTERNS:
             match = pattern.search(text)
@@ -341,7 +338,7 @@ class DataEnricher:
                 return qtype
         return QuestionType.UNKNOWN
 
-    def _extract_subject(self, text: str) -> Optional[str]:
+    def _extract_subject(self, text: str) -> str | None:
         """Extract a high-level subject/topic from question text."""
         scores: dict[str, int] = {}
         for subject, keywords in SUBJECT_KEYWORDS.items():

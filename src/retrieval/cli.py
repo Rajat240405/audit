@@ -11,18 +11,17 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from rich.syntax import Syntax
+from rich.table import Table
 
 from src.data.loader import DataLoader
-from src.retrieval.hybrid.pipeline import HybridRAGPipeline
-from src.generation.generator import AnswerGenerator
 from src.generation.client import LLMClient
+from src.generation.generator import AnswerGenerator
+from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 
 console = Console()
 
@@ -32,7 +31,7 @@ console = Console()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_pipeline(
-    data_file: Optional[str] = None,
+    data_file: str | None = None,
     index_dir: str = "storage/hybrid_rag",
     force_rebuild: bool = False,
 ) -> HybridRAGPipeline:
@@ -99,7 +98,7 @@ def build(data_file: str, index_dir: str, rebuild: bool) -> None:
 @click.option("--no-generate", is_flag=True, help="Skip LLM generation (retrieval only)")
 @click.option("--show-prompt", is_flag=True, help="Show the full LLM prompt")
 @click.option("--show-trace", is_flag=True, help="Show retrieval trace")
-@click.option("--llm-model", type=str, default="qwen2.5:7b", help="LLM model name")
+@click.option("--llm-model", type=str, default="qwen2.5:3b", help="LLM model name")
 def query(
     question: str,
     top_k: int,
@@ -283,7 +282,7 @@ def benchmark() -> None:
         )
 
     import statistics
-    console.print(f"\n[bold]Results:[/bold]")
+    console.print("\n[bold]Results:[/bold]")
     console.print(f"  Mean latency:  {statistics.mean(timings_list):.1f}ms")
     console.print(f"  Median latency: {statistics.median(timings_list):.1f}ms")
     console.print(f"  Min latency:    {min(timings_list):.1f}ms")

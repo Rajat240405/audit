@@ -17,18 +17,16 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import click
 import yaml
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 
-from src.data.scraper import ScraperFactory, MockScraper, LocalFileScraper
-from src.data.validator import DataValidator, ValidationReport
 from src.data.enricher import DataEnricher
 from src.data.loader import DataLoader
+from src.data.scraper import ScraperFactory
+from src.data.validator import DataValidator
 from src.models.qa_record import QARecord
 from src.models.statistics import IngestionStats
 
@@ -104,35 +102,20 @@ class IngestionPipeline:
     def run(
         self,
         target_count: int = 3500,
-        strategy: str = "auto",
-        local_file: Optional[str] = None,
+        strategy: str = "archive",
+        local_file: str | None = None,
         skip_enrichment: bool = False,
         skip_scraping: bool = False,
         overwrite: bool = False,
+        use_pdf: bool = True,  # Added here
     ) -> IngestionStats:
         """
         Run the full ingestion pipeline.
-
-        Parameters
-        ----------
-        target_count : int
-            Target number of Q&A records.
-        strategy : str
-            Scraping strategy: "auto", "playwright", "httpx", "mock", "local"
-        local_file : str, optional
-            Path to local file if strategy="local"
-        skip_enrichment : bool
-            Skip metadata enrichment stage.
-        skip_scraping : bool
-            Use existing raw data (don't scrape).
-        overwrite : bool
-            Overwrite existing output files.
-
-        Returns
-        -------
-        IngestionStats
-            Complete statistics from all pipeline stages.
         """
+        # Map strategies for backward compatibility
+        if strategy in ("auto", "httpx", "playwright"):
+            strategy = "live"
+
         console.print()
         console.print(Panel.fit(
             "[bold cyan]Phase 1: Data Ingestion Pipeline[/bold cyan]\n"
@@ -173,6 +156,7 @@ class IngestionPipeline:
                 ),
                 strategy=strategy,
                 local_file=local_file,
+                use_pdf=use_pdf,
             ).create_scraper()
 
             scraper_stats_start = datetime.utcnow()
@@ -355,8 +339,8 @@ def cli() -> None:
 )
 @click.option(
     "--strategy", "-s",
-    default="auto",
-    type=click.Choice(["auto", "playwright", "httpx", "mock", "local"]),
+    default="archive",
+    type=click.Choice(["auto", "playwright", "httpx", "mock", "local", "live", "archive"]),
     help="Scraping strategy.",
 )
 @click.option(
@@ -380,6 +364,11 @@ def cli() -> None:
     help="Overwrite existing output files.",
 )
 @click.option(
+    "--use-pdf/--no-pdf",
+    default=True,
+    help="Whether to download and parse official PDFs (default: True).",
+)
+@click.option(
     "--config", "-c",
     type=str,
     default="config/ingestion.yaml",
@@ -388,11 +377,12 @@ def cli() -> None:
 def ingest(
     count: int,
     strategy: str,
-    local_file: Optional[str],
+    local_file: str | None,
     skip_enrichment: bool,
     skip_scraping: bool,
     overwrite: bool,
     config: str,
+    use_pdf: bool,  # Added here
 ) -> None:
     """Run the Phase 1 data ingestion pipeline."""
     try:
@@ -409,6 +399,7 @@ def ingest(
             skip_enrichment=skip_enrichment,
             skip_scraping=skip_scraping,
             overwrite=overwrite,
+            use_pdf=use_pdf,  # Passed here
         )
         console.print("\n[bold green]✓ Phase 1 ingestion complete![/bold green]")
     except Exception as e:

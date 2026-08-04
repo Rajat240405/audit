@@ -27,7 +27,7 @@ import hashlib
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -62,33 +62,33 @@ class QARecordMetadata(BaseModel):
     These fields may be absent when scraped from raw pages.
     """
 
-    ministry: Optional[str] = Field(
+    ministry: str | None = Field(
         default=None,
         description="Ministry/department to which the question was addressed",
         examples=["Finance", "Health and Family Welfare"],
     )
-    date: Optional[str] = Field(
+    date: str | None = Field(
         default=None,
         description="Date the question was asked (or answered session date)",
         examples=["2023-03-14", "14 March 2023"],
     )
-    session: Optional[int] = Field(
+    session: int | None = Field(
         default=None,
         description="Parliamentary session number",
         ge=1,
         examples=[17, 18],
     )
-    sitting: Optional[int] = Field(
+    sitting: int | None = Field(
         default=None,
         description="Sitting number within the session",
         ge=1,
     )
-    question_number: Optional[int] = Field(
+    question_number: int | None = Field(
         default=None,
         description="Question number within the session",
         ge=1,
     )
-    subject: Optional[str] = Field(
+    subject: str | None = Field(
         default=None,
         description="Subject/topic classification of the question",
         examples=["Malaria Control", "Rural Electrification"],
@@ -101,12 +101,12 @@ class QARecordMetadata(BaseModel):
         default=AnswerStatus.ANSWERED,
         description="Whether the answer was provided",
     )
-    source_url: Optional[str] = Field(
+    source_url: str | None = Field(
         default=None,
         description="Original source URL on sansad.in",
         examples=["https://sansad.in/ls/questions/questions-and-answers/..."],
     )
-    parliament_number: Optional[int] = Field(
+    parliament_number: int | None = Field(
         default=None,
         description="Lok Sabha parliament number (e.g., 17th Lok Sabha)",
         ge=1,
@@ -230,7 +230,7 @@ class QARecord(BaseModel):
         ).hexdigest()[:16]
 
     @model_validator(mode="after")
-    def auto_generate_question_id(self) -> "QARecord":
+    def auto_generate_question_id(self) -> QARecord:
         """
         Auto-generate question_id if not meaningfully set.
 

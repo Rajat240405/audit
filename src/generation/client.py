@@ -30,14 +30,10 @@ Design Decisions
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
 
 import httpx
-
-from src.retrieval.result import RetrievedResult
 
 
 @dataclass
@@ -51,7 +47,7 @@ class LLMResponse:
     total_tokens: int
     latency_ms: float
     finish_reason: str = "stop"
-    raw_response: Optional[dict] = None
+    raw_response: dict | None = None
 
 
 class LLMClient:
@@ -75,11 +71,12 @@ class LLMClient:
     def __init__(
         self,
         provider: str = "ollama",
-        model: str = "qwen2.5:7b",
-        base_url: Optional[str] = None,
+        model: str = "qwen2.5:3b",
+        base_url: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
         timeout_seconds: int = 120,
+        num_ctx: int = 8192,  # Configurable context window to avoid truncation
     ) -> None:
         """
         Parameters
@@ -98,6 +95,8 @@ class LLMClient:
             Maximum completion tokens. Controls response length.
         timeout_seconds : int
             Request timeout. Ollama can be slow on CPU-only systems.
+        num_ctx : int
+            Size of the LLM context window to prevent silent truncation of long contexts.
         """
         if provider not in self.PROVIDERS:
             raise ValueError(
@@ -109,6 +108,7 @@ class LLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
+        self.num_ctx = num_ctx
 
         if base_url:
             self.base_url = base_url.rstrip("/")
@@ -124,7 +124,7 @@ class LLMClient:
     def _generate_ollama(
         self,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Generate using Ollama's REST API."""
@@ -137,6 +137,7 @@ class LLMClient:
             "options": {
                 "temperature": self.temperature,
                 "num_predict": self.max_tokens,
+                "num_ctx": self.num_ctx,  # Explicitly pass the budget context limit to avoid silent truncations
             },
         }
 
@@ -173,7 +174,7 @@ class LLMClient:
     def _generate_openai(
         self,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Generate using OpenAI's Chat Completions API."""
@@ -238,7 +239,7 @@ class LLMClient:
     def generate(
         self,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         **kwargs,
     ) -> LLMResponse:
         """

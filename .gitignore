@@ -1,0 +1,51 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.*
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# Local data and generated outputs
+*.log
+*.sqlite3
+*.db
+*.jsonl
+*.parquet
+*.pkl
+*.pickle
+
+# Project-specific generated artifacts
+storage/
+data/raw/
+data/processed/
+data/enriched/
+evaluation_results/
+benchmarks/
+
+# OS files
+.DS_Store
+Thumbs.db
