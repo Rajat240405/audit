@@ -1,4 +1,6 @@
-# Python bytecode and caches
+# ==========================
+# Python
+# ==========================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,43 +11,104 @@ venv/
 env/
 ENV/
 
-# Environment files
-.env
-.env.*
+# ==========================
+# IDE
+# ==========================
+.vscode/
+.idea/
+*.code-workspace
 
-# Test and coverage artifacts
+# ==========================
+# OS
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Pytest / Coverage
+# ==========================
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
+.cache/
 
-# Build and distribution
+# ==========================
+# Type checkers / Linters
+# ==========================
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+
+# ==========================
+# Logs
+# ==========================
+*.log
+logs/
+
+# ==========================
+# Environment
+# ==========================
+.env
+.env.*
+!.env.example
+
+# ==========================
+# HuggingFace / Model cache
+# ==========================
+.huggingface/
+hf_cache/
+.cache/huggingface/
+
+# ==========================
+# Generated data
+# ==========================
+data/raw/
+data/intermediate/
+data/enriched/
+data/downloads/
+
+# Keep the data folder structure
+!data/.gitkeep
+
+# ==========================
+# Generated retrieval indexes
+# ==========================
+storage/
+faiss/
+indexes/
+
+# If you want folder preserved
+!storage/.gitkeep
+
+# ==========================
+# Temporary debug files
+# ==========================
+generation_prompt_debug.txt
+
+# ==========================
+# PDFs for testing
+# ==========================
+test.pdf
+
+# ==========================
+# Build artifacts
+# ==========================
 build/
 dist/
 *.egg-info/
-*.egg
 
-# IDE/editor files
-.vscode/
-.idea/
-
-# Local data and generated outputs
-*.log
-*.sqlite3
-*.db
-*.jsonl
-*.parquet
-*.pkl
-*.pickle
-
-# Project-specific generated artifacts
-storage/
-data/raw/
-data/processed/
-data/enriched/
-evaluation_results/
-benchmarks/
-
-# OS files
-.DS_Store
-Thumbs.db
+# ==========================
+# Runtime files
+# ==========================
+*.pid
+*.tmp
+*.bak

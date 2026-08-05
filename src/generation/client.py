@@ -1,37 +1,23 @@
 """
-LLM client using Ollama for local inference.
+LLM client using Ollama, OpenAI, and Groq for provider-agnostic inference.
 
 Design Decisions
 ----------------
-1. We use a thin wrapper around Ollama's REST API via httpx.
-   This avoids the Ollama Python SDK dependency and gives us
-   full control over the API contract.
-
-2. Ollama is preferred for this project because:
-   - All inference stays on-premise (important for government data)
-   - No API costs or rate limits
-   - Full control over model selection
-   - The RTX 3050 Mobile can run Qwen2.5:7B-Q4_K_M
-
-3. We implement structured JSON output parsing as a fallback
-   when JSON mode is not available.
-
-4. Streaming is supported but not required for Phase 2.
-   The generate() method returns the full response.
-
-5. Token counting is estimated using a simple heuristic:
-   ~4 characters per token for English text. This is approximate
-   but sufficient for cost estimation and latency analysis.
-
-6. We use the `liteLLM` package as an alternative if the user
-   wants to swap between Ollama and OpenAI API easily.
-   The interface is designed to be LiteLLM-compatible.
+1. PROVIDER ABSTRACTION: Exposes a unified interface for both local (Ollama)
+   and cloud (OpenAI, Groq) LLM backends.
+2. ZERO INFRASTRUCTURE OVERHEAD: Groq is compatible with the standard OpenAI REST contract,
+   allowing us to route Groq requests through a shared endpoint while changing only the
+   target endpoint URL and API Key in memory.
+3. HEALTH CHECKS: Proactively queries endpoints to detect if a service is online
+   or if authentication credentials are valid.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
+from typing import Any, Optional
 
 import httpx
 
@@ -52,51 +38,30 @@ class LLMResponse:
 
 class LLMClient:
     """
-    LLM client for parliamentary Q&A answer generation.
-
-    Supports Ollama (local) as the primary backend.
-    Can be extended to support OpenAI, Anthropic, etc.
-
-    Usage
-    -----
-    ```python
-    client = LLMClient(provider="ollama", model="qwen2.5:7b")
-    response = client.generate("What is malaria?")
-    print(response.text)
-    ```
+    Provider-agnostic LLM client for parliamentary grounded generation.
+    Supports Ollama (local), OpenAI, and Groq (cloud).
+    Delegates implementation to the ProviderRegistry in Phase 10.
     """
 
-    PROVIDERS = ["ollama", "openai", "litellm"]
+    PROVIDERS = ["ollama", "openai", "groq", "litellm"]
 
     def __init__(
         self,
         provider: str = "ollama",
-        model: str = "qwen3:8b",
+        model: str = "qwen2.5:7b",
         base_url: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
-        timeout_seconds: int = 600,
-        num_ctx: int = 8192,  # Configurable context window to avoid truncation
+        timeout_seconds: int = 120,
+        num_ctx: int = 8192,
     ) -> None:
         """
         Parameters
         ----------
         provider : str
-            LLM provider: "ollama" (local) or "openai" (cloud).
+            LLM provider: "ollama", "groq", "openai".
         model : str
-            Model name. For Ollama: "qwen2.5:7b", "llama3.2:3b", etc.
-            For OpenAI: "gpt-4o-mini", "gpt-4o", etc.
-        base_url : str, optional
-            API base URL. Default for Ollama: http://localhost:11434
-        temperature : float
-            Sampling temperature. 0.0 = deterministic (best for RAG).
-            Range: 0.0–2.0. Default 0.1 is near-deterministic.
-        max_tokens : int
-            Maximum completion tokens. Controls response length.
-        timeout_seconds : int
-            Request timeout. Ollama can be slow on CPU-only systems.
-        num_ctx : int
-            Size of the LLM context window to prevent silent truncation of long contexts.
+            Model name. For Ollama: "qwen2.5:7b", etc. For Groq: "llama-3.3-70b-versatile", etc.
         """
         if provider not in self.PROVIDERS:
             raise ValueError(
@@ -109,6 +74,7 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
         self.num_ctx = num_ctx
+        self.api_key: str | None = None  # In-memory runtime session key storage
 
         if base_url:
             self.base_url = base_url.rstrip("/")
@@ -116,6 +82,8 @@ class LLMClient:
             self.base_url = "http://localhost:11434"
         elif provider == "openai":
             self.base_url = "https://api.openai.com/v1"
+        elif provider == "groq":
+            self.base_url = "https://api.groq.com/openai/v1"
         else:
             self.base_url = "http://localhost:8000"
 
@@ -127,7 +95,7 @@ class LLMClient:
         system: str | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """Generate using Ollama's REST API."""
+        """Generate using Ollama's REST API (kept for backward-compatibility)."""
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
         payload = {
@@ -137,7 +105,7 @@ class LLMClient:
             "options": {
                 "temperature": self.temperature,
                 "num_predict": self.max_tokens,
-                "num_ctx": self.num_ctx,  # Explicitly pass the budget context limit to avoid silent truncations
+                "num_ctx": self.num_ctx,
             },
         }
 
@@ -169,15 +137,16 @@ class LLMClient:
             raw_response=data,
         )
 
-    # ── OpenAI Implementation ─────────────────────────────────────────────
+    # ── OpenAI / Groq Compatible Implementation ───────────────────────────
 
-    def _generate_openai(
+    def _generate_openai_compatible(
         self,
         prompt: str,
         system: str | None = None,
+        api_key: str | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """Generate using OpenAI's Chat Completions API."""
+        """Generate using OpenAI-compatible Chat Completions endpoints (kept for backward-compatibility)."""
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -190,7 +159,8 @@ class LLMClient:
             "max_tokens": self.max_tokens,
         }
 
-        api_key = kwargs.get("api_key") or self._get_api_key()
+        # Resolve API Key
+        resolved_key = api_key or self._get_api_key()
 
         start_time = time.monotonic()
 
@@ -199,7 +169,7 @@ class LLMClient:
                 f"{self.base_url}/chat/completions",
                 json=payload,
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {resolved_key}",
                     "Content-Type": "application/json",
                 },
             )
@@ -224,13 +194,13 @@ class LLMClient:
         )
 
     def _get_api_key(self) -> str:
-        """Get API key from environment."""
-        import os
-        key = os.environ.get("OPENAI_API_KEY", "")
+        """Get API key from environment (kept for backward-compatibility)."""
+        env_var = "OPENAI_API_KEY" if self.provider == "openai" else "GROQ_API_KEY"
+        key = os.environ.get(env_var, "")
         if not key:
             raise ValueError(
-                "OpenAI API key not found. "
-                "Set OPENAI_API_KEY environment variable."
+                f"{self.provider.upper()} API key not found in environment. "
+                f"Set the {env_var} environment variable."
             )
         return key
 
@@ -240,43 +210,69 @@ class LLMClient:
         self,
         prompt: str,
         system: str | None = None,
+        api_key: str | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
-        Generate a response from the LLM.
-
-        Parameters
-        ----------
-        prompt : str
-            The user prompt (query + context).
-        system : str, optional
-            System prompt for instructions/context.
-        **kwargs
-            Additional provider-specific arguments.
-
-        Returns
-        -------
-        LLMResponse
-            Contains the generated text and metadata.
+        Generate a response from the currently selected provider using the Provider Registry.
         """
+        from src.generation.registry import provider_registry
+
+        resolved_key = api_key or self.api_key
+        prov_inst = provider_registry.get(self.provider)
+        if prov_inst:
+            return prov_inst.generate(
+                model=self.model,
+                prompt=prompt,
+                system=system,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                num_ctx=self.num_ctx,
+                api_key=resolved_key,
+                timeout_seconds=self.timeout_seconds,
+                **kwargs
+            )
+
+        # Fallback to direct inline check if provider was not in registry
         if self.provider == "ollama":
             return self._generate_ollama(prompt, system, **kwargs)
-        elif self.provider == "openai":
-            return self._generate_openai(prompt, system, **kwargs)
+        elif self.provider in ("openai", "groq"):
+            if self.provider == "openai":
+                self.base_url = "https://api.openai.com/v1"
+            else:
+                self.base_url = "https://api.groq.com/openai/v1"
+            return self._generate_openai_compatible(prompt, system, api_key=resolved_key, **kwargs)
         else:
             raise ValueError(f"Provider {self.provider!r} not implemented yet.")
 
-    def check_health(self) -> bool:
-        """Check if the LLM service is reachable."""
+    def check_health(self, api_key: str | None = None) -> bool:
+        """Check if the selected LLM service is reachable/authorized using Provider Registry."""
+        from src.generation.registry import provider_registry
+
+        resolved_key = api_key or self.api_key
+        prov_inst = provider_registry.get(self.provider)
+        if prov_inst:
+            return prov_inst.health(api_key=resolved_key)
+
         try:
             with httpx.Client(timeout=5) as client:
                 if self.provider == "ollama":
                     response = client.get(f"{self.base_url}/api/tags")
                     return response.status_code == 200
                 elif self.provider == "openai":
+                    resolved_key = resolved_key or os.environ.get("OPENAI_API_KEY", "")
                     response = client.get(
                         f"{self.base_url}/models",
-                        headers={"Authorization": f"Bearer {self._get_api_key()}"},
+                        headers={"Authorization": f"Bearer {resolved_key}"},
+                    )
+                    return response.status_code == 200
+                elif self.provider == "groq":
+                    resolved_key = resolved_key or os.environ.get("GROQ_API_KEY", "")
+                    if not resolved_key:
+                        return False
+                    response = client.get(
+                        f"{self.base_url}/models",
+                        headers={"Authorization": f"Bearer {resolved_key}"},
                     )
                     return response.status_code == 200
             return False
@@ -288,6 +284,5 @@ class LLMClient:
         """
         Estimate token count from text.
         Simple heuristic: ~4 characters per token for English.
-        More accurate with tiktoken, but we don't require it.
         """
         return max(1, len(text) // 4)

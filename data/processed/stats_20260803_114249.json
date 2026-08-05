@@ -1,0 +1,89 @@
+{
+  "pipeline_version": "1.0.0",
+  "generated_at": "2026-08-03 11:42:49.827097",
+  "config_file": "config\\ingestion.yaml",
+  "raw_data_source": "archive",
+  "scraping": {
+    "pages_scraped": 0,
+    "question_links_found": 0,
+    "individual_pages_attempted": 5,
+    "individual_pages_success": 5,
+    "individual_pages_failed": 0,
+    "http_errors": 0,
+    "parse_errors": 0,
+    "rate_limit_hits": 0,
+    "started_at": "2026-08-03T11:42:49.837802",
+    "completed_at": "2026-08-03T11:43:24.821532",
+    "success_rate": 1.0,
+    "duration_seconds": 34.98
+  },
+  "total_raw_records": 5,
+  "total_valid_records": 5,
+  "total_invalid_records": 0,
+  "duplicates_removed": 0,
+  "unique_records": 5,
+  "question_id_stats": {
+    "present": 5,
+    "missing": 0,
+    "unique": 5,
+    "total": 5,
+    "presence_rate": 1.0
+  },
+  "question_text_stats": {
+    "present": 5,
+    "missing": 0,
+    "total": 5,
+    "presence_rate": 1.0
+  },
+  "answer_text_stats": {
+    "present": 5,
+    "missing": 0,
+    "total": 5,
+    "presence_rate": 1.0
+  },
+  "ministry_stats": {
+    "present": 5,
+    "missing": 0,
+    "total": 5,
+    "presence_rate": 1.0
+  },
+  "date_stats": {
+    "present": 5,
+    "missing": 0,
+    "unique": 0,
+    "total": 5
+  },
+  "subject_stats": {
+    "present": 5,
+    "missing": 0,
+    "unique": 0,
+    "total": 5
+  },
+  "source_url_stats": {
+    "present": 5,
+    "missing": 0,
+    "unique": 0,
+    "total": 5
+  },
+  "question_type_stats": {},
+  "avg_question_length_chars": 1049.6,
+  "avg_answer_length_chars": 3235.0,
+  "min_question_length_chars": 687,
+  "max_question_length_chars": 2125,
+  "min_answer_length_chars": 1056,
+  "max_answer_length_chars": 6289,
+  "ministry_distribution": {
+    "CONSUMER AFFAIRS, FOOD AND PUBLIC DISTRIBUTION": 1,
+    "CORPORATE AFFAIRS": 2,
+    "TEXTILES": 1,
+    "EDUCATION": 1
+  },
+  "question_type_distribution": {
+    "starred": 5
+  },
+  "raw_file": "data\\raw\\raw_20260803_114249.jsonl",
+  "processed_file": "data\\processed\\processed_20260803_114249.jsonl",
+  "enriched_file": "data\\enriched\\enriched_20260803_114249.jsonl",
+  "validation_errors": [],
+  "processing_warnings": []
+}

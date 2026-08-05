@@ -80,7 +80,7 @@ class HybridRAGPipeline:
         records : list[QARecord], optional
             The knowledge base records. Required for build(), optional for load().
         embedder : Embedder, optional
-            Dense embedding model. Default: all-MiniLM-L6-v2 on CPU.
+            Dense embedding model. Default: BAAI/bge-m3 on CPU.
         use_chunking : bool
             If True, split records into separate Q and A chunks during indexing.
         """
@@ -172,7 +172,7 @@ class HybridRAGPipeline:
 
             print(f"Generating embeddings for {len(chunks_list):,} chunks...")
             t0 = time.perf_counter()
-            embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
+            embeddings = self.embedder.embed_batch(texts, batch_size=8, show_progress=True)
             embed_time = (time.perf_counter() - t0) * 1000
             print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
 
@@ -196,7 +196,7 @@ class HybridRAGPipeline:
 
             print(f"Generating embeddings for {len(records):,} documents...")
             t0 = time.perf_counter()
-            embeddings = self.embedder.embed_batch(texts, batch_size=32, show_progress=True)
+            embeddings = self.embedder.embed_batch(texts, batch_size=1, show_progress=True)
             embed_time = (time.perf_counter() - t0) * 1000
             print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
 
@@ -222,9 +222,7 @@ class HybridRAGPipeline:
         top_k: int = 5,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
-        Retrieve relevant results.
-        If self.use_chunking is True, retrieval runs over chunks, RRFs them,
-        cross-encodes them, and then groups and merges them into standard RetrieveResults.
+        Retrieve relevant results with standardized runtime logging (Phase 11).
         """
         total_start = time.perf_counter()
         timings = RetrievalTimings()
@@ -237,13 +235,13 @@ class HybridRAGPipeline:
         t_dense = time.perf_counter()
         dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
         timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
-        print(f"[DEBUG LOG] Number of chunk candidates returned by dense retrieval: {len(dense_results)}")
+        print(f"Dense candidates : {len(dense_results)}")
 
         # ── Stage 2: BM25 Retrieval ────────────────────────────────────────
         t_bm25 = time.perf_counter()
         bm25_results = self.bm25_index.search(query, k=self.dense_top_k)
         timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
-        print(f"[DEBUG LOG] Number of chunk candidates returned by BM25: {len(bm25_results)}")
+        print(f"BM25 candidates : {len(bm25_results)}")
 
         # ── Stage 3: RRF Fusion ─────────────────────────────────────────────
         t_rrf = time.perf_counter()
@@ -253,12 +251,11 @@ class HybridRAGPipeline:
             top_k=self.fusion_top_k,
         )
         timings.rrf_fusion_ms = (time.perf_counter() - t_rrf) * 1000
-        print(f"[DEBUG LOG] Number of candidates after RRF: {len(fused_results)}")
+        print(f"RRF candidates : {len(fused_results)}")
 
         # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
         if self.use_reranker and fused_results:
             t_rerank = time.perf_counter()
-            # Feed current text dictionary based on mode
             active_texts = self._chunk_texts if self.use_chunking else self._doc_texts
             
             reranked_results = self.reranker.rerank(
@@ -271,7 +268,7 @@ class HybridRAGPipeline:
             final_results = reranked_results
         else:
             final_results = fused_results[:top_k]
-        print(f"[DEBUG LOG] Number of candidates after CrossEncoder: {len(final_results)}")
+        print(f"CrossEncoder candidates : {len(final_results)}")
 
         # ── Stage 5: Context Assembly & Document Re-Grouping ────────────────
         retrieved: list[RetrievedResult] = []
@@ -288,7 +285,7 @@ class HybridRAGPipeline:
                     grouped_chunks[parent_id] = []
                 grouped_chunks[parent_id].append((chunk_id, score))
 
-            print(f"[DEBUG LOG] Number after parent aggregation (unique docs): {len(grouped_chunks)}")
+            print(f"Parent aggregation : {len(grouped_chunks)}")
 
             # Assemble merged retrieved results
             for parent_id, chunks in grouped_chunks.items():
@@ -312,7 +309,6 @@ class HybridRAGPipeline:
                 if not q_text:
                     q_text = f"QUESTION: {record.question_text}"
                 if not a_text:
-                    # Truncate fallback answers elegantly to preserve context budget
                     a_text = f"ANSWER: {record.answer_text[:2000]} ... [Truncated to fit context budget]"
 
                 # Find standard scores from systems
@@ -341,6 +337,7 @@ class HybridRAGPipeline:
                     rerank_score=highest_score if self.use_reranker else None,
                 ))
         else:
+            print(f"Parent aggregation : {len(final_results)}")
             # Standard document-level construction
             for rank, (doc_id, score) in enumerate(final_results):
                 record = self._doc_map.get(doc_id)
@@ -373,6 +370,7 @@ class HybridRAGPipeline:
                 ))
 
         timings.total_ms = (time.perf_counter() - total_start) * 1000
+        print(f"Retrieval latency : {timings.total_ms:.2f} ms")
 
         return retrieved, timings
 

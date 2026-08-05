@@ -3,55 +3,41 @@ Dense embedding generation using sentence-transformers.
 
 Design Decisions
 ----------------
-1. We use `all-MiniLM-L6-v2` — 384 dimensions, CPU-viable, ~50ms/query.
-   The RTX 3050 Mobile is not needed for this model; it runs entirely on CPU.
+1. We use BAAI/bge-m3 — 1024 dimensions, high accuracy, CPU-viable.
+   We always load the real BAAI/bge-m3 model. If loading fails, we fail-fast
+   with a clear error.
 
 2. We normalize embeddings to unit length so that inner product = cosine similarity.
-   This makes FAISS IndexFlatIP equivalent to cosine similarity without needing
-   IndexFlatIP to do the normalization.
+   This makes FAISS IndexFlatIP equivalent to cosine similarity.
 
 3. Batch encoding is used during index building for speed.
    Single encoding is used at query time.
 
-4. Caching: the model is loaded once and reused across queries.
-   This avoids the ~2-5 second model loading overhead on every query.
-
-5. Embedding dimension is exposed so the FAISS index can be built with
-   the correct dimension without hardcoding it.
+4. Caching: the model is loaded once and reused across queries via a global singleton cache.
 """
 
 from __future__ import annotations
-import torch
 
 from pathlib import Path
-
+from typing import Any, Dict, List, Optional
 import numpy as np
 import numpy.typing as npt
 from sentence_transformers import SentenceTransformer
 
 
+# Global model singletons to prevent redundant reloading
+_MODEL_CACHE: Dict[tuple[str, str], SentenceTransformer] = {}
+
+
 class Embedder:
     """
     Dense embedding generator using sentence-transformers.
-
-    Wraps a SentenceTransformer model with:
-    - Lazy loading (model loaded on first use)
-    - Unit-normalization for cosine similarity
-    - Batch encoding for index building
-    - Single encoding for queries
-
-    Usage
-    -----
-    ```python
-    embedder = Embedder()
-    query_embedding = embedder.embed("What about malaria cases?")
-    embeddings = embedder.embed_batch(["Q1", "Q2", "Q3"])
-    ```
+    Loads and runs the actual BAAI/bge-m3 model.
     """
 
     def __init__(
         self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "BAAI/bge-m3",
         device: str | None = None,
         normalize: bool = True,
     ) -> None:
@@ -60,27 +46,39 @@ class Embedder:
         ----------
         model_name : str
             HuggingFace model name or local path.
-            Default: all-MiniLM-L6-v2 (384-dim, fastest, CPU-viable)
-            Alternatives: "intfloat/e5-mistral-7b-instruct" (better quality, needs GPU)
+            Default: BAAI/bge-m3 (1024-dim)
         device : str, optional
-            Device: "cpu", "cuda", or None (auto-detect).
-            Default None uses CPU since MiniLM-L6-v2 is faster on CPU.
+            Device: "cpu", "cuda", or None.
         normalize : bool
             If True, L2-normalize embeddings to unit length.
-            Required for IndexFlatIP to equal cosine similarity.
         """
         self.model_name = model_name
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or "cpu"
         self.normalize = normalize
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
 
     @property
     def model(self) -> SentenceTransformer:
-        """Lazily load the model on first access."""
+        """Lazily load the model. Fails fast with a clear error if resource constraints are hit."""
+        global _MODEL_CACHE
         if self._model is None:
-            self._model = SentenceTransformer(self.model_name, device=self.device)
-            self._embedding_dim = self._model.get_embedding_dimension()
+            cache_key = (self.model_name, self.device)
+            if cache_key in _MODEL_CACHE:
+                self._model = _MODEL_CACHE[cache_key]
+                self._embedding_dim = self._model.get_embedding_dimension()
+            else:
+                try:
+                    # Always load the actual SentenceTransformer model
+                    self._model = SentenceTransformer(self.model_name, device=self.device)
+                    self._embedding_dim = self._model.get_embedding_dimension()
+                    _MODEL_CACHE[cache_key] = self._model
+                except Exception as e:
+                    # Fail-fast with clear error
+                    raise RuntimeError(
+                        f"Failed to load the real SentenceTransformer model '{self.model_name}' on {self.device}. "
+                        f"Ensure sufficient system memory is available. Original error: {e}"
+                    ) from e
         return self._model
 
     @property
@@ -94,24 +92,13 @@ class Embedder:
     def embed(self, text: str) -> npt.NDArray[np.float32]:
         """
         Encode a single text into a dense embedding vector.
-
-        Parameters
-        ----------
-        text : str
-            Text to encode.
-
-        Returns
-        -------
-        np.ndarray (shape: [embedding_dim], dtype: float32)
-            Unit-normalized embedding vector.
         """
-        embedding: np.ndarray = self.model.encode(
+        embedding = self.model.encode(
             text,
             normalize_embeddings=self.normalize,
             convert_to_numpy=True,
             show_progress_bar=False,
         )
-        # Ensure float32 for memory efficiency
         return embedding.astype(np.float32)
 
     def embed_batch(
@@ -122,23 +109,8 @@ class Embedder:
     ) -> npt.NDArray[np.float32]:
         """
         Encode a batch of texts into dense embedding vectors.
-
-        Parameters
-        ----------
-        texts : list[str]
-            Texts to encode.
-        batch_size : int
-            Batch size for encoding. Higher = faster but more memory.
-            Default 32 is a good balance for CPU inference.
-        show_progress : bool
-            Show a progress bar.
-
-        Returns
-        -------
-        np.ndarray (shape: [len(texts), embedding_dim], dtype: float32)
-            Matrix of unit-normalized embedding vectors.
         """
-        embeddings: np.ndarray = self.model.encode(
+        embeddings = self.model.encode(
             texts,
             batch_size=batch_size,
             normalize_embeddings=self.normalize,
@@ -149,9 +121,9 @@ class Embedder:
         return embeddings.astype(np.float32)
 
     def save(self, path: str | Path) -> None:
-        """Save the model to disk for faster future loading."""
-        path = Path(path)
-        self.model.save(str(path))
+        """Save the model to disk."""
+        if hasattr(self.model, "save"):
+            self.model.save(str(path))
 
     def __repr__(self) -> str:
         return (
