@@ -155,10 +155,8 @@ class IngestionPipeline:
             all_ministries=all_ministries,
             config_path=str(self.config_path),
         )
-        assert effective_filter == "EARTH SCIENCES", (
-            f"effective_filter={effective_filter!r}"
-        )
-        console.print(f"[green]Pipeline resolved filter = {effective_filter!r}[/green]")
+        scope_desc = effective_filter if effective_filter else "ALL MINISTRIES"
+        console.print(f"  Project scope: [cyan]{scope_desc}[/cyan]")
 
         if skip_scraping:
             console.print("  [yellow]Skipping scrape (--skip-scraping flag set)[/yellow]")

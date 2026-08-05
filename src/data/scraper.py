@@ -451,9 +451,6 @@ class RealArchiveScraper(Scraper):
         super().__init__(*args, **kwargs)
         self.use_pdf = use_pdf
         self.ministry_filter = ministry_filter
-        console.print(
-    f"[magenta]Scraper received filter = {self.ministry_filter!r}[/magenta]"
-)
         self.pdf_cache_dir = Path(self.PDF_CACHE_DIR)
         self.pdf_cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -571,7 +568,6 @@ class RealArchiveScraper(Scraper):
             
             # Filter rows to make sure we have valid metadata (subjects, ministry, quesNo)
             df_valid = df.dropna(subset=["subjects", "ministry", "quesNo"]).copy()
-            console.print(f"[red]DEBUG self.ministry_filter = {self.ministry_filter!r}[/red]")
 
             # Apply the scope resolved by IngestionPipeline before creating QARecord objects.
             # Apply ministry filter at the DataFrame level BEFORE creating any QARecord objects
@@ -585,8 +581,7 @@ class RealArchiveScraper(Scraper):
                 )
 
             df_valid = df_valid.sample(frac=1, random_state=42)  # Shuffle to mix topics randomly
-            print("LEN AFTER SHUFFLE:", len(df_valid))
-            
+
             console.print(f"[green]Successfully loaded {len(df_valid):,} valid parliamentary metadata rows.[/green]")
 
             with Progress(
@@ -600,12 +595,7 @@ class RealArchiveScraper(Scraper):
 
                 # Create shared client for PDF downloading
                 with httpx.Client(timeout=self.timeout_seconds) as client:
-                    print("Rows in df_valid before loop:", len(df_valid))
-                    
                     for _, row in df_valid.iterrows():
-                        
-                        
-                        print("Processing row")
                         if records_scraped >= max_records:
                             break
 
@@ -685,7 +675,6 @@ class RealArchiveScraper(Scraper):
                             scraped_at=datetime.utcnow(),
                         )
 
-                        
                         yield rec
                         records_scraped += 1
                         self._save_checkpoint(record_id, "done")
@@ -1212,7 +1201,6 @@ class ScraperFactory:
         """Instantiate and return the appropriate Scraper subclass strategy."""
         if self.strategy == "archive":
             console.print("[cyan]Strategy: ARCHIVE (Curated genuine Lok Sabha dataset).[/cyan]")
-            console.print(f"[blue]Factory filter = {self.ministry_filter!r}[/blue]")
             return RealArchiveScraper(
                 base_url=self.base_url,
                 rate_limit_seconds=self.rate_limit,

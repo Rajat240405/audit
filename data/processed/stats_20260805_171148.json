@@ -1,0 +1,82 @@
+{
+  "pipeline_version": "1.0.0",
+  "generated_at": "2026-08-05 17:11:48.132278",
+  "config_file": "config\\ingestion.yaml",
+  "raw_data_source": "archive",
+  "scraping": {
+    "pages_scraped": 0,
+    "question_links_found": 0,
+    "individual_pages_attempted": 0,
+    "individual_pages_success": 0,
+    "individual_pages_failed": 0,
+    "http_errors": 0,
+    "parse_errors": 0,
+    "rate_limit_hits": 0,
+    "started_at": "2026-08-05T17:11:48.166437",
+    "completed_at": "2026-08-05T17:12:04.286075",
+    "success_rate": 0.0,
+    "duration_seconds": 16.12
+  },
+  "total_raw_records": 0,
+  "total_valid_records": 0,
+  "total_invalid_records": 0,
+  "duplicates_removed": 0,
+  "unique_records": 0,
+  "question_id_stats": {
+    "present": 0,
+    "missing": 0,
+    "unique": 0,
+    "total": 0,
+    "presence_rate": 0.0
+  },
+  "question_text_stats": {
+    "present": 0,
+    "missing": 0,
+    "total": 0,
+    "presence_rate": 0.0
+  },
+  "answer_text_stats": {
+    "present": 0,
+    "missing": 0,
+    "total": 0,
+    "presence_rate": 0.0
+  },
+  "ministry_stats": {
+    "present": 0,
+    "missing": 0,
+    "total": 0,
+    "presence_rate": 0.0
+  },
+  "date_stats": {
+    "present": 0,
+    "missing": 0,
+    "unique": 0,
+    "total": 0
+  },
+  "subject_stats": {
+    "present": 0,
+    "missing": 0,
+    "unique": 0,
+    "total": 0
+  },
+  "source_url_stats": {
+    "present": 0,
+    "missing": 0,
+    "unique": 0,
+    "total": 0
+  },
+  "question_type_stats": {},
+  "avg_question_length_chars": 0.0,
+  "avg_answer_length_chars": 0.0,
+  "min_question_length_chars": 0,
+  "max_question_length_chars": 0,
+  "min_answer_length_chars": 0,
+  "max_answer_length_chars": 0,
+  "ministry_distribution": {},
+  "question_type_distribution": {},
+  "raw_file": "data\\raw\\raw_20260805_171148.jsonl",
+  "processed_file": "data\\processed\\processed_20260805_171148.jsonl",
+  "enriched_file": "data\\enriched\\enriched_20260805_171148.jsonl",
+  "validation_errors": [],
+  "processing_warnings": []
+}
