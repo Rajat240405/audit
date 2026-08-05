@@ -22,8 +22,7 @@ scraper:
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
   # Timeout settings
-  playwright_navigation_timeout_ms: 
-  00
+  playwright_navigation_timeout_ms: 30000
 
 validation:
   required_fields:
@@ -89,3 +88,22 @@ mock:
     Drinking_Water_and_Sanitation: 0.03
     Environment_Forest_and_Climate_Change: 0.03
     Others: 0.16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 12+ Project Scope Configuration (MoES AI Assistant)
+# ─────────────────────────────────────────────────────────────────────────────
+project_scope:
+  # Default ministry scope for the MoES AI Assistant
+  # When filter_enabled=true, the ingestion and retrieval pipelines
+  # will automatically restrict to this ministry unless overridden.
+  default_ministry: "EARTH SCIENCES"
+
+  # Whether to apply the default ministry filter by default
+  filter_enabled: true
+
+  # Allow overriding the scope to ingest ALL ministries
+  # (useful for generic parliamentary corpus or testing)
+  allow_all_ministries_override: true
+
+  # Override flag name exposed via CLI (for documentation)
+  all_ministries_flag: "--all-ministries"

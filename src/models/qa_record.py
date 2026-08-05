@@ -67,6 +67,15 @@ class QARecordMetadata(BaseModel):
         description="Ministry/department to which the question was addressed",
         examples=["Finance", "Health and Family Welfare"],
     )
+
+    # Future-proof document classification (Phase 12)
+    # Allows the system to support Annual Reports, Scientific Publications,
+    # Policies, INCOIS docs, etc. without changing the core QARecord model.
+    document_type: str | None = Field(
+        default="parliamentary_qa",
+        description="Type of document: parliamentary_qa, annual_report, scientific_publication, policy, research_report, incois, ocean_observation, etc.",
+        examples=["parliamentary_qa", "annual_report", "scientific_publication"],
+    )
     member: str | None = Field(
         default=None,
         description="The Member of Parliament raising the question",

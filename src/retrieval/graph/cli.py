@@ -16,6 +16,7 @@ from rich.table import Table
 
 from src.retrieval.graph.store import GraphStore
 from src.retrieval.graph.retriever import GraphRetriever
+from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
 
 console = Console()
 
@@ -37,8 +38,20 @@ def graph_cli() -> None:
     default="storage/graphrag",
     help="Output directory to serialize the graph.",
 )
-def build(index_dir: str, output_dir: str) -> None:
-    """Build the metadata graph from the indexed doc map."""
+@click.option(
+    "--ministry-filter",
+    type=str,
+    default=None,
+    help="Explicit ministry filter (overrides config)",
+)
+@click.option(
+    "--all-ministries",
+    is_flag=True,
+    default=False,
+    help="Index ALL ministries (overrides MoES default scope)",
+)
+def build(index_dir: str, output_dir: str, ministry_filter: str | None, all_ministries: bool) -> None:
+    """Build the metadata graph from the indexed doc map (respects project_scope)."""
     console.print(Panel.fit(
         "[bold cyan]Phase 5 — Building Metadata-Driven GraphRAG[/bold cyan]",
         border_style="cyan"
@@ -53,6 +66,20 @@ def build(index_dir: str, output_dir: str) -> None:
     console.print(f"Loading document metadata map from [cyan]{doc_map_path}[/cyan]...")
     with open(doc_map_path, encoding="utf-8") as f:
         doc_map = json.load(f)
+
+    # ── Apply centralized project scope filtering (shared utility) ──
+    effective_filter = resolve_effective_ministry_filter(
+        explicit_filter=ministry_filter,
+        all_ministries=all_ministries,
+    )
+
+    if effective_filter:
+        before = len(doc_map)
+        doc_map = {
+            k: v for k, v in doc_map.items()
+            if v.get("metadata", {}).get("ministry") and effective_filter.lower() in v.get("metadata", {}).get("ministry", "").lower()
+        }
+        console.print(f"[cyan]Ministry filter applied ({effective_filter}): {before:,} → {len(doc_map):,} documents[/cyan]")
 
     # Instantiate GraphStore and build
     store = GraphStore(storage_dir=output_dir)

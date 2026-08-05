@@ -1,0 +1,86 @@
+{
+  "pipeline_version": "1.0.0",
+  "generated_at": "2026-08-05 16:33:48.347935",
+  "config_file": "config\\ingestion.yaml",
+  "raw_data_source": "archive",
+  "scraping": {
+    "pages_scraped": 0,
+    "question_links_found": 0,
+    "individual_pages_attempted": 144,
+    "individual_pages_success": 144,
+    "individual_pages_failed": 0,
+    "http_errors": 0,
+    "parse_errors": 0,
+    "rate_limit_hits": 0,
+    "started_at": "2026-08-05T16:33:48.385512",
+    "completed_at": "2026-08-05T16:34:04.197946",
+    "success_rate": 1.0,
+    "duration_seconds": 15.81
+  },
+  "total_raw_records": 144,
+  "total_valid_records": 144,
+  "total_invalid_records": 0,
+  "duplicates_removed": 0,
+  "unique_records": 144,
+  "question_id_stats": {
+    "present": 144,
+    "missing": 0,
+    "unique": 144,
+    "total": 144,
+    "presence_rate": 1.0
+  },
+  "question_text_stats": {
+    "present": 144,
+    "missing": 0,
+    "total": 144,
+    "presence_rate": 1.0
+  },
+  "answer_text_stats": {
+    "present": 144,
+    "missing": 0,
+    "total": 144,
+    "presence_rate": 1.0
+  },
+  "ministry_stats": {
+    "present": 144,
+    "missing": 0,
+    "total": 144,
+    "presence_rate": 1.0
+  },
+  "date_stats": {
+    "present": 144,
+    "missing": 0,
+    "unique": 0,
+    "total": 144
+  },
+  "subject_stats": {
+    "present": 144,
+    "missing": 0,
+    "unique": 0,
+    "total": 144
+  },
+  "source_url_stats": {
+    "present": 144,
+    "missing": 0,
+    "unique": 0,
+    "total": 144
+  },
+  "question_type_stats": {},
+  "avg_question_length_chars": 166.99305555555554,
+  "avg_answer_length_chars": 758.4652777777778,
+  "min_question_length_chars": 141,
+  "max_question_length_chars": 208,
+  "min_answer_length_chars": 714,
+  "max_answer_length_chars": 995,
+  "ministry_distribution": {
+    "EARTH SCIENCES": 144
+  },
+  "question_type_distribution": {
+    "starred": 144
+  },
+  "raw_file": "data\\raw\\raw_20260805_163348.jsonl",
+  "processed_file": "data\\processed\\processed_20260805_163348.jsonl",
+  "enriched_file": "data\\enriched\\enriched_20260805_163348.jsonl",
+  "validation_errors": [],
+  "processing_warnings": []
+}

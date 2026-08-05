@@ -22,6 +22,7 @@ from src.data.loader import DataLoader
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
+from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
 
 console = Console()
 
@@ -34,8 +35,14 @@ def get_pipeline(
     data_file: str | None = None,
     index_dir: str = "storage/hybrid_rag",
     force_rebuild: bool = False,
+    ministry_filter: str | None = None,
+    all_ministries: bool = False,
 ) -> HybridRAGPipeline:
-    """Load or build the Hybrid RAG pipeline."""
+    """Load or build the Hybrid RAG pipeline.
+
+    Automatically respects the project_scope configuration from ingestion.yaml
+    unless an explicit override is provided.
+    """
     index_path = Path(index_dir)
     data_path = Path(data_file) if data_file else None
 
@@ -57,11 +64,22 @@ def get_pipeline(
     # Build from scratch
     console.print(f"[cyan]Loading records from {data_path}...[/cyan]")
     records = DataLoader.load_jsonl(data_path)
+
+    # ── Phase 12+ MoES Scope (shared utility) ──
+    effective_filter = resolve_effective_ministry_filter(
+        explicit_filter=ministry_filter,
+        all_ministries=all_ministries,
+    )
+
+    if effective_filter:
+        original_count = len(records)
+        records = filter_records_by_ministry(records, effective_filter)
+        console.print(f"[cyan]Ministry filter applied ({effective_filter}): {original_count:,} → {len(records):,} records[/cyan]")
+
     console.print(f"[green]Loaded {len(records):,} records.[/green]")
 
     console.print("[cyan]Building Hybrid RAG indices...[/cyan]")
     pipeline = HybridRAGPipeline(records=records)
-    # Note: build() is called automatically by constructor
     pipeline.save(index_path)
 
     return pipeline
@@ -81,13 +99,18 @@ def cli() -> None:
 @click.option("--data", "data_file", type=str, default=None, help="Path to enriched Q&A JSONL")
 @click.option("--output", "index_dir", type=str, default="storage/hybrid_rag", help="Index output dir")
 @click.option("--rebuild", is_flag=True, help="Force rebuild even if index exists")
-def build(data_file: str, index_dir: str, rebuild: bool) -> None:
+@click.option("--ministry-filter", type=str, default=None, help="Explicit ministry filter")
+@click.option("--all-ministries", is_flag=True, default=False, help="Index ALL ministries (override MoES default)")
+def build(data_file: str, index_dir: str, rebuild: bool, ministry_filter: str | None, all_ministries: bool) -> None:
     """Build the Hybrid RAG indices from the knowledge base."""
     console.print(Panel.fit(
         "[bold cyan]Phase 2 — Building Hybrid RAG Index[/bold cyan]",
         border_style="cyan",
     ))
-    pipeline = get_pipeline(data_file, index_dir, force_rebuild=rebuild)
+    pipeline = get_pipeline(
+        data_file, index_dir, force_rebuild=rebuild,
+        ministry_filter=ministry_filter, all_ministries=all_ministries
+    )
     console.print(f"\n[bold green]✓ Build complete:[/bold green] {len(pipeline):,} documents indexed")
 
 

@@ -29,6 +29,7 @@ from src.data.scraper import ScraperFactory
 from src.data.validator import DataValidator
 from src.models.qa_record import QARecord
 from src.models.statistics import IngestionStats
+from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
 
 console = Console()
 
@@ -91,6 +92,8 @@ class IngestionPipeline:
             strict=self.config.get("enrichment", {}).get("strict", False)
         )
 
+        # Project scope is now resolved via shared utility (src/utils/project_scope.py)
+
     def _load_config(self) -> dict:
         """Load ingestion configuration from YAML."""
         if not self.config_path.exists():
@@ -107,7 +110,9 @@ class IngestionPipeline:
         skip_enrichment: bool = False,
         skip_scraping: bool = False,
         overwrite: bool = False,
-        use_pdf: bool = True,  # Added here
+        use_pdf: bool = True,
+        ministry_filter: str | None = None,      # Explicit override
+        all_ministries: bool = False,            # New: explicit override flag
     ) -> IngestionStats:
         """
         Run the full ingestion pipeline.
@@ -145,6 +150,15 @@ class IngestionPipeline:
         console.print(f"  Target:   [cyan]{target_count:,}[/cyan] records")
 
         raw_records: list[QARecord] = []
+        effective_filter = resolve_effective_ministry_filter(
+            explicit_filter=ministry_filter,
+            all_ministries=all_ministries,
+            config_path=str(self.config_path),
+        )
+        assert effective_filter == "EARTH SCIENCES", (
+            f"effective_filter={effective_filter!r}"
+        )
+        console.print(f"[green]Pipeline resolved filter = {effective_filter!r}[/green]")
 
         if skip_scraping:
             console.print("  [yellow]Skipping scrape (--skip-scraping flag set)[/yellow]")
@@ -157,6 +171,7 @@ class IngestionPipeline:
                 strategy=strategy,
                 local_file=local_file,
                 use_pdf=use_pdf,
+                ministry_filter=effective_filter,
             ).create_scraper()
 
             scraper_stats_start = datetime.utcnow()
@@ -196,7 +211,19 @@ class IngestionPipeline:
         stats.scraping = scraper.stats if not skip_scraping else stats.scraping
 
         # Save processed records
-        DataLoader.save_jsonl(report.valid_records, processed_file)
+        processed_records = report.valid_records
+
+        # ── Phase 12+ MoES Project Scope Filtering (shared utility) ──
+        if effective_filter:
+            original_count = len(processed_records)
+            processed_records = filter_records_by_ministry(processed_records, effective_filter)
+            console.print(f"  ✓ Ministry filter applied ({effective_filter}): {original_count:,} → {len(processed_records):,} records kept")
+
+            stats.total_valid_records = len(processed_records)
+            stats.unique_records = len(processed_records)
+            stats.duplicates_removed = report.duplicate_count
+
+        DataLoader.save_jsonl(processed_records, processed_file)
         stats.raw_file = str(raw_file)
         stats.processed_file = str(processed_file)
         console.print(f"  ✓ Saved:     {processed_file.name}")
@@ -209,7 +236,7 @@ class IngestionPipeline:
             console.print("\n[bold]Stage 3/4: Enriching[/bold]")
 
             enriched_records = self.enricher.enrich_batch(
-                report.valid_records,
+                processed_records,
                 show_progress=True,
             )
 
@@ -222,15 +249,16 @@ class IngestionPipeline:
 
         # Build full stats from validation report
         stats.total_raw_records = len(raw_records)
-        stats.total_valid_records = report.valid_count
+        stats.total_valid_records = len(processed_records)
         stats.total_invalid_records = report.invalid_count
         stats.duplicates_removed = report.duplicate_count
-        stats.unique_records = report.valid_count
+        stats.unique_records = len(processed_records)
         stats.validation_errors = [f"{e.question_id}: {e.message}" for e in report.errors[:20]]
         stats.processing_warnings = [w.message for w in report.warnings[:20]]
 
-        # Copy field stats from report
-        if report.valid_records:
+        # Copy field stats from report (use processed_records for MoES-filtered stats)
+        records_for_stats = processed_records
+        if records_for_stats:
             first_valid = report.valid_records[0]
             # We already computed stats in the validator — extract them
             stats.avg_question_length_chars = sum(
@@ -255,47 +283,47 @@ class IngestionPipeline:
             # Ministry distribution
             from collections import Counter
             ministry_dist = Counter(
-                r.metadata.ministry for r in report.valid_records
+                r.metadata.ministry for r in records_for_stats
                 if r.metadata.ministry
             )
             stats.ministry_distribution = dict(ministry_dist)
 
             # Question type distribution
             qtype_dist = Counter(
-                r.metadata.question_type.value for r in report.valid_records
+                r.metadata.question_type.value for r in records_for_stats
             )
             stats.question_type_distribution = dict(qtype_dist)
 
             # Field stats
-            n = len(report.valid_records)
+            n = len(records_for_stats)
             stats.question_text_stats.present = n
             stats.question_text_stats.total = n
             stats.answer_text_stats.present = n
             stats.answer_text_stats.total = n
             stats.ministry_stats.present = sum(
-                1 for r in report.valid_records if r.metadata.ministry
+                1 for r in records_for_stats if r.metadata.ministry
             )
             stats.ministry_stats.missing = n - stats.ministry_stats.present
             stats.ministry_stats.total = n
             stats.date_stats.present = sum(
-                1 for r in report.valid_records if r.metadata.date
+                1 for r in records_for_stats if r.metadata.date
             )
             stats.date_stats.missing = n - stats.date_stats.present
             stats.date_stats.total = n
             stats.subject_stats.present = sum(
-                1 for r in report.valid_records if r.metadata.subject
+                1 for r in records_for_stats if r.metadata.subject
             )
             stats.subject_stats.missing = n - stats.subject_stats.present
             stats.subject_stats.total = n
             stats.source_url_stats.present = sum(
-                1 for r in report.valid_records if r.metadata.source_url
+                1 for r in records_for_stats if r.metadata.source_url
             )
             stats.source_url_stats.missing = n - stats.source_url_stats.present
             stats.source_url_stats.total = n
             stats.question_id_stats.present = n
             stats.question_id_stats.total = n
             stats.question_id_stats.unique = len(
-                {r.question_id for r in report.valid_records}
+                {r.question_id for r in records_for_stats}
             )
 
         # Save stats to JSON
@@ -374,6 +402,18 @@ def cli() -> None:
     default="config/ingestion.yaml",
     help="Path to configuration file.",
 )
+@click.option(
+    "--ministry-filter",
+    type=str,
+    default=None,
+    help="Explicit ministry filter (overrides config). Example: 'Ministry of Earth Sciences'",
+)
+@click.option(
+    "--all-ministries",
+    is_flag=True,
+    default=False,
+    help="Index ALL ministries (overrides MoES default scope in config)",
+)
 def ingest(
     count: int,
     strategy: str,
@@ -382,7 +422,9 @@ def ingest(
     skip_scraping: bool,
     overwrite: bool,
     config: str,
-    use_pdf: bool,  # Added here
+    use_pdf: bool,
+    ministry_filter: str | None,
+    all_ministries: bool,
 ) -> None:
     """Run the Phase 1 data ingestion pipeline."""
     try:
@@ -399,7 +441,9 @@ def ingest(
             skip_enrichment=skip_enrichment,
             skip_scraping=skip_scraping,
             overwrite=overwrite,
-            use_pdf=use_pdf,  # Passed here
+            use_pdf=use_pdf,
+            ministry_filter=ministry_filter,
+            all_ministries=all_ministries,
         )
         console.print("\n[bold green]✓ Phase 1 ingestion complete![/bold green]")
     except Exception as e:
