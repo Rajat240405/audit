@@ -72,7 +72,7 @@ class HybridRAGPipeline:
         fusion_top_k: int = 20,
         rrf_k: int = 60,
         use_reranker: bool = True,
-        use_chunking: bool = True,  # Default to Document-based for backwards compatibility
+        use_chunking: bool = False,  # Default to Document-based for backwards compatibility
     ) -> None:
         """
         Parameters
@@ -129,6 +129,7 @@ class HybridRAGPipeline:
             raise ValueError("No records provided. Pass records to constructor or call load().")
 
         records = self._records
+        print(f"[DEBUG LOG] Number of QARecords loaded: {len(records)}")
 
         # Always build the parent doc map first
         self._doc_map = {r.question_id: r for r in records}
@@ -163,6 +164,7 @@ class HybridRAGPipeline:
 
             self._chunk_map = {c.chunk_id: c for c in chunks_list}
             self._chunk_texts = {c.chunk_id: c.chunk_text for c in chunks_list}
+            print(f"[DEBUG LOG] Number of QAChunks generated: {len(chunks_list)}")
 
             # Dense Index Chunks
             chunk_ids = [c.chunk_id for c in chunks_list]
@@ -175,6 +177,7 @@ class HybridRAGPipeline:
             print(f"  Embeddings: {embeddings.shape} in {embed_time:.0f}ms")
 
             self.vector_store.build(chunk_ids, embeddings)
+            print(f"[DEBUG LOG] Number of vectors added to FAISS: {len(self.vector_store)}")
 
             # BM25 Index Chunks
             t0 = time.perf_counter()
@@ -184,6 +187,7 @@ class HybridRAGPipeline:
             ]
             self.bm25_index.build(bm25_docs)
             print(f"  BM25 built in {(time.perf_counter() - t0)*1000:.0f}ms")
+            print(f"[DEBUG LOG] Number of BM25 documents indexed: {len(self.bm25_index)}")
 
         else:
             # ── 2. Standard Document Generation ─────────────────────────────
@@ -233,11 +237,13 @@ class HybridRAGPipeline:
         t_dense = time.perf_counter()
         dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
         timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
+        print(f"[DEBUG LOG] Number of chunk candidates returned by dense retrieval: {len(dense_results)}")
 
         # ── Stage 2: BM25 Retrieval ────────────────────────────────────────
         t_bm25 = time.perf_counter()
         bm25_results = self.bm25_index.search(query, k=self.dense_top_k)
         timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
+        print(f"[DEBUG LOG] Number of chunk candidates returned by BM25: {len(bm25_results)}")
 
         # ── Stage 3: RRF Fusion ─────────────────────────────────────────────
         t_rrf = time.perf_counter()
@@ -247,6 +253,7 @@ class HybridRAGPipeline:
             top_k=self.fusion_top_k,
         )
         timings.rrf_fusion_ms = (time.perf_counter() - t_rrf) * 1000
+        print(f"[DEBUG LOG] Number of candidates after RRF: {len(fused_results)}")
 
         # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
         if self.use_reranker and fused_results:
@@ -264,6 +271,7 @@ class HybridRAGPipeline:
             final_results = reranked_results
         else:
             final_results = fused_results[:top_k]
+        print(f"[DEBUG LOG] Number of candidates after CrossEncoder: {len(final_results)}")
 
         # ── Stage 5: Context Assembly & Document Re-Grouping ────────────────
         retrieved: list[RetrievedResult] = []
@@ -279,6 +287,8 @@ class HybridRAGPipeline:
                 if parent_id not in grouped_chunks:
                     grouped_chunks[parent_id] = []
                 grouped_chunks[parent_id].append((chunk_id, score))
+
+            print(f"[DEBUG LOG] Number after parent aggregation (unique docs): {len(grouped_chunks)}")
 
             # Assemble merged retrieved results
             for parent_id, chunks in grouped_chunks.items():

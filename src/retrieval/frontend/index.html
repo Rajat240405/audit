@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parliamentary RAG Assistant</title>
+  <!-- Tailwind CSS via CDN (will load in live browser tab) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Marked Markdown Parser via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    /* Premium dark/light themes and modern font fallback stack */
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: #0f172a; /* Slate 900 */
+      color: #f1f5f9; /* Slate 100 */
+    }
+    .custom-scroll::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scroll::-webkit-scrollbar-track {
+      background: #1e293b;
+    }
+    .custom-scroll::-webkit-scrollbar-thumb {
+      background: #475569;
+      border-radius: 4px;
+    }
+
+    /* ── Markdown Structural Formatting & Typography (Objective 2 & 3) ── */
+    .prose {
+      line-height: 1.65 !important;
+      word-wrap: break-word !important;
+      word-break: normal !important;
+    }
+    .prose ul {
+      list-style-type: disc !important;
+      padding-left: 1.5rem !important;
+      margin-top: 0.75rem !important;
+      margin-bottom: 0.75rem !important;
+    }
+    .prose ol {
+      list-style-type: decimal !important;
+      padding-left: 1.5rem !important;
+      margin-top: 0.75rem !important;
+      margin-bottom: 0.75rem !important;
+    }
+    .prose li {
+      margin-top: 0.4rem !important;
+      margin-bottom: 0.4rem !important;
+      line-height: 1.65 !important;
+    }
+    .prose h1, .prose h2, .prose h3 {
+      font-weight: 700 !important;
+      margin-top: 1.25rem !important;
+      margin-bottom: 0.6rem !important;
+      color: #ffffff !important;
+    }
+    .prose h1 { font-size: 1.4em !important; }
+    .prose h2 { font-size: 1.25em !important; }
+    .prose h3 { font-size: 1.1em !important; }
+    .prose p {
+      margin-top: 0.75rem !important;
+      margin-bottom: 0.75rem !important;
+      line-height: 1.65 !important;
+    }
+    .prose strong {
+      font-weight: 700 !important;
+      color: #ffffff !important;
+    }
+    .prose blockquote {
+      border-left: 4px solid #6366f1 !important; /* Indigo 500 */
+      padding-left: 1rem !important;
+      font-style: italic !important;
+      color: #94a3b8 !important; /* Slate 400 */
+      background-color: #1e293b / 40% !important;
+      margin-top: 1rem !important;
+      margin-bottom: 1rem !important;
+      border-radius: 4px !important;
+    }
+  </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col">
+
+  <!-- ── HEADER ───────────────────────────────────────────────────────────── -->
+  <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex items-center justify-between shadow-md">
+    <div class="flex items-center space-x-3">
+      <div class="bg-indigo-600 p-2 rounded-lg text-white shadow-lg shadow-indigo-500/30">
+        <!-- 🏛️ Parliament SVG Icon -->
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center space-x-2">
+          <span>Parliamentary RAG Assistant</span>
+          <span class="text-xs bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full border border-indigo-500/30">Phase 8.6</span>
+        </h1>
+        <p class="text-xs text-slate-400">Context-Optimized & Aligned Chunk-level Hybrid RAG</p>
+      </div>
+    </div>
+    <div class="flex items-center space-x-4">
+      <div class="flex items-center space-x-2 bg-slate-900/50 px-3 py-1.5 rounded-full border border-slate-700">
+        <span class="relative flex h-2 w-2">
+          <span id="pulse-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span id="pulse-dot" class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        </span>
+        <span id="connection-status" class="text-xs font-medium text-emerald-400">System Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── MAIN CONTENT ─────────────────────────────────────────────────────── -->
+  <main class="flex-1 flex overflow-hidden">
+    
+    <!-- ── LEFT CHAT PANEL ────────────────────────────────────────────────── -->
+    <section class="flex-1 flex flex-col bg-slate-900">
+      
+      <!-- Chat Message Thread -->
+      <div id="chat-thread" class="flex-1 overflow-y-auto p-6 space-y-6 custom-scroll">
+        <!-- Welcoming Assistant Message -->
+        <div class="flex space-x-4 max-w-3xl">
+          <div class="flex-shrink-0 bg-indigo-600 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white">助</div>
+          <div class="space-y-1">
+            <p class="text-xs text-slate-400 font-semibold">Parliamentary Assistant</p>
+            <div class="bg-slate-800 text-slate-100 p-4 rounded-2xl rounded-tl-none border border-slate-700 shadow-sm text-sm leading-relaxed prose">
+              Welcome! I am your parliamentary research and audit assistant. I can query real, official Lok Sabha Q&A documents extracted directly from PDF records.
+              <br><br>
+              Type a question below to query either the **Baseline Chunked Hybrid RAG** or **GraphRAG Metadata Traversal** system!
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- User Query Input Bar -->
+      <div class="border-t border-slate-700 p-4 bg-slate-800 flex flex-col space-y-3">
+        <div class="flex items-center justify-between px-2">
+          <!-- Retrieval Mode Selector -->
+          <div class="flex items-center space-x-3 text-sm">
+            <span class="text-slate-400 text-xs font-semibold">Retrieval Configuration:</span>
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="radio" name="search-mode" value="hybrid" checked class="text-indigo-600 focus:ring-0 focus:ring-offset-0 bg-slate-900 border-slate-700">
+              <span class="text-xs text-indigo-400 font-medium bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/20">Chunked Hybrid RAG</span>
+            </label>
+            <label class="flex items-center space-x-1.5 cursor-pointer">
+              <input type="radio" name="search-mode" value="graph" class="text-emerald-600 focus:ring-0 focus:ring-offset-0 bg-slate-900 border-slate-700">
+              <span class="text-xs text-emerald-400 font-medium bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">GraphRAG Traversal</span>
+            </label>
+          </div>
+        </div>
+        
+        <form id="chat-form" class="flex space-x-3">
+          <input 
+            type="text" 
+            id="query-input" 
+            placeholder="Ask a question (e.g. 'National Livestock Mission' or 'GST collection')..." 
+            class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 text-white placeholder-slate-500"
+            autocomplete="off"
+          >
+          <button 
+            type="submit" 
+            class="bg-indigo-600 hover:bg-indigo-500 transition-colors text-white px-6 py-3 rounded-xl text-sm font-semibold flex items-center space-x-2 shadow-lg shadow-indigo-500/20"
+          >
+            <span>Ask Assistant</span>
+            <!-- ⚡ Send Icon -->
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ── RIGHT SIDEBAR (SOURCES & ANALYTICS) ──────────────────────────────── -->
+    <aside class="w-96 border-l border-slate-700 bg-slate-800 flex flex-col h-full overflow-hidden">
+      
+      <!-- Section Tabs -->
+      <div class="border-b border-slate-700 flex">
+        <button class="flex-1 py-3 text-xs font-bold text-slate-100 uppercase tracking-wider border-b-2 border-indigo-500 bg-slate-900/50">
+          Retrieval Inspection
+        </button>
+      </div>
+
+      <!-- Sidebar Scrollable Container -->
+      <div class="flex-1 overflow-y-auto p-4 space-y-6 custom-scroll">
+        
+        <!-- ── RETRANSMITTED SOURCES PANEL ── -->
+        <div>
+          <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center justify-between">
+            <span>Retrieved Sources</span>
+            <span id="sources-count" class="text-xs text-indigo-400 font-semibold bg-indigo-500/10 px-2 rounded-full">0</span>
+          </h2>
+          <div id="sources-list" class="space-y-3">
+            <p class="text-sm text-slate-500 italic text-center py-6">No queries executed yet. Retrieved documents will be displayed here for structural auditing.</p>
+          </div>
+        </div>
+
+        <!-- ── PIPELINE TIMINGS / STATS PANEL ── -->
+        <div>
+          <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Pipeline Performance Metrics</h2>
+          <div class="bg-slate-900/60 rounded-xl border border-slate-700/80 p-4 space-y-4">
+            
+            <!-- Timing Latencies -->
+            <div>
+              <p class="text-xs font-semibold text-slate-500 mb-2">Stage Latencies</p>
+              <div class="space-y-2.5">
+                <div>
+                  <div class="flex justify-between text-xs mb-1">
+                    <span class="text-slate-400">Retrieval Latency</span>
+                    <span id="metric-ret-latency" class="font-bold text-indigo-400">0.0 ms</span>
+                  </div>
+                  <div class="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
+                    <div id="bar-ret-latency" class="bg-indigo-500 h-full transition-all duration-500" style="width: 0%"></div>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-xs mb-1">
+                    <span class="text-slate-400">Generation Latency</span>
+                    <span id="metric-gen-latency" class="font-bold text-emerald-400">0.0 ms</span>
+                  </div>
+                  <div class="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
+                    <div id="bar-gen-latency" class="bg-emerald-500 h-full transition-all duration-500" style="width: 0%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Token Quantities -->
+            <div class="pt-2 border-t border-slate-700/60">
+              <p class="text-xs font-semibold text-slate-500 mb-2">Grounded Token Counts</p>
+              <div class="grid grid-cols-3 gap-2 text-center">
+                <div class="bg-slate-800/80 p-2 rounded-lg border border-slate-700">
+                  <p class="text-[10px] text-slate-400 font-semibold uppercase">Prompt</p>
+                  <p id="token-prompt" class="text-sm font-black text-slate-200 mt-0.5">0</p>
+                </div>
+                <div class="bg-slate-800/80 p-2 rounded-lg border border-slate-700">
+                  <p class="text-[10px] text-slate-400 font-semibold uppercase">Complete</p>
+                  <p id="token-comp" class="text-sm font-black text-slate-200 mt-0.5">0</p>
+                </div>
+                <div class="bg-slate-800/80 p-2 rounded-lg border border-slate-700/80">
+                  <p class="text-[10px] text-indigo-400 font-semibold uppercase">Total</p>
+                  <p id="token-total" class="text-sm font-black text-indigo-400 mt-0.5">0</p>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </aside>
+  </main>
+
+  <!-- ── INLINE CHAT SCRIPT ────────────────────────────────────────────────── -->
+  <script>
+    const chatForm = document.getElementById("chat-form");
+    const queryInput = document.getElementById("query-input");
+    const chatThread = document.getElementById("chat-thread");
+    const sourcesList = document.getElementById("sources-list");
+    const sourcesCount = document.getElementById("sources-count");
+
+    // Stat metric nodes
+    const metricRetLatency = document.getElementById("metric-ret-latency");
+    const metricGenLatency = document.getElementById("metric-gen-latency");
+    const barRetLatency = document.getElementById("bar-ret-latency");
+    const barGenLatency = document.getElementById("bar-gen-latency");
+    const tokenPrompt = document.getElementById("token-prompt");
+    const tokenComp = document.getElementById("token-comp");
+    const tokenTotal = document.getElementById("token-total");
+
+    const pulsePing = document.getElementById("pulse-ping");
+    const pulseDot = document.getElementById("pulse-dot");
+    const connectionStatus = document.getElementById("connection-status");
+
+    // Chat handling
+    chatForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const message = queryInput.value.trim();
+      if (!message) return;
+
+      // Disable input while executing
+      queryInput.value = "";
+      queryInput.disabled = true;
+
+      // Fetch currently selected search configuration mode
+      const mode = document.querySelector('input[name="search-mode"]:checked').value;
+
+      // 1. Append User Message Bubble
+      appendUserMessage(message);
+
+      // 2. Append Loading/Searching bubble
+      const loadingBubble = appendLoadingBubble(mode);
+      scrollThread();
+
+      try {
+        // Run API request to FastAPI
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, mode })
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: Failed to reach API`);
+        }
+
+        const data = await response.json();
+
+        // 3. Remove Loading bubble and render AI response
+        loadingBubble.remove();
+        appendAssistantMessage(data.answer, data.is_fallback, data.is_graph_result);
+
+        // 4. Populate Auditing stats and sources
+        renderStats(data);
+        renderSources(data.sources);
+
+        // Update connection pulse indicator based on fallback
+        if (data.is_fallback) {
+          pulsePing.classList.replace("bg-emerald-400", "bg-amber-400");
+          pulseDot.classList.replace("bg-emerald-500", "bg-amber-500");
+          connectionStatus.innerText = "LLM Offline (Fallback Active)";
+          connectionStatus.classList.replace("text-emerald-400", "text-amber-400");
+        } else {
+          pulsePing.classList.replace("bg-amber-400", "bg-emerald-400");
+          pulseDot.classList.replace("bg-amber-500", "bg-emerald-500");
+          connectionStatus.innerText = "System Connected";
+          connectionStatus.classList.replace("text-amber-400", "text-emerald-400");
+        }
+
+      } catch (err) {
+        loadingBubble.remove();
+        appendErrorMessage(err.message);
+      } finally {
+        queryInput.disabled = false;
+        queryInput.focus();
+        scrollThread();
+      }
+    });
+
+    // Append standard user bubble
+    function appendUserMessage(text) {
+      const bubble = document.createElement("div");
+      bubble.className = "flex space-x-4 max-w-3xl ml-auto flex-row-reverse space-x-reverse";
+      bubble.innerHTML = `
+        <div class="flex-shrink-0 bg-indigo-500 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white">ME</div>
+        <div class="space-y-1 text-right">
+          <p class="text-xs text-slate-400 font-semibold">You</p>
+          <div class="bg-indigo-600/90 text-white p-4 rounded-2xl rounded-tr-none shadow-sm text-sm text-left leading-relaxed">
+            ${escapeHtml(text)}
+          </div>
+        </div>
+      `;
+      chatThread.appendChild(bubble);
+    }
+
+    // Append loading placeholder bubble
+    function appendLoadingBubble(mode) {
+      const bubble = document.createElement("div");
+      bubble.className = "flex space-x-4 max-w-3xl animate-pulse";
+      const modeLabel = mode === "graph" ? "GraphRAG Traversal..." : "Hybrid dense/lexical search...";
+      bubble.innerHTML = `
+        <div class="flex-shrink-0 bg-slate-700 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-slate-400">助</div>
+        <div class="space-y-1 flex-1">
+          <p class="text-xs text-slate-400 font-semibold">Assistant</p>
+          <div class="bg-slate-800 text-slate-400 p-4 rounded-2xl rounded-tl-none border border-slate-700 text-sm flex items-center space-x-2">
+            <svg class="animate-spin h-4 w-4 text-indigo-500" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            <span>Querying ${modeLabel}</span>
+          </div>
+        </div>
+      `;
+      chatThread.appendChild(bubble);
+      return bubble;
+    }
+
+    // Append final assistant reply bubble with Markdown support (Objective 2 & 3)
+    function appendAssistantMessage(text, isFallback, isGraphResult) {
+      const bubble = document.createElement("div");
+      bubble.className = "flex space-x-4 max-w-3xl";
+      
+      let formattedHtml = "";
+      try {
+        // Attempt browser markdown parse
+        formattedHtml = marked.parse(text);
+      } catch (err) {
+        // Fallback basic replacements if parser fails
+        formattedHtml = text
+          .replace(/\n\n/g, "<br><br>")
+          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+          .replace(/\*(.*?)\*/g, "<em>$1</em>")
+          .replace(/>\s*(.*?)(?:<br>|$)/g, "<blockquote class='border-l-4 border-slate-500 pl-4 italic text-slate-300 bg-slate-800/40 p-2 rounded my-2'>$1</blockquote>");
+      }
+
+      const avatarBg = isGraphResult ? "bg-emerald-600" : "bg-indigo-600";
+      const nameBadge = isGraphResult 
+        ? "Graph Result" 
+        : isFallback 
+          ? "Ollama Fallback" 
+          : "LLM Answer";
+          
+      const badgeStyle = isGraphResult
+        ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+        : "text-indigo-400 bg-indigo-500/10 border-indigo-500/20";
+
+      bubble.innerHTML = `
+        <div class="flex-shrink-0 ${avatarBg} w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white">助</div>
+        <div class="space-y-1 flex-1 overflow-hidden">
+          <div class="flex items-center space-x-2">
+            <span class="text-xs text-slate-400 font-semibold">Assistant</span>
+            <span class="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${badgeStyle}">${nameBadge}</span>
+          </div>
+          <div class="bg-slate-800 text-slate-100 p-4 rounded-2xl rounded-tl-none border border-slate-700 shadow-sm text-sm leading-relaxed prose">
+            ${formattedHtml}
+          </div>
+        </div>
+      `;
+      chatThread.appendChild(bubble);
+    }
+
+    // Append clean error bubble
+    function appendErrorMessage(errText) {
+      const bubble = document.createElement("div");
+      bubble.className = "flex space-x-4 max-w-3xl";
+      bubble.innerHTML = `
+        <div class="flex-shrink-0 bg-red-600/20 w-8 h-8 rounded-full border border-red-500 flex items-center justify-center text-xs font-bold text-red-400">✗</div>
+        <div class="space-y-1">
+          <p class="text-xs text-red-400 font-semibold">System Error</p>
+          <div class="bg-red-950/20 text-red-400 p-4 rounded-2xl rounded-tl-none border border-red-500/30 text-sm">
+            Failed to process request: ${errText}
+          </div>
+        </div>
+      `;
+      chatThread.appendChild(bubble);
+    }
+
+    // Render Stats panel values and update progress bars
+    function renderStats(data) {
+      const retMs = data.retrieval_latency_ms;
+      const genMs = data.generation_latency_ms;
+      
+      metricRetLatency.innerText = `${retMs.toFixed(1)} ms`;
+      metricGenLatency.innerText = `${genMs.toFixed(1)} ms`;
+
+      // Render proportional bars (cap max width ratio at 200ms and 10,000ms respectively)
+      const retPercent = Math.min(100, (retMs / 200) * 100);
+      const genPercent = Math.min(100, (genMs / 8000) * 100);
+
+      barRetLatency.style.width = `${retPercent}%`;
+      barGenLatency.style.width = `${genPercent}%`;
+
+      tokenPrompt.innerText = data.prompt_tokens.toLocaleString();
+      tokenComp.innerText = data.completion_tokens.toLocaleString();
+      tokenTotal.innerText = data.total_tokens.toLocaleString();
+    }
+
+    // Render collapsed/interactive sources list in sidebar
+    function renderSources(sources) {
+      sourcesList.innerHTML = "";
+      sourcesCount.innerText = sources.length;
+
+      if (sources.length === 0) {
+        sourcesList.innerHTML = `<p class="text-sm text-slate-500 italic text-center py-6">No matching documents traversed for this query.</p>`;
+        return;
+      }
+
+      sources.forEach((src, idx) => {
+        const item = document.createElement("div");
+        item.className = "bg-slate-900/60 rounded-xl border border-slate-700/80 p-3 space-y-2.5 shadow-sm";
+        item.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-indigo-400">Doc ID: ${src.doc_id}</span>
+            <span class="text-[10px] text-slate-500 font-bold uppercase bg-slate-800 px-2 py-0.5 rounded border border-slate-700">Score: ${src.score.toFixed(3)}</span>
+          </div>
+          <div class="space-y-1 text-xs text-slate-300">
+            <p><strong class="text-slate-400">Ministry:</strong> ${src.ministry}</p>
+            <p><strong class="text-slate-400">Subject:</strong> ${src.subject}</p>
+          </div>
+          <details class="text-[11px] text-slate-400 cursor-pointer">
+            <summary class="hover:text-slate-200 transition-colors font-medium">Toggle Full Transcript</summary>
+            <div class="mt-2 bg-slate-950 p-2.5 rounded border border-slate-800/80 max-h-40 overflow-y-auto custom-scroll text-[10px] font-mono leading-relaxed select-all">
+              <p class="text-indigo-400 font-semibold mb-1">${escapeHtml(src.question.substring(0, 200))}</p>
+              <p class="border-t border-slate-800/60 pt-1 mt-1 text-slate-300">${escapeHtml(src.answer)}</p>
+            </div>
+          </details>
+        `;
+        sourcesList.appendChild(item);
+      });
+    }
+
+    function scrollThread() {
+      chatThread.scrollTo({ top: chatThread.scrollHeight, behavior: "smooth" });
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>

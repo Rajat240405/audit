@@ -1,10 +1,13 @@
 """
-Answer generator — grounded generation using retrieved context.
+Answer generator — grounded generation using adaptive context budgeting.
 
 Design Decisions
 ----------------
-1. The generator uses ONLY retrieved context — it never has access to
-   the raw knowledge base. This enforces strict retrieval-grounding.
+1. ADAPTIVE CONTEXT BUDGETING: Build full context first, estimate tokens,
+   and selectively apply compression only when the prompt exceeds a configurable
+   safety threshold (e.g., 80% of num_ctx). Small-to-medium queries retain
+   complete, uncompressed details for superior answer quality, while massive
+   audit queries stay safe from context window overflow.
 
 2. We use a structured prompt with clear sections:
    - Task description (grounded Q&A answering)
@@ -25,13 +28,11 @@ Design Decisions
 
 5. The generator returns the full response with timing, token counts,
    and source attribution — all needed for the evaluation framework.
-
-6. Generation is a SEPARATE step from retrieval — they can be timed
-   independently and swapped independently.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from rich.console import Console
@@ -56,30 +57,50 @@ RULES:
 6. Keep your answer concise, factual, and directly responsive to the question."""
 
 
+def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> str:
+    """
+    Intelligently extracts the most relevant paragraphs or blocks of text from a
+    retrieved answer matching query keywords, strictly staying within the character budget.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Extract keywords from the query
+    keywords = [w.lower() for w in re.sub(r"[^\w\s]", " ", query).split() if len(w) > 3]
+    if not keywords:
+        return text[:max_chars] + " ... [Truncated to fit context budget]"
+
+    # Split answer text into paragraphs
+    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    matched_paragraphs = []
+    
+    for p in paragraphs:
+        p_lower = p.lower()
+        if any(kw in p_lower for kw in keywords):
+            matched_paragraphs.append(p)
+
+    if matched_paragraphs:
+        assembled = ""
+        for p in matched_paragraphs:
+            if len(assembled) + len(p) + 2 <= max_chars:
+                assembled += p + "\n\n"
+            else:
+                remaining = max_chars - len(assembled)
+                if remaining > 100:
+                    assembled += p[:remaining] + " ... [Truncated to fit context budget]"
+                break
+        return assembled.strip() or text[:max_chars] + " ... [Truncated to fit context budget]"
+
+    return text[:max_chars] + " ... [Truncated to fit context budget]"
+
+
 def build_user_prompt(
     question: str,
     retrieved_results: list[RetrievedResult],
-    max_doc_chars: int = 4000,  # Context budgeting character limit per document
+    max_doc_chars: int = 999999,  # High default to support uncompressed assembly
 ) -> str:
     """
     Build the user prompt with retrieved context.
-
-    The prompt includes all retrieved Q&A pairs formatted as structured blocks.
-    Each block is clearly labelled so the LLM can reference specific sources.
-
-    Parameters
-    ----------
-    question : str
-        The user's question.
-    retrieved_results : list[RetrievedResult]
-        Top-K retrieved Q&A records.
-    max_doc_chars : int
-        Maximum characters allowed per retrieved document's answer to enforce context budgeting.
-
-    Returns
-    -------
-    str
-        The complete user prompt with context.
     """
     parts = [
         "Below is the most relevant parliamentary Question & Answer context retrieved for your question.",
@@ -98,11 +119,10 @@ def build_user_prompt(
             parts.append(f"Subject: {result.metadata['subject']}")
         parts.append("")
 
-        # Enforce context budgeting via intelligent truncation
         q_text = result.question
         a_text = result.answer
         if len(a_text) > max_doc_chars:
-            a_text = a_text[:max_doc_chars] + " ... [Truncated to fit context budget]"
+            a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
 
         parts.append(f"QUESTION: {q_text}")
         parts.append(f"ANSWER: {a_text}")
@@ -163,23 +183,7 @@ class GenerationResult:
 
 class AnswerGenerator:
     """
-    Grounded answer generation using retrieved context + LLM.
-
-    Takes retrieved Q&A records and generates a grounded answer
-    using the configured LLM.
-
-    Usage
-    -----
-    ```python
-    generator = AnswerGenerator(llm_client=llm_client)
-
-    result = generator.generate(
-        question="What measures address malaria?",
-        retrieved_results=retrieved,
-    )
-    print(result.answer)
-    print(f"Tokens: {result.total_tokens}, Latency: {result.generation_latency_ms}ms")
-    ```
+    Grounded answer generation using adaptive context budgeting.
     """
 
     def __init__(
@@ -187,26 +191,28 @@ class AnswerGenerator:
         llm_client: LLMClient | None = None,
         system_prompt: str | None = None,
         max_context_docs: int = 5,
-        max_doc_chars: int = 4000,  # Enforce context budget character limit per document
+        max_doc_chars: int = 1500,  # Fallback compression target per document
+        context_budget_ratio: float = 0.80,  # Threshold ratio of context window
+        compression_enabled: bool = True,  # Globally enable/disable adaptive budgeting
     ) -> None:
         """
         Parameters
         ----------
         llm_client : LLMClient, optional
             LLM client. Created with defaults if not provided.
-        system_prompt : str, optional
-            Custom system prompt. Uses the default if not provided.
-        max_context_docs : int
-            Maximum number of retrieved docs to include in context.
-            More docs = better coverage but higher prompt tokens.
-            Default 5 is a good balance.
         max_doc_chars : int
-            Maximum characters allowed per retrieved document to preserve relevant context.
+            Fallback compression characters limit per document if budget is exceeded.
+        context_budget_ratio : float
+            Threshold of context window before compression is triggered (e.g., 0.80).
+        compression_enabled : bool
+            Whether adaptive context budgeting is globally active.
         """
         self.llm_client = llm_client or LLMClient()
         self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.max_context_docs = max_context_docs
         self.max_doc_chars = max_doc_chars
+        self.context_budget_ratio = context_budget_ratio
+        self.compression_enabled = compression_enabled
 
     def generate(
         self,
@@ -215,18 +221,6 @@ class AnswerGenerator:
     ) -> GenerationResult:
         """
         Generate a grounded answer from retrieved context.
-
-        Parameters
-        ----------
-        question : str
-            The user's question.
-        retrieved_results : list[RetrievedResult]
-            Retrieved Q&A records from the retrieval pipeline.
-
-        Returns
-        -------
-        GenerationResult
-            Generated answer with source attribution and metadata.
         """
         # Limit context to max_context_docs
         context = retrieved_results[: self.max_context_docs]
@@ -246,31 +240,48 @@ class AnswerGenerator:
                 prompt="",
             )
 
-        # Build user prompt with our intelligent character truncation limit
-        user_prompt = build_user_prompt(question, context, self.max_doc_chars)
-
-        # ── Audit timing, sizes, and context window compatibility ──
-        total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
-        char_count = len(total_prompt_text)
-        token_estimate = char_count // 4
-
-        console.print(f"[bold cyan][Generation Audit][/bold cyan] Prompt size: {char_count:,} chars | Estimated tokens: {token_estimate:,}")
+        # ── 1. Assemble Uncompressed Prompt First ──
+        uncompressed_prompt = build_user_prompt(question, context, max_doc_chars=999999)
+        uncompressed_total_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{uncompressed_prompt}"
         
-        # Check context window constraint safely (defends against MagicMock during tests)
+        # Estimate token count
+        uncompressed_tokens = len(uncompressed_total_text) // 4
+        
+        # Determine Context Window Boundaries
         effective_window = getattr(self.llm_client, "num_ctx", 8192)
         if not isinstance(effective_window, (int, float)):
             effective_window = 8192
+            
+        budget_threshold = int(effective_window * self.context_budget_ratio)
 
-        if token_estimate > effective_window:
-            console.print(f"[bold yellow]⚠ Warning: Prompt size ({token_estimate:,} tokens) exceeds effective context window ({effective_window:,} tokens)! Silent truncation may occur on the client server.[/bold yellow]")
+        # ── 2. Adaptive Decision Matrix ──
+        compression_applied = False
+        reason = "Prompt fits within budget"
+
+        if self.compression_enabled and uncompressed_tokens > budget_threshold:
+            compression_applied = True
+            reason = "Prompt exceeded threshold"
+            # Build compressed, high-relevance prompt
+            user_prompt = build_user_prompt(question, context, self.max_doc_chars)
+            total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+            final_tokens = len(total_prompt_text) // 4
         else:
-            console.print(f"[green]✓ Prompt size is well within effective context window ({token_estimate:,} / {effective_window:,} tokens).[/green]")
+            user_prompt = uncompressed_prompt
+            total_prompt_text = uncompressed_total_text
+            final_tokens = uncompressed_tokens
 
-        # Save exact prompt sent to LLM to the root directory for immediate audit inspection
+        # ── 3. Structured Budget Logging (Requested) ──
+        console.print(f"\n[bold cyan]Context Budget Manager[/bold cyan]")
+        console.print(f"Estimated Prompt Tokens : {final_tokens:,}")
+        console.print(f"Maximum Context Window  : {effective_window:,}")
+        console.print(f"Budget Threshold        : {budget_threshold:,}")
+        console.print(f"Compression Applied     : {'YES' if compression_applied else 'NO'}")
+        console.print(f"Reason                  : {reason}\n")
+
+        # Save exact prompt sent to LLM
         try:
             with open("generation_prompt_debug.txt", "w", encoding="utf-8") as f:
                 f.write(total_prompt_text)
-            console.print("[dim green]✓ Saved exact prompt to 'generation_prompt_debug.txt' for audit.[/dim green]")
         except Exception as e:
             console.print(f"[yellow]Warning: Could not save prompt to debug file: {e}[/yellow]")
 

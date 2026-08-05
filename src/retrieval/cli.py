@@ -98,7 +98,7 @@ def build(data_file: str, index_dir: str, rebuild: bool) -> None:
 @click.option("--no-generate", is_flag=True, help="Skip LLM generation (retrieval only)")
 @click.option("--show-prompt", is_flag=True, help="Show the full LLM prompt")
 @click.option("--show-trace", is_flag=True, help="Show retrieval trace")
-@click.option("--llm-model", type=str, default="qwen2.5:7b", help="LLM model name")
+@click.option("--llm-model", type=str, default="qwen3:8b", help="LLM model name")
 def query(
     question: str,
     top_k: int,

@@ -34,6 +34,8 @@ dependencies = [
     "rich>=13.7.0",
     "tqdm>=4.66.0",
     "click>=8.1.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
 
     # JSON handling
     "orjson>=3.10.0",

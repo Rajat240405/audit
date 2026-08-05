@@ -71,11 +71,11 @@ class LLMClient:
     def __init__(
         self,
         provider: str = "ollama",
-        model: str = "qwen2.5:7b",
+        model: str = "qwen3:8b",
         base_url: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 600,
         num_ctx: int = 8192,  # Configurable context window to avoid truncation
     ) -> None:
         """
