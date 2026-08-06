@@ -52,7 +52,7 @@ class LLMClient:
         base_url: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
-        timeout_seconds: int = 120,
+        timeout_seconds: int | None = None,
         num_ctx: int = 8192,
     ) -> None:
         """
@@ -62,6 +62,14 @@ class LLMClient:
             LLM provider: "ollama", "groq", "openai".
         model : str
             Model name. For Ollama: "qwen2.5:7b", etc. For Groq: "llama-3.3-70b-versatile", etc.
+        timeout_seconds : int, optional
+            Request timeout for generation, in seconds. Local models (e.g. Qwen 3 8B
+            on CPU via Ollama) can take several minutes to generate a full answer, so
+            the default is 300 s (5 min). Resolution order:
+              1. explicit ``timeout_seconds`` argument
+              2. ``LLM_TIMEOUT_SECONDS`` environment variable (project config via .env)
+              3. 300 (default)
+            Health checks keep a short 5 s probe timeout regardless of this value.
         """
         if provider not in self.PROVIDERS:
             raise ValueError(
@@ -72,6 +80,8 @@ class LLMClient:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        if timeout_seconds is None:
+            timeout_seconds = int(os.environ.get("LLM_TIMEOUT_SECONDS", "300"))
         self.timeout_seconds = timeout_seconds
         self.num_ctx = num_ctx
         self.api_key: str | None = None  # In-memory runtime session key storage

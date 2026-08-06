@@ -31,35 +31,86 @@ console = Console()
 # Helper: Load the pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Files written by HybridRAGPipeline.save() that constitute a complete,
+# loadable index. Used to distinguish "a real index exists" from "the
+# directory exists but is empty/partial" (e.g. after a manual cleanup).
+_INDEX_MARKER_FILES = (
+    "pipeline_metadata.json",
+    "doc_map.json",
+    "vector_store.index",
+    "vector_store.ids",
+    "bm25_index.pkl",
+    "bm25_index.json",
+)
+
+
+def _index_is_built(index_path: Path) -> bool:
+    """Return True only if a complete, loadable pipeline was saved at index_path.
+
+    Merely checking ``index_path.exists()`` is not enough: the directory can
+    exist while being empty or partially populated (e.g. ``storage/hybrid_rag``
+    created but the index files deleted). A clean build must not attempt to
+    ``load()`` in that state.
+    """
+    if not index_path.exists() or not index_path.is_dir():
+        return False
+    return all((index_path / name).exists() for name in _INDEX_MARKER_FILES)
+
+
 def get_pipeline(
     data_file: str | None = None,
     index_dir: str = "storage/hybrid_rag",
     force_rebuild: bool = False,
     ministry_filter: str | None = None,
     all_ministries: bool = False,
+    require_index: bool = False,
 ) -> HybridRAGPipeline:
     """Load or build the Hybrid RAG pipeline.
 
     Automatically respects the project_scope configuration from ingestion.yaml
     unless an explicit override is provided.
+
+    Parameters
+    ----------
+    require_index : bool
+        If True, raise ``FileNotFoundError`` when no complete index exists
+        (used by query-like commands: ``query``, ``interactive``, ``benchmark``).
+        If False (used by ``build``), build the index from scratch when it is
+        missing or empty.
     """
     index_path = Path(index_dir)
     data_path = Path(data_file) if data_file else None
 
-    # Find latest enriched file if no data file specified
+    # Find latest data file if no explicit path is given.
+    # Priority: enriched (if available) → processed (current Phase 1 output).
+    # The processed/ dir is the canonical corpus produced by `ingest`; the
+    # legacy enriched/ dir is gitignored and may not exist on fresh clones.
     if not data_path:
-        enriched_files = sorted(Path("data/enriched").glob("enriched_*.jsonl"), reverse=True)
-        if enriched_files:
-            data_path = enriched_files[0]
-        else:
-            raise FileNotFoundError("No enriched data found. Run Phase 1 first.")
+        for subdir in ("enriched", "processed"):
+            candidates = sorted(Path("data", subdir).glob("*.jsonl"), reverse=True)
+            if candidates:
+                data_path = candidates[0]
+                break
+        if not data_path:
+            raise FileNotFoundError(
+                "No Phase 1 data found under data/enriched or data/processed. "
+                "Run `ingest` first or pass --data <path>."
+            )
 
-    # Load from disk if exists (and not forcing rebuild)
-    if index_path.exists() and not force_rebuild:
+    # Load from disk only if a complete index was previously saved
+    # (and not forcing a rebuild).
+    if not force_rebuild and _index_is_built(index_path):
         console.print(f"[cyan]Loading pipeline from {index_path}...[/cyan]")
         pipeline = HybridRAGPipeline()
         pipeline.load(index_path)
         return pipeline
+
+    # Query-like commands must not silently build an index: they require one.
+    if require_index:
+        raise FileNotFoundError(
+            f"No complete Hybrid RAG index found at {index_path}. "
+            "Run `retrieve build` first."
+        )
 
     # Build from scratch
     console.print(f"[cyan]Loading records from {data_path}...[/cyan]")
@@ -136,9 +187,9 @@ def query(
 
     Runs the full pipeline: retrieval → generation.
     """
-    # Load pipeline
+    # Load pipeline (query commands require an existing, complete index)
     try:
-        pipeline = get_pipeline()
+        pipeline = get_pipeline(require_index=True)
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print("Run 'build' first: python -m src.retrieval.cli build")
@@ -148,6 +199,8 @@ def query(
 
     # ── Retrieval ──────────────────────────────────────────────────────────
     t_retrieval = time.monotonic()
+    if no_rerank:
+        pipeline.use_reranker = False
     results, timings = pipeline.retrieve(question, top_k=top_k)
     retrieval_ms = (time.monotonic() - t_retrieval) * 1000
 
@@ -231,7 +284,7 @@ def query(
 @click.option("--top-k", type=int, default=5)
 def interactive(data_file: str, top_k: int) -> None:
     """Run in interactive mode — ask questions repeatedly."""
-    pipeline = get_pipeline(data_file=data_file)
+    pipeline = get_pipeline(data_file=data_file, require_index=True)
     llm_client = LLMClient()
     generator = AnswerGenerator(llm_client=llm_client)
 
@@ -283,7 +336,7 @@ def benchmark() -> None:
         "Road safety measures and accident data",
     ]
 
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(require_index=True)
 
     console.print(Panel.fit(
         f"[bold]Hybrid RAG Benchmark[/bold]\n"

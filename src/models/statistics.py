@@ -58,6 +58,27 @@ class ScrapingStats:
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
+    # ── Archive ingestion accounting (production path) ─────────────────────
+    rows_read: int = 0             # rows processed by the archive scraper
+    pdf_parsed: int = 0            # records successfully parsed from PDF
+    docx_parsed: int = 0           # records successfully parsed from DOCX
+    synthetic_generated: int = 0   # always 0 for archive ingestion (never synthesizes)
+    skipped_broken: int = 0        # download/HTTP/resolution failure
+    skipped_scanned: int = 0       # image-only PDF, no text layer
+    skipped_unsupported: int = 0   # HTML/ZIP/other non-document content
+    skipped_parser_failure: int = 0  # document downloaded but extraction failed
+    skipped_other: int = 0         # no source URL / pdf mode disabled / unknown
+
+    @property
+    def skipped_total(self) -> int:
+        return (
+            self.skipped_broken
+            + self.skipped_scanned
+            + self.skipped_unsupported
+            + self.skipped_parser_failure
+            + self.skipped_other
+        )
+
     @property
     def success_rate(self) -> float:
         if self.individual_pages_attempted == 0:
@@ -127,9 +148,34 @@ class IngestionStats(BaseModel):
     processing_warnings: list[str] = Field(default_factory=list)
 
     def to_dict(self) -> dict:
-        """Convert to dict for JSON serialization."""
-        data = self.model_dump()
-        # Convert dataclasses to dicts
+        """Serialize to a dict with a consistent, uniform schema.
+
+        Every ``*_stats`` entry carries ``present``/``missing``/``unique``/
+        ``total`` plus the computed ``presence_rate``; the ``scraping`` block
+        includes the computed ``success_rate`` and ``duration_seconds``.
+        """
+        data = self.model_dump(mode="json")
+
+        # Uniform, enriched field stats (adds computed presence_rate)
+        for key in (
+            "question_id_stats",
+            "question_text_stats",
+            "answer_text_stats",
+            "ministry_stats",
+            "date_stats",
+            "subject_stats",
+            "source_url_stats",
+        ):
+            fs: FieldStats = getattr(self, key)
+            data[key] = {
+                "present": fs.present,
+                "missing": fs.missing,
+                "unique": fs.unique,
+                "total": fs.total,
+                "presence_rate": round(fs.presence_rate, 4),
+            }
+
+        # Enriched scraping stats (adds computed success_rate / duration)
         data["scraping"] = {
             "pages_scraped": self.scraping.pages_scraped,
             "question_links_found": self.scraping.question_links_found,
@@ -143,32 +189,19 @@ class IngestionStats(BaseModel):
             "completed_at": self.scraping.completed_at.isoformat() if self.scraping.completed_at else None,
             "success_rate": round(self.scraping.success_rate, 4),
             "duration_seconds": round(self.scraping.duration_seconds, 2),
+            # Archive ingestion accounting (production)
+            "rows_read": self.scraping.rows_read,
+            "pdf_parsed": self.scraping.pdf_parsed,
+            "docx_parsed": self.scraping.docx_parsed,
+            "synthetic_generated": self.scraping.synthetic_generated,
+            "skipped_total": self.scraping.skipped_total,
+            "skipped_broken": self.scraping.skipped_broken,
+            "skipped_scanned": self.scraping.skipped_scanned,
+            "skipped_unsupported": self.scraping.skipped_unsupported,
+            "skipped_parser_failure": self.scraping.skipped_parser_failure,
+            "skipped_other": self.scraping.skipped_other,
         }
-        data["question_id_stats"] = {
-            "present": self.question_id_stats.present,
-            "missing": self.question_id_stats.missing,
-            "unique": self.question_id_stats.unique,
-            "total": self.question_id_stats.total,
-            "presence_rate": round(self.question_id_stats.presence_rate, 4),
-        }
-        data["question_text_stats"] = {
-            "present": self.question_text_stats.present,
-            "missing": self.question_text_stats.missing,
-            "total": self.question_text_stats.total,
-            "presence_rate": round(self.question_text_stats.presence_rate, 4),
-        }
-        data["answer_text_stats"] = {
-            "present": self.answer_text_stats.present,
-            "missing": self.answer_text_stats.missing,
-            "total": self.answer_text_stats.total,
-            "presence_rate": round(self.answer_text_stats.presence_rate, 4),
-        }
-        data["ministry_stats"] = {
-            "present": self.ministry_stats.present,
-            "missing": self.ministry_stats.missing,
-            "total": self.ministry_stats.total,
-            "presence_rate": round(self.ministry_stats.presence_rate, 4),
-        }
+
         return data
 
     def print_summary(self) -> str:

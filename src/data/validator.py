@@ -281,22 +281,22 @@ class DataValidator:
 
         # Field completeness
         report.stats.question_text_stats = self._field_stats(
-            records, lambda r: bool(r.question_text), n
+            records, lambda r: r.question_text, n
         )
         report.stats.answer_text_stats = self._field_stats(
-            records, lambda r: bool(r.answer_text), n
+            records, lambda r: r.answer_text, n
         )
         report.stats.ministry_stats = self._field_stats(
-            records, lambda r: bool(r.metadata.ministry), n
+            records, lambda r: r.metadata.ministry, n
         )
         report.stats.date_stats = self._field_stats(
-            records, lambda r: bool(r.metadata.date), n
+            records, lambda r: r.metadata.date, n
         )
         report.stats.subject_stats = self._field_stats(
-            records, lambda r: bool(r.metadata.subject), n
+            records, lambda r: r.metadata.subject, n
         )
         report.stats.source_url_stats = self._field_stats(
-            records, lambda r: bool(r.metadata.source_url), n
+            records, lambda r: r.metadata.source_url, n
         )
         report.stats.question_id_stats = FieldStats(
             present=len(set(r.question_id for r in records)),
@@ -331,12 +331,17 @@ class DataValidator:
     @staticmethod
     def _field_stats(
         records: list[QARecord],
-        has_field,
+        value_of,
         total: int,
     ) -> FieldStats:
-        """Compute FieldStats for a given field check function."""
-        present = sum(1 for r in records if has_field(r))
-        unique_vals = len(set(str(has_field(r)) for r in records))
+        """Compute FieldStats for a given field value extractor.
+
+        ``value_of(record)`` must return the field's value (or None).
+        ``present`` counts non-empty values; ``unique`` counts the distinct
+        non-empty values across records.
+        """
+        present = sum(1 for r in records if value_of(r))
+        unique_vals = len({value_of(r) for r in records if value_of(r)})
         return FieldStats(
             present=present,
             missing=total - present,

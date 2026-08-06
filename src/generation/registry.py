@@ -218,7 +218,7 @@ class BaseProvider(ABC):
         max_tokens: int = 512,
         num_ctx: int = 8192,
         api_key: Optional[str] = None,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 300,
     ) -> LLMResponse:
         """Execute text generation against the provider endpoint."""
         pass
@@ -261,7 +261,7 @@ class OllamaProvider(BaseProvider):
         max_tokens: int = 512,
         num_ctx: int = 8192,
         api_key: Optional[str] = None,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 300,
     ) -> LLMResponse:
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
@@ -347,7 +347,7 @@ class GroqProvider(BaseProvider):
         max_tokens: int = 512,
         num_ctx: int = 128000,
         api_key: Optional[str] = None,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 300,
     ) -> LLMResponse:
         messages = []
         if system:
@@ -444,7 +444,7 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 512,
         num_ctx: int = 8192,
         api_key: Optional[str] = None,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 300,
     ) -> LLMResponse:
         messages = []
         if system:

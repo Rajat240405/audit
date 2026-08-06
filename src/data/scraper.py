@@ -31,10 +31,12 @@ Design Decisions
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import random
 import re
 import time
+import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -46,6 +48,7 @@ import httpx
 import pandas as pd
 from bs4 import BeautifulSoup
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 from src.models.qa_record import QARecord, QARecordMetadata, QuestionType
@@ -53,123 +56,12 @@ from src.models.statistics import ScrapingStats
 
 console = Console()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-Packaged Real Lok Sabha Q&A Library (Curated Fallback List)
-# ─────────────────────────────────────────────────────────────────────────────
-
-REAL_LOKSABHA_FALLBACK_ARCHIVE = [
-    {
-        "id": "18-0782",
-        "member": "Shri Sunil Kumar Singh",
-        "ministry": "Petroleum and Natural Gas",
-        "question": "Whether the Government has assessed the exact percentage of ethanol blended in petrol and the future roadmap for transitioning to higher blends such as E20, E25 or E27 across both public and private Oil Marketing Companies?",
-        "answer": "The Minister of State in the Ministry of Petroleum and Natural Gas (Shri Suresh Gopi) has stated that the average ethanol blending percentage in petrol has reached 12.5% during 2023-24, rising from a mere 1.5% in 2014. The Government has established a clear roadmap to achieve 20% ethanol blending (E20) across all retail outlets in the country by 2025. Public and private Oil Marketing Companies (OMCs) are actively rolling out E20-compliant dispensers. This initiative has significantly reduced crude oil import dependence, saved foreign exchange worth over Rs. 24,000 crore, and benefited domestic sugarcane farmers with timely payments of over Rs. 82,000 crore in the last five years.",
-        "subject": "Ethanol Blending Target",
-        "type": QuestionType.UNSTARRED,
-        "date": "2024-07-23",
-        "session": 18
-    },
-    {
-        "id": "18-0801",
-        "member": "Shri R. K. Chaudhary",
-        "ministry": "External Affairs",
-        "question": "What is the total number of Regional Passport Offices (RPOs) and Passport Seva Kendras currently operational in Uttar Pradesh and are there any specific initiatives to set up Post Office Passport Seva Kendras (POPSK) in every Lok Sabha Constituency?",
-        "answer": "The Minister of State in the Ministry of External Affairs (Shri Kirti Vardhan Singh) has informed that there are 3 Regional Passport Offices (RPOs) located in Ghaziabad, Lucknow, and Bareilly. Under these RPOs, a total of 6 Passport Seva Kendras (PSKs) and 51 Post Office Passport Seva Kendras (POPSKs) are fully operational in the State of Uttar Pradesh. In January 2017, the Ministry of External Affairs in association with the Department of Posts launched a landmark initiative to establish a POPSK in each Lok Sabha Constituency where there is no existing PSK or POPSK. This has simplified passport delivery, reduced applicant travel distance, and enabled decentralized biographical and document verification.",
-        "subject": "Regional Passport Offices",
-        "type": QuestionType.UNSTARRED,
-        "date": "2024-07-24",
-        "session": 18
-    },
-    {
-        "id": "18-1589",
-        "member": "Shri M. K. Raghavan",
-        "ministry": "Agriculture and Farmers Welfare",
-        "question": "Whether the Government has assessed the extent of crop damage and yield losses caused by invasive black thrips and other pests in southern states, and what financial or scientific assistance has been provided to the affected farmers?",
-        "answer": "The Minister of Agriculture and Farmers Welfare has stated that the Indian Council of Agricultural Research (ICAR) has conducted rapid assessment surveys regarding the outbreak of black thrips (Thrips parvispinus) which primarily affected chili, cotton, and horticultural crops in Andhra Pradesh, Telangana, and Karnataka. Scientific advisories and integrated pest management (IPM) protocols were disseminated to farmers. Financial relief has been disbursed to eligible farmers under the State Disaster Response Fund (SDRF) and the National Disaster Response Fund (SNDF) based on state-submitted damage reports, and crop insurance claims worth Rs. 4,200 crore have been settled under the Pradhan Mantri Fasal Bima Yojana (PMFBY).",
-        "subject": "Crop Damage and Pest Control",
-        "type": QuestionType.STARRED,
-        "date": "2024-07-30",
-        "session": 18
-    },
-    {
-        "id": "18-3373",
-        "member": "Shri S.K. Singh",
-        "ministry": "Health and Family Welfare",
-        "question": "What steps are being taken by the Government to address the shortage of hospital beds and improve healthcare delivery infrastructure in tribal and aspirational districts across India?",
-        "answer": "The Minister of State in the Ministry of Health and Family Welfare has stated that while the provision of healthcare facilities is primarily the responsibility of respective State Governments, the Central Government provides substantial financial and technical support under the National Health Mission (NHM) and the PM-Ayushman Bharat Health Infrastructure Mission (PM-ABHIM). Over Rs. 64,180 crore has been allocated to set up 11,024 urban health and wellness centres and 15,024 rural health block public health units. Special emphasis is given to aspirational and tribal-dominated districts to bridge critical infrastructure gaps and improve the doctor-to-bed ratio.",
-        "subject": "Healthcare Infrastructure",
-        "type": QuestionType.UNSTARRED,
-        "date": "2024-08-02",
-        "session": 18
-    },
-    {
-        "id": "17-1656",
-        "member": "Dr. Shashi Tharoor",
-        "ministry": "Road Transport and Highways",
-        "question": "What is the total number of road construction proposals received from Maharashtra under the Central Road and Infrastructure Fund (CRIF) in the last three years and the total budget allocated and released?",
-        "answer": "The Minister of Road Transport and Highways (Shri Nitin Gadkari) has laid a statement showing that the Ministry has received 328 road infrastructure development proposals from Maharashtra under CRIF. Out of these, 284 projects worth Rs. 4,128.58 crore have been formally approved. An amount of Rs. 2,128.50 crore has already been released to the State Government for execution. The allocation of funds under CRIF is derived from the accruals of the cess on diesel and petrol, and project progress is monitored through a joint quarterly coordination committee.",
-        "subject": "CRIF Road Construction",
-        "type": QuestionType.UNSTARRED,
-        "date": "2023-11-28",
-        "session": 17
-    },
-    {
-        "id": "18-0483",
-        "member": "Smt Navneet Ravi Rana",
-        "ministry": "Women and Child Development",
-        "question": "What is the current status of implementation of the Beti Bachao Beti Padhao (BBBP) scheme and its quantifiable impact on the child sex ratio and girls' secondary school enrollment over the last ten years?",
-        "answer": "The Minister of Women and Child Development has stated that the Beti Bachao Beti Padhao (BBBP) scheme, launched in January 2015, has successfully drawn national attention to the value of the girl child. Quantifiable progress reports show that the Sex Ratio at Birth (SRB) has improved by 12 points nationally, rising from 918 in 2014-15 to 930 in 2023-24. Furthermore, the GER of girls in secondary education has registered an increase from 75.5% in 2014 to 78.1% in 2023. The scheme is now fully implemented across all 640 districts in India.",
-        "subject": "Beti Bachao Beti Padhao Status",
-        "type": QuestionType.STARRED,
-        "date": "2024-07-19",
-        "session": 18
-    },
-    {
-        "id": "18-3535",
-        "member": "Shri Sunil Kumar Pintu",
-        "ministry": "Education",
-        "question": "What initiatives have been taken to implement the National Education Policy (NEP) 2020, specifically with regard to promoting multilingual education and integrating vocational skills in schools?",
-        "answer": "The Minister of Education has stated that the Ministry has launched multiple initiatives to implement NEP 2020. Under the PM SHRI (Prime Minister Schools for Rising India) scheme, over 14,500 schools are being developed to showcase NEP implementation. To promote multilingual education, textbooks are being translated and published in 22 scheduled Indian languages, and local languages are integrated as mediums of instruction at the foundational stage. Vocational and hands-on skill training is introduced from Class 6 onwards, benefiting over 4.5 million school students in the current financial year.",
-        "subject": "NEP 2020 Implementation",
-        "type": QuestionType.UNSTARRED,
-        "date": "2024-08-05",
-        "session": 18
-    },
-    {
-        "id": "18-0566",
-        "member": "Shri Ravindra Dattaram Waikar",
-        "ministry": "Ayush",
-        "question": "Whether the Government has any plans or active schemes to promote the cultivation and scientific research of medicinal plants such as Shatavari, Ashwagandha, and Tulsi under the National Ayush Mission?",
-        "answer": "The Minister of State in the Ministry of Ayush (Shri Prataprao Jadhav) has informed that the Ministry, through the National Medicinal Plants Board (NMPB), is implementing schemes to support the conservation, cultivation, and marketing of high-value medicinal plants. Under the National Ayush Mission (NAM), financial assistance of up to 50% of cultivation costs is provided to farmers for growing medicinal species like Shatavari, Ashwagandha, and Tulsi. Cultivation is spread over 56,000 hectares across 22 states, and 45 projects have been approved to establish post-harvest storage and drying facilities to prevent contamination and safeguard active ingredients.",
-        "subject": "Medicinal Plants Cultivation",
-        "type": QuestionType.UNSTARRED,
-        "date": "2024-07-26",
-        "session": 18
-    },
-    {
-        "id": "17-4207",
-        "member": "Dr. Jayanta Kumar Roy",
-        "ministry": "Health and Family Welfare",
-        "question": "Whether the Government prohibits practitioners of alternative medicine systems from prescribing allopathic drugs and what steps are taken to regulate medical practices under the Indian Medical Council Act?",
-        "answer": "The Minister of Health and Family Welfare has clarified that only medical practitioners registered with the Medical Council of India (MCI) or respective State Medical Councils are legally authorized to prescribe allopathic medicines, as per the provisions of the Indian Medical Council Act, 1956. Unani, Homoeopathy, and Siddha practitioners are registered under separate Central and State Acts and are prohibited from practicing modern medicine (allopathy) unless they possess an additional registered allopathic qualification. State Governments are empowered to take strict legal action against quackery and unauthorized medical practices.",
-        "subject": "Alternative Medicine Regulation",
-        "type": QuestionType.UNSTARRED,
-        "date": "2023-08-11",
-        "session": 17
-    },
-    {
-        "id": "18-0572",
-        "member": "Smt. Supriya Sadanand Sule",
-        "ministry": "Finance",
-        "question": "Whether the Government has any data on the status of GST collection and revenue sharing, and what measures are being taken to assist states meeting their fiscal deficit targets?",
-        "answer": "The Minister of Finance has stated that the overall GST collection in the financial year 2023-24 registered a record growth of 11.5% over the previous fiscal, reaching a total of Rs. 17.9 lakh crore. The Central Government has diligently released the revenue deficit grant of Rs. 1.1 lakh crore to states to bridge their fiscal requirements. Furthermore, as recommended by the GST Council, a special interest-free 50-year loan of Rs. 1.3 lakh crore has been operationalized for state governments to support capital expenditure while adhering to the Fiscal Responsibility and Budget Management (FRBM) guidelines.",
-        "subject": "GST Collection & States",
-        "type": QuestionType.CALLING_ATTENTION,
-        "date": "2024-07-19",
-        "session": 18
-    }
-]
-
+# Browser User-Agent shared by all request paths (sansad.in + DSpace)
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Base Scraper Interface
@@ -427,17 +319,20 @@ class LiveLoksabhaScraper(Scraper):
 
 class RealArchiveScraper(Scraper):
     """
-    Loads actual, genuine Lok Sabha questions metadata from the official
-    Parliament of India dataset on Zenodo, downloads each official PDF from
-    questionsFilePath, extracts the full question and answer text using pypdf,
-    and populates question_text and answer_text directly from the official document.
+    Loads genuine Lok Sabha questions from the validated production dataset
+    (a local Excel copied to ``LOCAL_EXCEL``), downloads each official document
+    from ``questionsFilePath`` — a sansad.in annex PDF/DOCX or a DSpace handle
+    URL — extracts the full question and answer text, and populates
+    ``question_text`` / ``answer_text`` directly from the official document.
 
-    If a PDF download fails or the environment is offline, it gracefully falls
-    back to programmatically generating highly realistic, semantically aligned
-    Q&A records using the official row metadata (no synthesized variants).
+    Production guarantees:
+    - DSpace handle URLs are resolved to their document bitstream automatically.
+    - PDF and DOCX documents are both supported.
+    - Invalid downloads (HTML/ZIP/error pages) are rejected, never parsed.
+    - Failed records are logged and skipped — synthetic answers are NEVER
+      generated for archive ingestion.
     """
 
-    ZENODO_URL = "https://zenodo.org/records/18146342/files/Loksabha_questions.xlsx"
     LOCAL_EXCEL = "data/raw/Loksabha_questions.xlsx"
     PDF_CACHE_DIR = "data/raw/pdfs"
 
@@ -454,113 +349,344 @@ class RealArchiveScraper(Scraper):
         self.pdf_cache_dir = Path(self.PDF_CACHE_DIR)
         self.pdf_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── DSpace handle resolution (Parliament Digital Library) ──────────────
+    #
+    # The final dataset may reference DSpace handle pages such as
+    #   https://elibrary.sansad.in/handle/123456789/385556
+    # instead of a direct PDF/DOCX URL. These are resolved generically (no
+    # hardcoded handles) to the primary document bitstream's content URL.
+
+    def _dspace_get(
+        self,
+        client: httpx.Client,
+        url: str,
+        params: dict | None = None,
+        tries: int = 3,
+    ) -> httpx.Response | None:
+        """GET against a DSpace endpoint with the shared rate-limit/retry policy."""
+        for attempt in range(tries):
+            self._rate_limit()
+            try:
+                response = client.get(
+                    url,
+                    params=params,
+                    headers={"User-Agent": BROWSER_UA},
+                    timeout=self.timeout_seconds,
+                )
+                if response.status_code == 429:
+                    time.sleep(2 + attempt)
+                    continue
+                return response
+            except Exception:
+                if attempt < tries - 1:
+                    time.sleep(1 + attempt)
+        return None
+
+    @staticmethod
+    def _pick_document_bitstream(bitstreams: list[dict]) -> str | None:
+        """
+        Choose the primary document bitstream from a DSpace item's bitstream list.
+
+        Prefers English PDF, then English DOCX, then Hindi PDF/DOCX; ignores
+        derived files (.txt, .jpg, etc.). Returns the bitstream UUID or None.
+        """
+        def score(bs: dict) -> tuple | None:
+            name = (bs.get("name") or "").lower()
+            if name.endswith(".pdf"):
+                kind = 0
+            elif name.endswith(".docx"):
+                kind = 1
+            else:
+                return None  # derived file, not a document
+            hindi = 1 if "hindi" in name else 0
+            return (hindi, kind, name)
+
+        scored = [
+            (score(bs), bs.get("uuid"))
+            for bs in bitstreams
+            if score(bs) is not None and bs.get("uuid")
+        ]
+        scored.sort(key=lambda x: x[0])
+        return scored[0][1] if scored else None
+
+    def _resolve_dspace_handle(
+        self,
+        url: str,
+        client: httpx.Client,
+    ) -> tuple[str | None, str | None]:
+        """
+        Resolve a DSpace handle page to the direct content URL of its document.
+
+        Strategy (fully generic — no hardcoded handles):
+          1. DSpace 7 REST API: pid/find -> item -> bundles -> bitstreams,
+             pick the best document bitstream, return its /content URL.
+          2. Fallback: parse the handle page HTML for the citation_pdf_url
+             meta or the bitstream UUID download link.
+
+        Returns (content_url, error); error is None on success.
+        """
+        m = re.match(r"(https?://[^/]+)/handle/(\d+/\d+)", url)
+        if not m:
+            return None, "invalid_handle_url"
+        base = m.group(1)
+
+        # 1) REST API path
+        try:
+            item = self._dspace_get(client, f"{base}/server/api/pid/find", params={"id": url})
+            if item is not None and item.status_code == 200:
+                item_uuid = item.json().get("uuid")
+                if item_uuid:
+                    bundles = self._dspace_get(
+                        client, f"{base}/server/api/core/items/{item_uuid}/bundles"
+                    )
+                    if bundles is not None and bundles.status_code == 200:
+                        for bundle in bundles.json().get("_embedded", {}).get("bundles", []):
+                            bitstreams = self._dspace_get(
+                                client,
+                                f"{base}/server/api/core/bundles/{bundle['uuid']}/bitstreams",
+                            )
+                            if bitstreams is None or bitstreams.status_code != 200:
+                                continue
+                            uuid = self._pick_document_bitstream(
+                                bitstreams.json().get("_embedded", {}).get("bitstreams", [])
+                            )
+                            if uuid:
+                                return f"{base}/server/api/core/bitstreams/{uuid}/content", None
+        except Exception as e:
+            console.print(f"[dim yellow]DSpace API resolution failed for {url}: {e}[/dim yellow]")
+
+        # 2) HTML page fallback
+        try:
+            page = self._dspace_get(client, url)
+            if page is not None and page.status_code == 200:
+                m2 = re.search(r'citation_pdf_url"\s+content="([^"]+)"', page.text, re.I)
+                if m2:
+                    uuid = re.search(
+                        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+                        m2.group(1),
+                    )
+                    if uuid:
+                        return f"{base}/server/api/core/bitstreams/{uuid.group(1)}/content", None
+                m3 = re.search(
+                    r"bitstreams/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/download",
+                    page.text,
+                )
+                if m3:
+                    return f"{base}/server/api/core/bitstreams/{m3.group(1)}/content", None
+        except Exception as e:
+            console.print(f"[dim yellow]DSpace page resolution failed for {url}: {e}[/dim yellow]")
+
+        return None, "no_dspace_bitstream"
+
     def _download_dataset(self) -> None:
-        """Download the real Lok Sabha dataset from Zenodo with progress tracking."""
+        """Ensure the official Lok Sabha dataset Excel is available locally.
+
+        The validated production dataset must be provided as a local file at
+        ``LOCAL_EXCEL`` (copy the merged/frozen workbook there before running).
+        The archive scraper never downloads or fabricates a dataset.
+        """
         local_path = Path(self.LOCAL_EXCEL)
         if local_path.exists():
             return
+        raise FileNotFoundError(
+            f"Official dataset not found at {self.LOCAL_EXCEL}. "
+            "Copy the validated production Excel to this path before running "
+            "archive ingestion."
+        )
 
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        console.print(f"[cyan]Downloading official Lok Sabha questions dataset from Zenodo...[/cyan]")
-        
-        # Download using streaming HTTPX
-        with httpx.Client(timeout=60.0) as client:
-            with client.stream("GET", self.ZENODO_URL) as response:
-                response.raise_for_status()
-                total_size = int(response.headers.get("content-length", 0))
-                
-                with open(local_path, "wb") as f, Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                    TimeElapsedColumn(),
-                    console=console,
-                ) as p:
-                    task = p.add_task("Downloading Loksabha_questions.xlsx...", total=total_size)
-                    for chunk in response.iter_bytes(chunk_size=8192):
-                        f.write(chunk)
-                        p.update(task, completed=f.tell())
-        console.print("[green]✓ Download complete.[/green]")
+    def _detect_doc_type(self, data: bytes) -> str:
+        """
+        Detect the document type from content magic bytes (not the URL extension).
 
-    def _extract_text_from_pdf(self, pdf_path: Path) -> tuple[str, str] | None:
-        """Extract question and answer from a local PDF using pypdf."""
+        Returns one of: "pdf", "docx", "zip", "html", "other".
+        """
+        if data[:5] == b"%PDF-":
+            return "pdf"
+        if data[:2] == b"PK":
+            # ZIP container — DOCX (OOXML) iff it carries the content-types manifest
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    if "[Content_Types].xml" in zf.namelist():
+                        return "docx"
+            except Exception:
+                pass
+            return "zip"
+        head = data[:2048].lower()
+        if head.startswith(b"<!doctype") or head.startswith(b"<html") or b"<html" in head[:500]:
+            return "html"
+        return "other"
+
+    def _extract_text_from_docx(self, data: bytes) -> str | None:
+        """Extract all text from an OOXML DOCX document (paragraphs + tables)."""
         try:
-            from pypdf import PdfReader
-            reader = PdfReader(pdf_path)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() or ""
-            
-            if not text.strip():
-                return None
-
-            # Split on common answer boundaries
-            match = re.search(r"(?i)\n\s*(?:ANSWER|REPLY|A\s*N\s*S\s*W\s*E\s*R)\s*[:\n]", text)
-            if match:
-                idx = match.start()
-                question_part = text[:idx].strip()
-                answer_part = text[idx:].strip()
-                return question_part, answer_part
-            else:
-                # Basic ratio split fallback
-                split_idx = len(text) // 3
-                return text[:split_idx].strip(), text[split_idx:].strip()
-        except Exception as e:
-            console.print(f"[dim yellow]Warning: Failed to extract text from PDF {pdf_path.name}: {e}[/dim yellow]")
+            from docx import Document
+        except ImportError as e:
+            raise RuntimeError(
+                "python-docx is required for DOCX support. Install with: pip install python-docx"
+            ) from e
+        try:
+            doc = Document(io.BytesIO(data))
+            parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text and cell.text.strip():
+                            parts.append(cell.text)
+            return "\n".join(parts)
+        except Exception:
             return None
 
-    def _get_official_pdf(self, record_id: str, url: str, client: httpx.Client) -> tuple[str, str] | None:
-        """Download and cache PDF from URL, then extract Q&A text."""
-        pdf_path = self.pdf_cache_dir / f"{record_id}.pdf"
-        
-        # Check cache first
-        if pdf_path.exists() and pdf_path.stat().st_size > 1000:
-            res = self._extract_text_from_pdf(pdf_path)
-            if res:
-                return res
+    @staticmethod
+    def _split_question_answer(text: str) -> tuple[str, str] | None:
+        """Split extracted document text into (question, answer)."""
+        if not text.strip():
+            return None
+        match = re.search(r"(?i)\n\s*(?:ANSWER|REPLY|A\s*N\s*S\s*W\s*E\s*R)\s*[:\n]", text)
+        if match:
+            idx = match.start()
+            return text[:idx].strip(), text[idx:].strip()
+        # Basic ratio split fallback for documents without an explicit boundary
+        split_idx = len(text) // 3
+        return text[:split_idx].strip(), text[split_idx:].strip()
 
-        # Download PDF with retry block
+    def _extract_text_from_document(
+        self, data: bytes, doc_type: str
+    ) -> tuple[tuple[str, str] | None, str | None]:
+        """
+        Extract and split Q&A from raw document bytes (PDF or DOCX).
+
+        Returns ``(result, reason)`` where ``reason`` is None on success and one
+        of ``"scanned"`` / ``"parser_failure"`` / ``"unsupported"`` on failure.
+        """
+        if doc_type == "pdf":
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(data))
+                text = "".join((p.extract_text() or "") for p in reader.pages)
+            except Exception:
+                return None, "parser_failure"
+            if not text.strip():
+                return None, "scanned"
+        elif doc_type == "docx":
+            text = self._extract_text_from_docx(data)
+            if text is None:
+                return None, "parser_failure"
+        else:
+            return None, "unsupported"
+        return self._split_question_answer(text), None
+
+    def _extract_text_from_pdf(self, pdf_path: Path) -> tuple[str, str] | None:
+        """Extract question and answer from a local PDF file (compatibility wrapper)."""
+        try:
+            data = pdf_path.read_bytes()
+        except Exception as e:
+            console.print(f"[dim yellow]Warning: Failed to read PDF {pdf_path.name}: {e}[/dim yellow]")
+            return None
+        return self._extract_text_from_document(data, self._detect_doc_type(data))[0]
+
+    def _record_skip(self, reason: str | None) -> None:
+        """Increment the appropriate skip counter for a record."""
+        reason = reason or "unknown"
+        if reason == "broken":
+            self.stats.skipped_broken += 1
+        elif reason == "scanned":
+            self.stats.skipped_scanned += 1
+        elif reason == "unsupported":
+            self.stats.skipped_unsupported += 1
+        elif reason == "parser_failure":
+            self.stats.skipped_parser_failure += 1
+        else:
+            self.stats.skipped_other += 1
+
+    def _get_official_document(
+        self, record_id: str, url: str, client: httpx.Client
+    ) -> tuple[tuple[str, str] | None, str | None, str]:
+        """
+        Download, cache, and extract Q&A from an official document (PDF or DOCX).
+
+        Returns ``(result, reason, doc_type)``:
+        - result: ``(question, answer)`` on success, else None
+        - reason: None on success, else one of ``"broken"``, ``"scanned"``,
+          ``"unsupported"``, ``"parser_failure"``
+        - doc_type: ``"pdf"`` / ``"docx"`` on success (or best-effort), else ""
+        """
+        # Resolve DSpace handle URLs to their direct document content URL
+        if "/handle/" in url:
+            resolved, resolve_err = self._resolve_dspace_handle(url, client)
+            if not resolved:
+                return None, "broken", ""
+            url = resolved
+
+        cache_file = self.pdf_cache_dir / f"{record_id}.pdf"
+
+        # Check cache first (type detected from content, not extension)
+        if cache_file.exists() and cache_file.stat().st_size > 500:
+            data = cache_file.read_bytes()
+            doc_type = self._detect_doc_type(data)
+            res, reason = self._extract_text_from_document(data, doc_type)
+            if res:
+                return res, None, doc_type
+            # cached document is unusable (scanned/parser failure) — don't re-download
+            return None, reason, doc_type
+
+        # Download with retry block
         delay = 1.0
         for attempt in range(self.max_retries):
             self._rate_limit()
             try:
-                # Add headers for browser spoofing
                 response = client.get(
                     url,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"
-                        )
-                    },
-                    timeout=self.timeout_seconds
+                    headers={"User-Agent": BROWSER_UA},
+                    timeout=self.timeout_seconds,
                 )
-                if response.status_code == 200 and len(response.content) > 1000:
-                    with open(pdf_path, "wb") as f:
-                        f.write(response.content)
-                    
-                    res = self._extract_text_from_pdf(pdf_path)
-                    if res:
-                        return res
-                    break
-                elif response.status_code == 429:
+                if response.status_code == 429:
                     time.sleep(delay + random.uniform(0.1, 0.5))
                     delay *= 2
-                else:
+                    continue
+                if response.status_code != 200:
                     time.sleep(delay)
                     delay *= 1.5
+                    continue
+                if len(response.content) < 500:
+                    # too small to be a real document — retry
+                    time.sleep(delay)
+                    delay *= 1.5
+                    continue
+
+                # Reject clearly non-document responses by their Content-Type header
+                content_type = (response.headers.get("content-type") or "").lower()
+                if content_type.startswith("text/html") or content_type.startswith("application/json"):
+                    # HTML error page / JSON error body — not a document
+                    return None, "unsupported", ""
+
+                doc_type = self._detect_doc_type(response.content)
+                if doc_type not in ("pdf", "docx"):
+                    # Reject HTML/ZIP/other content — do not attempt to parse it
+                    return None, "unsupported", doc_type
+
+                cache_file.write_bytes(response.content)
+                res, reason = self._extract_text_from_document(response.content, doc_type)
+                if res:
+                    return res, None, doc_type
+                return None, reason, doc_type  # scanned / parser_failure — don't retry
             except Exception as e:
                 time.sleep(delay + random.uniform(0.1, 0.5))
                 delay *= 2
 
-        return None
+        return None, "broken", ""
 
     def scrape_all(self, max_records: int = 3500) -> Iterator[QARecord]:
         self.stats.started_at = datetime.utcnow()
         records_scraped = 0
+        rows_processed = 0
 
-        # Try to download and parse the official Zenodo dataset of Lok Sabha questions
+        if not self.use_pdf:
+            console.print(
+                "[bold red]Archive ingestion requires document parsing (--use-pdf). "
+                "Without it, no records can be produced — every row will be skipped.[/bold red]"
+            )
+
+        # Try to load and parse the official production dataset (local Excel)
         try:
             self._download_dataset()
             console.print(f"[cyan]Loading and parsing Lok Sabha dataset from {self.LOCAL_EXCEL}...[/cyan]")
@@ -593,8 +719,12 @@ class RealArchiveScraper(Scraper):
             ) as p:
                 task = p.add_task("Ingesting unique real records...", total=min(max_records, len(df_valid)))
 
-                # Create shared client for PDF downloading
-                with httpx.Client(timeout=self.timeout_seconds) as client:
+                # Create shared client for document downloading.
+                # follow_redirects=True is required: the DSpace REST API
+                # (pid/find, bitstreams/content) returns HTTP 302 redirects,
+                # and without following them every DSpace handle would fail
+                # to resolve (observed as mass "broken" skips in production).
+                with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
                     for _, row in df_valid.iterrows():
                         if records_scraped >= max_records:
                             break
@@ -617,36 +747,36 @@ class RealArchiveScraper(Scraper):
                         if self.checkpoints.get(record_id) == "done":
                             continue
 
-                        # ── Try to download, cache, and extract text from the official PDF ──
-                        # PDF extraction is the default path (self.use_pdf = True).
-                        # If self.use_pdf = False, it uses the fast, metadata-driven generator mode.
-                        pdf_parsed_ok = False
+                        # ── Download and extract the official document (PDF or DOCX) ──
+                        # Archive ingestion NEVER synthesizes answers: on any
+                        # failure, log the reason and skip the record.
+                        parsed = None
+                        skip_reason = None
+                        doc_type = ""
                         if self.use_pdf and questions_file_path:
-                            # Construct full PDF url
-                            pdf_url = questions_file_path if questions_file_path.startswith("http") else f"https://sansad.in{questions_file_path}"
-                            
-                            p_res = self._get_official_pdf(record_id, pdf_url, client)
-                            if p_res:
-                                question_text, answer_text = p_res
-                                pdf_parsed_ok = True
+                            # Construct full document URL (sansad.in annex or DSpace handle)
+                            doc_url = questions_file_path if questions_file_path.startswith("http") else f"https://sansad.in{questions_file_path}"
+                            parsed, skip_reason, doc_type = self._get_official_document(record_id, doc_url, client)
+                        elif not self.use_pdf:
+                            skip_reason = "no_pdf_mode"
+                        else:
+                            skip_reason = "no_source"
 
-                        # ── Fallback Path: Dynamic semantic generation if PDF fails or is offline ──
-                        if not pdf_parsed_ok:
-                            # 1. Semantically Aligned Question Text
-                            question_text = f"Will the Minister of {ministry} be pleased to state the details, implementation status, and active schemes regarding {subjects.lower()}?"
-                            if qtype == QuestionType.STARRED:
-                                question_text = f"[STARRED] " + question_text
+                        if parsed is None:
+                            # Log + skip (no synthetic generation in archive mode)
+                            self._record_skip(skip_reason)
+                            console.print(
+                                f"[dim yellow]  skipped {record_id} ({subjects[:60]}): {skip_reason}[/dim yellow]"
+                            )
+                            rows_processed += 1
+                            p.update(task, completed=rows_processed)
+                            continue
 
-                            # 2. Semantically Aligned Answer Text
-                            ans_parts = [
-                                f"The Minister of {ministry} has stated in response to the question raised by {member} that",
-                                f"the Government has implemented comprehensive measures and programmes regarding {subjects.lower()}.",
-                                f"During the tracking period 2019-2024, a total of {random.randint(10000, 500000):,} beneficiaries have been covered across various states.",
-                                f"The Ministry has approved {random.randint(5, 45)} new capital projects worth ₹{random.randint(100, 5000):,} crore for the financial year 2023-24 to boost growth and efficiency.",
-                                f"A total of {random.randint(50, 1000)} active development and service centres have been established, and progress is reviewed quarterly to ensure target outcomes are met.",
-                                "The Government remains committed to supporting state governments and ensuring effective implementation at the grassroots level."
-                            ]
-                            answer_text = " ".join(ans_parts)
+                        question_text, answer_text = parsed
+                        if doc_type == "pdf":
+                            self.stats.pdf_parsed += 1
+                        elif doc_type == "docx":
+                            self.stats.docx_parsed += 1
 
                         # Build source URL
                         if questions_file_path.startswith("http"):
@@ -677,62 +807,50 @@ class RealArchiveScraper(Scraper):
 
                         yield rec
                         records_scraped += 1
+                        rows_processed += 1
                         self._save_checkpoint(record_id, "done")
-                        p.update(task, completed=records_scraped)
+                        p.update(task, completed=rows_processed)
 
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not download or parse Zenodo dataset ({e}). Falling back to internal pre-packaged curated library.[/yellow]")
-            
-            # Fall back to high-quality internal library
-            records_scraped = 0
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                console=console,
-            ) as p:
-                task = p.add_task("Ingesting fallback curated records...", total=min(max_records, len(REAL_LOKSABHA_FALLBACK_ARCHIVE)))
+            console.print(
+                f"[red]FATAL: Could not load the official Lok Sabha dataset ({e}).[/red]"
+            )
+            console.print(
+                "[red]Archive ingestion never falls back to synthetic/curated records. "
+                "Fix the dataset path and re-run.[/red]"
+            )
+            raise
 
-                for item in REAL_LOKSABHA_FALLBACK_ARCHIVE:
-                    if records_scraped >= max_records:
-                        break
-
-                    if (
-                        self.ministry_filter
-                        and self.ministry_filter.lower() not in item["ministry"].lower()
-                    ):
-                        continue
-                    
-                    if self.checkpoints.get(item["id"]) == "done":
-                        continue
-
-                    rec = QARecord(
-                        question_id=item["id"],
-                        question_text=item["question"],
-                        answer_text=item["answer"],
-                        metadata=QARecordMetadata(
-                            ministry=item["ministry"],
-                            member=item.get("member"), # Save the fallback MP name!
-                            date=item["date"],
-                            session=item["session"],
-                            question_number=random.randint(100, 9999),
-                            subject=item["subject"],
-                            question_type=item["type"],
-                            answer_status="answered",
-                            parliament_number=item["session"],
-                            source_url=f"https://sansad.in/ls/questions/questions-and-answers/{item['id']}",
-                        ),
-                        scraped_at=datetime.utcnow(),
-                    )
-                    yield rec
-                    records_scraped += 1
-                    self._save_checkpoint(item["id"], "done")
-                    p.update(task, completed=records_scraped)
-
-        self.stats.individual_pages_attempted = records_scraped
+        self.stats.rows_read = rows_processed
+        self.stats.individual_pages_attempted = rows_processed
         self.stats.individual_pages_success = records_scraped
+        self.stats.individual_pages_failed = self.stats.skipped_total
         self.stats.completed_at = datetime.utcnow()
+
+        self._print_ingestion_summary()
+
+    def _print_ingestion_summary(self) -> None:
+        """Print the final archive-ingestion accounting summary."""
+        st = self.stats
+        console.print()
+        console.print(Panel.fit(
+            "\n".join([
+                "[bold]Archive Ingestion Summary[/bold]",
+                "",
+                f"  Rows read           : {st.rows_read:>8,}",
+                f"  PDF parsed          : {st.pdf_parsed:>8,}",
+                f"  DOCX parsed         : {st.docx_parsed:>8,}",
+                f"  Skipped             : {st.skipped_total:>8,}",
+                f"      broken          : {st.skipped_broken:>8,}",
+                f"      scanned         : {st.skipped_scanned:>8,}",
+                f"      unsupported     : {st.skipped_unsupported:>8,}",
+                f"      parser failure  : {st.skipped_parser_failure:>8,}",
+                f"      other           : {st.skipped_other:>8,}",
+                f"  Synthetic generated : {st.synthetic_generated:>8,}",
+            ]),
+            title="[bold green]Phase 1 Complete — Scraping[/bold green]",
+            border_style="green",
+        ))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

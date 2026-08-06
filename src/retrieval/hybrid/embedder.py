@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import numpy.typing as npt
 from sentence_transformers import SentenceTransformer
-
+import torch
 
 # Global model singletons to prevent redundant reloading
 _MODEL_CACHE: Dict[tuple[str, str], SentenceTransformer] = {}
@@ -53,7 +53,12 @@ class Embedder:
             If True, L2-normalize embeddings to unit length.
         """
         self.model_name = model_name
-        self.device = device or "cpu"
+        if device is not None:
+            self.device = device or "cpu"
+            self.device = device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Embedding device: {self.device}")
         self.normalize = normalize
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
