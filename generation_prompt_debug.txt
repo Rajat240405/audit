@@ -16,347 +16,522 @@ Below is the most relevant parliamentary Question & Answer context retrieved for
 RETRIEVED CONTEXT (5 records):
 ======================================================================
 
-[Source 1] (ID: 17-12-2138)
+[Source 1] (ID: 18-8-0571)
 Ministry: EARTH SCIENCES
-Subject: Doppler Weather Radars
+Subject: Weather Forecasting System in Telangana
 
 QUESTION: GOVERNMENT OF INDIA 
 MINISTRY OF EARTH SCIENCES 
 LOK SABHA 
-UNSTARRED QUESTION NO. 2138 
-TO BE ANSWERED ON WEDNESDAY, 2ND AUGUST, 2023 
+UNSTARRED QUESTION NO. 571 
+TO BE ANSWERED ON WEDNESDAY, 22ND JULY, 2026 
  
-DOPPLER WEATHER RADARS 
- 
-2138.  SHRI MADDILA GURUMOORTHY: 
- 
-Will the Minister of EARTH SCIENCES be pleased to state: 
- 
-(a) the details of Doppler Weather Radars commissioned by the Government, State/UT-wise; 
-(b) the expected benefits due to the same; and  
-(c) the details of such radars proposed to be commissioned by the Government?
-ANSWER: ANSWER 
-THE MINISTER OF EARTH SCIENCES 
-(SHRI KIREN RIJIJU) 
- 
-(a) At present India Meteorological Department (IMD) is operating 37 numbers of Doppler 
-Weather Radars (DWRs) across the country, which comprises of 22 S-Band DWRs, 4 C-
-Band DWRs and 11 X-Band DWRs. The details of the radars are given in Annexure. 
- 
-(b)   The DWRs are used to monitor thunderstorms, tropical cyclones and other severe 
-weather events. The radar data products such as reflectivity and the radial velocity are 
-assimilated in various numerical models for generating operational forecasts at different 
-temporal and spatial resolutions. The assimilation of the radar products improves the 
-model initial conditions and thereby the forecasts. These products are also used for the 
-nowcast and very short range weather forecasts, up to 12 hours, issued by IMD using 
-High resolution Rapid Refresh (HRRR) regional model.  
- 
-(c)  Another 20 more DWRs are at different stage of commissioning in a phased manner by 
-IMD to bring the entire country under the radar coverage. 
- 
- 
- 
- 
-  Annexure 
-Details of DWR Network  
- 
-***** 
-S. N
-o. STATION  State Type 
-1. AGARTALA Tripura S-BAND 
-2. AYA NAGAR NEW DELHI X-BAND 
-3. BHOPAL MADHYA PRADESH S-BAND 
-4. BHUJ GUJARAT S-BAND 
-5. BANIHAL JAMMU & KASHMIR X-BAND 
-6. CHENNAI TAMILNADU S-BAND 
-7. CHERAPUNJEE MEGHALAYA S-BAND 
-8. GOA GOA S-BAND 
-9. GOPALPUR ODISHA S-BAND 
-10. HYDERABAD TELANGANA S-BAND 
-11. JAIPUR RAJASTHAN C-BAND 
-12. JAMMU JAMMU & KASHMIR X-BAND 
-13. JOT HIMACHAL PRADESH X-BAND 
-14. KARAIKAL PUDUCHERRY S-BAND 
-15. KOLKATA WEST BENGAL S-BAND 
-16. KOCHI KERALA S-BAND 
-17. KUFRI HIMACHAL PRADESH X-BAND 
-18. LEH LADAKH X-BAND 
-19. LUCKNOW UTTAR PRADESH S-BAND 
-20. MACHILIPATNAM ANDHRA PRADESH S-BAND 
-21. MOHANBARI ASSAM S-BAND 
-22. MUKTESHWAR UTTARAKHAND X-BAND 
-23. MUMBAI (B) MAHARASHTRA S-BAND 
-24. MURARI DEVI HIMACHAL PRADESH X-BAND 
-25. NAGPUR(M) MAHARASHTRA S-BAND 
-26. NEW DELHI (HQ) NEW DELHI C-BAND 
-27. NEW DELHI (PALAM) NEW DELHI S-BAND 
-28. PALLIKARANAI TAMILNADU X-BAND 
-29. PARADEEP ODISHA S-BAND 
-30. PATIALA PUNJAB S-BAND 
-31. PATNA BIHAR S-BAND 
-32. SRIHARIKOTA ANDHRA PRADESH S-BAND 
-33. SRINAGAR JAMMU & KASHMIR X-BAND 
-34. SURKANDA DEVI UTTARAKHAND X-BAND 
-35. THIRUVANANTHAPURAM KERALA S-BAND 
-36. VERAVALI MAHARASHTRA C-BAND 
-37. VISAKHAPATNAM ANDHRA PRADESH S-BAND
-
-----------------------------------------------------------------------
-[Source 2] (ID: 14-9-0519)
-Ministry: EARTH SCIENCES
-Subject: DOPPLER WEATHER RADARS
-
-QUESTION: GOVERNMENT OF INDIA 
-EARTH SCIENCES
-LOK SABHA
-UNSTARRED QUESTION NO:519
-ANSWERED ON:24.11.2006
-DOPPLER WEATHER RADARS 
-Patil Shri Shriniwas Dadasaheb
-Will the Minister of EARTH SCIENCES be pleased to state:
-(a) Whether there is a proposal to install 
-Doppler Weather Radars in the country; 
-(b) if so, the details alongwith 
-locations thereof; ( 
-(c) Whether Doppler Weather Radars are likely to be installed near major dams in the country to control 
-floods; and 
-(d) if so, the details thereof ?
-ANSWER: Answer
-MINISTER OF SCIENCE & TECHNOLOGY AND MINISTER OF EARTH SCIENCES (SHRI KAPIL SIBAL) 
-(a) 
-Yes, Sir 
-(b) India Meteorological Department plans to install around 55 Doppler Weather radars to cover whole area of the country under its
-proposed modernization plan in a phased manner. 
-The proposed modernization plan is under consideration of the ministry. Map
-showing tentative locations for installation of Doppler weather radars is enclosed. 
-(c) & (d) 
-These Radars will help in real time monitoring of weather systems giving rise to heavy rainfall and Using the Radar data
-rainfall amounts over a given area can also be estimated. This information can be used by the concerned dam authorities to control
-release of water.
-
-----------------------------------------------------------------------
-[Source 3] (ID: 16-2-0138)
-Ministry: EARTH SCIENCES
-Subject: DOPPLER WEATHER RADARS
-
-QUESTION: GOVERNMENT OF INDIA 
-EARTH SCIENCES
-LOK SABHA
-STARRED 
-QUESTION NO:138
-ANSWERED ON:16.07.2014
-DOPPLER WEATHER RADARS
-Rudy Shri Rajiv Pratap
-Will the Minister of EARTH SCIENCES be pleased to state:
-(a) whether the Doppler Weather Radars/Polarimetric Doppler Radar System have 
-been installed/proposed to be installed across the
-country; 
-(b) if so, the details of Radar systems installed, functional and proposed to be installed in various parts of the country and the stage of
-their installation, location-wise; 
-(c) whether the India Meteorological Department has been able to predict/identify 
-the areas which are prone to heavy monsoons/flash
-floods and landslides; 
-(d) if so, whether the above-mentioned Radar systems have been installed/are 
-proposed to be installed at such places; and 
-(e) if so, the details thereof and if not, the reasons therefor?
-ANSWER: Answer
-MINISTER FOR MINISTRY OF SCIENCE AND TECHNOLOGY AND MINISTRY OF EARTH SCIENCES (DR. JITENDRA SINGH) 
-a) - e) A statement is laid on the Table of the House 
-STATEMENT LAID ON THE TABLE OF THE LOK SABHA IN REPLY TO (a) to (e) OF STARRED 
-QUESTION No. 138 REGARDING
-"DOPPLER WEATHER RADARS " ASKED BY SHRI RAJIV PRATAP 
-RUDY FOR ANSWER ON WEDNESDAY, JULY 16, 2014 
-a) Yes Madam. 
-b) As on today, 2 Nos. of polarimetric Doppler Weather Radar (DWR) systems at Delhi-Lodi Road and Jaipur, respectively, are
-functional along with 16 Nos. non-polarimetric DWR systems, respectively at Chennai, Sriharikota, Machilipatnam, Visakhapatnam,
-Kolkata, Mumbai, Bhuj, Hyderabad, Nagpur, Patiala, Delhi Palam, Lucknow, Patna, Mohanbari, Agartala and Bhopal, in other parts of
-the country. Installation of 3 Nos. of non-polarimetric DWRs at Paradip, Goa and Karaikal is taken up now. 
-Based on scientific
-assessment of the needs for further augmentation of observing system network, comprising Doppler Weather Radars, rain radars,
-Automatic Weather Stations (AWSs), Automatic Rain Gauges (ARGs), Snow Gauges etc. expansion has been formulated over the
-western Himalayan region. 
-c) Data generated from all observing systems viz. surface and upper air 
-observations, satellite observations, aircraft observations,
-DWRs etc. are fully 
-used by various forecast models to generate most representative initial state 3-D structure of the atmosphere and
-high resolution (9km grid scale) forecasts over 
-India to predict heavy rainfall occurrences. Further, DWR network is primarily 
-employed
-to improve the severe weather surveillance capability and for operating now-casting (very short range up to 6h in advance) service
-(operated for about 117 
-locations across India). ESSO-IMD is not involved with the predictions for flash floods and landslides. 
-d)-e) Yes Madam. 
-The Earth System Science Organization − India Meteorological Department (ESSO-IMD) is endeavoring to expand
-the DWR network in a phased manner 
-so as to cover the whole country.
-
-----------------------------------------------------------------------
-[Source 4] (ID: 18-2-2702)
-Ministry: EARTH SCIENCES
-Subject: New Doppler Weather Radar Network
-
-QUESTION: GOVERNMENT OF INDIA 
-MINISTRY OF EARTH SCIENCES 
-LOK SABHA 
-UNSTARRED QUESTION NO. 2702 
-TO BE ANSWERED ON WEDNESDAY, 7THAUGUST, 2024 
- 
-NEW DOPPLER WEATHER RADAR NETWORK 
- 
-2702.  SHRI AJAY KUMAR MANDAL:   
+WEA THER FORECASTING SYSTEM IN TELANGANA 
    
+571. SHRI ARVIND DHARMAPURI: 
+  
 Will the Minister of EARTH SCIENCES be pleased to state: 
  
-(a) whether it is a fact that the new Doppler Weather Radar Network offers more advantages as 
-compared to the previous weather prediction system, if so, the details thereof; 
-(b) the number of new Doppler Weather Radars (DWRs) deployed across the country, State-
+(a) the details of Automatic Weather Stations, rain gauges, Doppler weather radar 
+coverage and agro-meteorological advisory services available in Telangana, district-
 wise; 
-(c) the number of States that are depending on DWRs deployed in neighbouring States for 
-prediction of weather conditions; 
-(d) whether the Government has initiated measures to deploy DWRs in each and every State 
-including Bihar as per the recommended distance factor for accurate prediction; and 
-(e) if so, the details thereof?
+(b) whether Nizamabad and Jagtial districts being important turmeric, paddy and maize 
+growing regions are covered by localised weather and crop advisories and if so, the 
+details thereof; 
+(c) the details of mechanism put in place through which farmers receive timely alerts on 
+heavy rain, heatwaves, hailstorms, lightning and likely crop damage; and 
+(d) whether the Government proposes to strengthen Panchayat-level or block-level weather 
+forecasting and farmer advisory dissemination in Telangana and if so, the details 
+thereof?
 ANSWER: ANSWER 
 THE MINISTER OF STATE (INDEPENDENT CHARGE) FOR 
 MINISTRY OF SCIENCE AND TECHNOLOGY 
 AND EARTH SCIENCES 
 (DR. JITENDRA SINGH) 
  
-(a) Yes. The Doppler Weather Radars (DWRs) installed at various places across the country are 
-used for continuous weather monitoring and weather forecasting for the regions covered by 
-the respective DWRs. Suitable warnings and alerts are issued with the help of these DWRs in 
-view of the challenges posed by various weather phenomena. 
+(a) The India Meteorological Department (IMD) operates one S-Band Doppler Weather 
+Radar (DWR) at the Meteorological Centre in Hyderabad. This radar provides 
+observational coverage for all districts of Telangana, featuring an effective range of 250 
+km and a maximum range of 500 km. Additional radar coverage for the state is provided 
+by DWRs located in neighboring states at Vishakhapatnam, Machilipatnam, Solapur, 
+and Nagpur. IMD operates 3 manned surface observatories at Hyderabad, Nizamabad, 
+and Ramagundam. Additionally, 2 upper-air Radio Sonde Observatories are operational 
+at Hyderabad and Ramagundam to represent the state. For real-time data acquisition 
+and weather monitoring, there are 31 Automatic Weather Stations (AWSs) and 52 
+Automatic Rain Gauges (ARGs) active across the state. Furthermore, under the district- 
+wise and block-wise rainfall monitoring networks, a total of 369 rain gauges are 
+functional, providing representation for all districts of Telangana. Agro-meteorological 
+advisory services are fully functional across the State's districts. Supported by the 
+Central and State agriculture departments as well as agricultural universities, these 
+services issue bi-weekly crop and weather advisories every Tuesday and Friday to guide 
+regional farming operations. 
  
-(b) Currently, 39 DWRs are installed at various locations across the country. Details of the 
-DWRs network are given in Annexure-1. 
- 
-(c) Eight States depend on DWRs deployed in neighbouring States, namely Chhattisgarh, 
-Haryana, Jharkhand, Karnataka, Manipur, Mizoram, Nagaland, and Sikkim. 
- 
-(d) Yes. India Meteorological Department is in the process of procuring and installing DWRs in 
-a phased manner to strengthen the weather research and forecasting infrastructure across the 
-country, including the State of Bihar.  
- 
-(e) The locations of these DWRs have been distributed in the best possible way to monitor 
-weather conditions across multiple States in the Indian region. 
+(b) Yes.  MD regularly issues localized weather and crop advisories covering key 
+agricultural regions, including the districts of Nizamabad and Jagtial in Telangana. 
+These advisories specifically cater to major local crops such as Paddy, Turmeric, and 
+Maize. The details of the mechanisms and upcoming infrastructure for providing these 
+advisories are as follows: 
   
-Annexure-1 
  
-Doppler Weather Radars (DWRs) network in the Indian region: 
+ Regular district-wise weather forecasts are issued, which include medium-range 
+forecasts valid for seven days (updated thrice daily) and location-specific, 3- 
+hourly Nowcasts provided on a 24/7 basis. Additionally, extreme weather bulletins 
+incorporating impact-based forecasts are issued 24 to 48 hours in 
+advance. 
+ 
+ Agromet Advisory Bulletins featuring weather-aligned crop warnings are issued 
+twice a week (every Tuesday and Friday). Timely alerts and customized 
+guidance are provided well in advance for crucial crop cycles of turmeric, 
+paddy, and maize to mitigate agricultural risks. 
+ 
+(c) The India Meteorological Department, in coordination with relevant agencies, has 
+established a comprehensive multi-hazard early warning platform to ensure that farmers 
+receive timely alerts regarding extreme weather events and potential crop damage. To 
+ensure regional accessibility, these advisories are disseminated in Telugu, Hindi, 
+English, and other regional languages. The major dissemination mechanisms put in 
+place include: 
+ 
+ Digital and Mobile Alerts: Timely and location-specific emergency alerts are 
+broadcast directly to mobile phones through the Common Alerting Protocol 
+(CAP) / SACHET Application, Short Message Service (SMS), and electronic 
+mail (e-mail). 
+ 
+ Specialized Mobile Applications: The IMD's dedicated mobile application 
+'Mausam' provides general weather alerts and forecasts to the public. For severe 
+convective weather, the 'Damini' mobile application delivers real-time, 
+location-based lightning alerts. 
+ 
+ Mass Media and Social Media Dissemination: Weather warnings and agromet 
+advisories are widely broadcasted through All India Radio (AIR) and 
+Doordarshan. In addition, Social Media platforms (including WhatsApp, 
+Facebook, X, and Instagram) are extensively utilized to ensure last-mile reach. 
+ 
+ Institutional Coordination: A direct, real-time coordination mechanism is 
+maintained with District Collectors, State Disaster Management Authorities 
+(SDMAs), the Department of Agriculture, and other local stakeholders to ensure 
+rapid ground-level dissemination and administrative preparedness. 
+ 
+(d) Yes. Under the Mission Mausam, the India Meteorological Department is expanding 
+meteorological capabilities to enhance localized weather forecasting and advisory 
+services for farmers across the country, including the State of Telangana. The details of 
+the institutional mechanisms, digital platforms, and infrastructure upgrades being 
+implemented to strengthen block and Panchayat-level dissemination are as follows: 
+ 
+ Localized Forecasting Framework: The India Meteorological Department 
+(IMD) regularly generates and issues customized block-level weather forecasts 
+and agromet advisories across the State of Telangana. 
  
  
-S. No. State / Union Territory DWR Locations 
-1. Andhra Pradesh (3) Machilipatnam (S-Band) 
-Sriharikota, ISRO (S-Band) 
-Visakhapatnam (S-Band) 
-2. Arunachal Pradesh - 
-3. Assam (1) Mohanbari (S-Band) 
-4. Bihar (1) Patna (S-Band) 
-5. Chhattisgarh - 
-6. Goa (1) Goa (S-Band) 
-7. Gujarat (1) Bhuj (S-Band) 
-8. Haryana - 
-9. Himachal Pradesh (3) Jot (X-Band) 
-Murari Devi (X-Band) 
-Kufri (X-Band) 
-10. Jharkhand - 
-11. Karnataka - 
-12. Kerala (2) Kochi (S-Band) 
-VSSC, ISRO Thiruvananthpuram 
-(C-Band) 
-13. Madhya Pradesh (1) Bhopal (S-Band) 
-14. Maharashtra (4) Mumbai (S-Band) 
-Nagpur (S-Band) 
-IITM Solapur (C-Band) 
-Veravali (C-Band) 
-15. Manipur - 
-16. Meghalaya (1) Cherrapunji, ISRO (S-Band) 
-17. Mizoram - 
-18. Nagaland - 
-19. Odisha (2) Gopalpur (S-Band) 
-Paradip (S-Band) 
-20. Punjab (1) Patiala (S-Band) 
-21. Rajasthan (1) Jaipur (C-Band) 
-22. Sikkim - 
-23. Tamil Nadu (3) Chennai (S-Band) 
-Karaikal (S-Band) 
-NIOT Chennai (X-Band) 
+ 
+  Panchayat Mausam Seva Portal: In collaboration with the Ministry of 
+Panchayati Raj, the IMD has developed the Panchayat Mausam Seva Portal. 
+This initiative integrates Panchayat-level weather forecasts directly into rural 
+governance digital platforms, including e-GramSwaraj, Meri Panchayat App, 
+e-Manchitra, and Mausamgram. 
+ Last-Mile WhatsApp Dissemination: To ensure rapid transmission to the 
+grassroots, the mobile numbers of Panchayat Members, Ward Members, and 
+Panchayat Secretaries have been integrated into the portal. This enables the 
+direct automated delivery of weather forecasts and agrometeorological 
+advisories via WhatsApp for local dissemination at the Gram Panchayat level. 
+ Leveraging Rural Networks: IMD utilizes the extensive Krishi Sakhis and 
+Pashu Sakhis networks under the Ministry of Rural Development to facilitate 
+the last-mile delivery of crucial weather updates and livestock/crop advisories 
+to remote farming communities. 
+ Farmers' Awareness Programs (FAPs): To promote climate-resilient 
+agriculture, the IMD has organized over 7,300 Farmers' Awareness Programs 
+across 373 districts (including 83 Aspirational Districts), training approximately 
+3.67 lakh farmers on the effective utilization of weather-based advisory 
+services. 
+ Advanced Analytics Systems under 'Mission Mausam': Under the aegis of 
+'Mission Mausam', the IMD has developed: 
+ KALP (Krishi Advisory based on Location-specific Weather Prediction): A 
+system dedicated to generating highly localized advisories tailored to 
+specific crop varieties and their exact growth stages. 
+ Mausam SANKALP (Systematic Agrometeorological aNalytics, 
+Knowledge and Advisory enabLing Platform): A platform designed to 
+strengthen comprehensive weather data analytics, institutional advisory 
+generation, and climate-resilient agricultural planning. 
+ 
+ 
+*****
+
+----------------------------------------------------------------------
+[Source 2] (ID: 18-8-2866)
+Ministry: EARTH SCIENCES
+Subject: Weather-based Agro-Advisor Services
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF EARTH SCIENCES 
+LOK SABHA 
+UNSTARRED QUESTION NO. 2866 
+TO BE ANSWERED ON WEDNESDAY, 5TH AUGUST, 2026 
+ 
+WEATHER-BASED AGRO-ADVISOR SERVICES 
+ 
+†2866. DR. RAJKUMAR SANGWAN: 
    
+Will the Minister of EARTH SCIENCES be pleased to state: 
  
-24. Telangana (1)  Hyderabad (S-Band) 
-25. Tripura (1)  Agartala (S-Band) 
-26. Uttarakhand (3) Lansdowne (X-Band) 
-Mukteshwar (X-Band) 
-Surkanda Devi (X-Band) 
-27. Uttar Pradesh (1) Lucknow (S-Band) 
-28. West Bengal (1) Kolkata (S-Band) 
-29. Andaman & Nicobar Islands - 
-30. Dadra & Nagar Haveli and Daman 
-& Diu 
-- 
-31. Jammu & Kashmir (3) Banihal Top (X-Band) 
-Jammu (X-Band) 
-Srinagar (X-Band) 
-32. Lakshadweep - 
-33. Chandigarh - 
-34. Delhi (3) Ayanagar (X-Band) 
-Palam (S-Band) 
-HQ Mausam Bhawan (C-Band) 
-35. Ladakh (1) Leh (X-Band) 
-36. Puducherry - 
+(a) whether the Government has strengthened and expanded the forecasting mechanism 
+of the India Meteorological Department (IMD), Doppler Weather Radar Network, 
+Automatic Weather Stations, satellite-based monitoring systems and Artificial 
+Intelligence-based weather forecasting systems with the objective of making weather 
+forecasting services in the country more accurate, timely and farmer-friendly and if 
+so, the details thereof; 
+(b) whether crop-specific, weather-based scientific advisories as well as advance 
+warnings regarding rainfall, hailstorm, heatwave, coldwave and other adverse weather 
+conditions are being regularly provided to farmers in Uttar Pradesh including Baghpat 
+district through Agromet Advisories via SMS, mobile apps, Kisan Portal and other 
+digital platforms, if so, the details thereof and the positive outcomes achieved; and 
+(c) whether the Government proposes to further expand and increase awareness regarding 
+weather-based agromet advisory services in Western Uttar Pradesh including Baghpat 
+and if so, the details thereof?
+ANSWER: ANSWER 
+THE MINISTER OF STATE (INDEPENDENT CHARGE) FOR 
+MINISTRY OF SCIENCE AND TECHNOLOGY 
+AND EARTH SCIENCES 
+(DR. JITENDRA SINGH) 
+ 
+(a) The Government has undertaken several measures to strengthen the country's weather 
+forecasting system through the India Meteorological Department (IMD) under the 
+Ministry of Earth Sciences (MoES). It has adopted advanced, state-of-the-art 
+technologies, including high-performance computing (HPC) facilities to support high-
+resolution Numerical Weather Prediction (NWP) models, modern observational 
+networks, and artificial intelligence (AI)-enabled weather forecasting tools. These 
+advancements have significantly enhanced the accuracy and reliability of weather 
+monitoring, forecasting, and early warning services across the country. Currently, the 
+Ministry has a weather observation network comprising manual observatories, 
+Automatic Weather Stations (AWSs), Automated Rain Gauges (ARGs), Agro-AWS, 
+Doppler Weather Radars (DWRs), upper-air observatories, and weather monitoring 
+satellites. 
+ 
+Under Mission Mausam, various global and regional NWP modeling systems have 
+been implemented and operationalized to generate seamless short-, medium-, and 
+extended-range forecasts for all, including farmers. The Bharat Forecasting System 
+(BharatFS), with a spatial resolution of 6 km, generates forecasts at the cluster of 
+Panchayat level, enabling the capture of localized weather features and improving the 
+accuracy of weather forecasts.   
+India Meteorological Department, in collaboration with the Ministry of Panchayati 
+Raj (MoPR), has launched Panchayat-level weather forecasts covering nearly all 
+Gram Panchayats in India. These forecasts are accessible through digital platforms 
+such as e-Gramswaraj (https://egramswaraj.gov.in), Meri Panchayat app, e-Manchitra 
+of MoPR, and Mausamgram of IMD, MoES (https://mausamgram.imd.gov.in). 
+Currently, three AI-based global models (e.g., Pangu Weather, FourCastNet, 
+GraphCast) are operational to provide guidance to the forecaster to predict severe 
+weather. Artificial Intelligence (AI) and Machine Learning (ML) applications and 
+tools have been developed indigenously by weather scientists of the MoES 
+institutions for various aspects of monitoring and observational processing, such as 
+the Nowcasting tool and downscaled urban forecasting. 
+ 
+(b)-(c) IMD implements the Gramin Krishi Mausam Sewa (GKMS) in collaboration with 55 
+Host Institutes, including the Indian Council of Agricultural Research (ICAR) 
+institutes, State Agricultural Universities (SAUs), Indian Institutes of Technology 
+(IITs), and other institutions. Under this, 130 Agrometeorological Field Units 
+(AMFUs) covering 127 agro-climatic zones issue district-specific agro-
+meteorological advisories twice (Tuesday and Friday) a week ahead, based on IMD's 
+medium-range weather forecasts, and communicate to the farmers. Under the GKMS 
+scheme, all agriculturally important districts are covered across the country, including 
+Uttar Pradesh, for providing real-time weather forecasts, agro-meteorological 
+advisories, and early warnings directly to the farmers. In addition, IMD issues district-
+level impact-based weather forecast & risk-based warning valid up to 7 days through 
+Regional Meteorological Centres & Meteorological Centres for their concerned 
+States, including Uttar Pradesh twice daily. These warnings are issued more 
+frequently in case of severe weather. Dissemination of weather forecasts and warnings 
+through multiple communication platforms, including mobile applications, APIs, web 
+portals, SMS, television, radio, and social media, in coordination with Central and 
+State Government agencies.  
+ 
+IMD developed a public-friendly website (https://mausam.imd.gov.in/) and mobile 
+apps for the dissemination of weather-related warnings, such as the MAUSAM App 
+for weather forecasting and warnings, MEGHDOOT App for agro-meteorological 
+services, the DAMINI App for lightning warnings, UMANG App for weather 
+forecasting and warnings across the country, including Baghpat, Western Uttar 
+Pradesh. Further, IMD regularly conducts the survey to assess the usefulness of the 
+products for specific sectors like agro-advisory services to farmers and nowcast 
+services for the general public. Based on the survey findings, a report has been 
+prepared and released. The report is publicly available at the following links: 
+https://mausam.imd.gov.in/imd_latest/contents/agromet/kalp/voices.pdf     & 
+https://mausam.imd.gov.in/imd_latest/contents/agromet/states/States.pdf.  
+  
+*****
+
+----------------------------------------------------------------------
+[Source 3] (ID: 16-14-2061)
+Ministry: EARTH SCIENCES
+Subject: Weather Monitoring
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF EARTH SCIENCES 
+LOK SABHA 
+UNSTARRED QUESTION No. 2061 
+TO BE ANSWERED ON WEDNESDAY, MARCH 07, 2018 
+ 
+WEATHER MONITORING 
+ 
+2061. SHRIMATI MEENAKASHI LEKHI: 
+  
+Will the Minister of EARTH SCIENCES be pleased to state: 
+ 
+(a) whether weather monitoring is being used to help farm ers in 
+making better agricultural decisions; 
+(b) if so, whether there are any schemes to ensure that the farmers 
+living in rural areas have access to this information; and  
+(c) if so, the details thereof ?
+ANSWER: ANSWER 
+MINISTER OF STATE FOR MINISTRY OF SCIENCE AND ECHNOLOGY 
+AND MINISTRY OF EARTH SCIENCES 
+(SHRI Y. S. CHOWDARY) 
+ 
+(a) Yes, Madam. 
+(b) Under Gramin Krishi Mausam Sewa Scheme (GKMS), India 
+Meteorological Department (IMD) generates district level weather 
+forecasts for the next five days exclusively for all the farmers of the 
+country. 
+(c) Based on the district level forecast issued by IMD, district Agromet 
+Advisory Services (AAS) bulletins are pre pared by the Agromet Field 
+Units (AMFUs) for the different agromet zones of the country. These 
+AAS bulletins are generated twice a week i.e. on Tuesday and Friday. 
+During prolonged dry spells or break in monsoon like situations, inputs 
+from Extended Range Forecast System valid for forthcoming two 
+weeks are also referred while preparing the Agromet Advisory 
+bulletins. 
+ 
+These are disseminated to the farmers through multimedia channels 
+(print/visual/radio) as well as IT based media including SMS (using 
+Kishan Portal & private companies) for the benefit of the farmers. At 
+present about 22.7 millions farmers receive these we ather forecast 
+and agromet advisories directly by SMS. IMD is planning to reach more 
+farmers through SMS.  
+ 
+As per the survey conducted by National council of Applied Economic 
+Research (NCAER), farming community is widely using the GKMS 
+Service products for their critical farms operations and get economical 
+benefits. 
+*****
+
+----------------------------------------------------------------------
+[Source 4] (ID: 17-3-3296)
+Ministry: EARTH SCIENCES
+Subject: IMD Data
+
+QUESTION: GOVERNMENT Of iNDiA
+MINISTRY OF EARTH SCIENCES
+LOK SABHA UN-STARRED QUESTION No. 3296
+TO BE ANSWERED ON MARCH 13, 2020
+IMD DATA
+3296. SHRI G.M. Siddeshwar :
+Will the Minister of EARTH SCIENCES be pleased to state:
+(a) whether the India Meteorological Department (IMD) provides block
+wise data, if so, the details thereof and if not, the reasons therefor;
+(b) whether the IMD has adequate number of radars for collecting
+precipitation data at the wider and vertical levels in the
+atmosphere and if so, the details thereof;
+(c) whether the National Centre for Medium Range Weather Forecasting
+had asked the Ministry of Earth Sciences for 20 more scientists and
+if so, whether they have been provided and if not, the reasons
+therefor; and
+(d) whether the Centre of Excellence in Climate Modelling has been
+launched and if so, the details thereof and if not, the reasons
+therefor?
+ANSWER: ANSWER
+MINISTER FOR SCIENCE AND TECHNOLOGY
+AND EARTH SCIENCES
+(Dr. HARSH VARDHAN)
+(a) Yes Sir. IMD has already covered 637 districts in the country for
+providing Agromet Advisories and is now venturing into
+implementation of block level weather forecast and Agromet
+Advisories in collaboration with Krishi Vigyan Kendras (KVKs)
+under ICAR network. District Agromet Units (DAM Us) are being
+established in Krishi Vikas Kendra (KVKs) under ICAR network.
+Implementation of block level Agromet Advisory Service would
+address the micro-level variation in weather and climate and hence
+more numbers of farmers will be benefitted.
+Till the end of February 2020, 123 DAMUs and 100
+Agrometeorological Field Units (AMFUs) have started generating
+experimental Block level Agromet Advisories covering at toiai
+number of 2127 blocks (1227 blocks by 100 AMFUs & 900 blocks by
+123 DAMUs).
+(b) Yes Sir. IMD is presently having a network of 23 Doppler Weather
+Radars (DWRS) and sharing radar data with two Indian Space
+Research Organization (ISRO) DWRs at Cherrapunji and
+Thiruvananthapuram as appended in Annexure-I & Annexure-II
+(pictorial diagram of area coverage). In order to fill the gap in its
+Network, additional 29 DWRs were approved and under process of
+finalization/installation.
+(c) National Centre for Medium Range Weather Forecasting (NCMRWF)
+had asked for 20 scientists under Monsoon Mission Programme of
+MoES, out of which 15 were sanctioned during 2017-18. NCMRWF
+has recruited 7 scientists in 2019 under Monsoon Mission and
+recruitment of another 8 scientists (Scientist-B) is under process.
+In addition to this NCMRWF has also recruited 8 scientists in 2019.
+(d) Yes Sir. Ministry of Earth Sciences (MoES), Govt. of India has
+established the Centre for Climate Change Research (CCCR) at the
+Indian Institute of Tropical Meteorology (IITM), Pune, since
+January 2009 to study the impact of climate change in the
+country. The centre is dedicated to carry out research on global
+and regional climate change with a particular focus on the Indian
+climate and the monsoons. CCCR has started the coupled climate
+modelling, and based on the efforts, an Earth System Model (ESM)
+has been developed which is contributing to the
+Intergovernmental Panel on Climate Change (IPCC) 6th
+Assessment (IPCC-AR6). Currently efforts are ongoing to generate
+the future climate change scenarios. To better understand the
+regional climate change issues, CCCR has also undertaken the
+Coordinated Downscaling Experiment (CORDEX)-South Asia
+Program.
+************
+Annexure-I
+List of existing IMD Radars
+S.No. Station in the State/UT of
+1 Agartala Tripura
+2 Bhopal Madhya Pradesh
+3 Bhuj Gujarat
+4 Chennai Tamil Nadu
+5 Goa Goa
+6 Gopalpur Odisha
+7 Hyderabad Odisha
+8 Jaipur Rajasthan
+9 Karaikal Tamil Nadu
+10 Kochi Kerala
+11 Kolkata West Bengal
+12 Lucknow Uttar Pradesh
+13 Machilipatnam Andhra Pradesh
+14 Mohanbari Assam
+15 Mumbai Maharashtra
+16 Nagpur Maharashtra
+17 New Delhi (HQ) Delhi
+18 New Delhi (Palam) Delhi
+19 Paradeep Odisha
+20 Patiala Punjab
+21 Patna Bihar
+22 Srinagar Jammu & Kashmir
+23 Vishakhapatnam Andhra Pradesh
+List of existing ISRO Radars
+1 Cherrapunji Meghalaya
+2 Thiruvananthapuram Kerala
+Annexure-II
+Lucknow
+, Mohanbari
+IMD DWR NETWORK
+\ '.~ .~--.,) ...
+Patna
+"J' , •.
+k· ..... _ ....... ¥.I~~....:\......~_,.
+Cherapunjee/\:
+Bhuj
+~.-.. I •
+(_- ". " . ;"':....~".\.'Agartala' ,!'
+Bhopal 'I~
+Kolltata
+Nagour
+J:"_-'~
+/ .
+1-:'>
+r\
+(~-~'--.
+~'umbai
+Legend
+::--- DualPol(-band DWR
+_ _ DualPolS-band DWR
+5-bandDWR
+=X-bandDWR
+HydeI'abad,
+. -.._
+,
+MadlilJrlatnam
+
+----------------------------------------------------------------------
+[Source 5] (ID: 18-7-0852)
+Ministry: EARTH SCIENCES
+Subject: Weather Forcasting Data Provided to Farmers by Indian Meteorological Department
+
+QUESTION: GOVERNMENT OF INDIA 
+MINISTRY OF EARTH SCIENCES 
+LOK SABHA 
+UNSTARRED QUESTION NO. 852 
+TO BE ANSWERED ON WEDNESDAY, 4TH FEBRUARY, 2026 
+ 
+WEATHER FORECASTING DATA PROVIDED TO FARMERS BY INDIAN 
+METEOROLOGICAL DEPARTMENT 
+ 
+852.     SHRI ANIL YESHWANT DESAI: 
+      
+Will the Minister of EARTH SCIENCES be pleased to state: 
+ 
+(a) whether Indian Meteorological Department (IMD) is providing weather forecasting 
+data to our farmers from all the States to plan their sowing patterns and if so, the details 
+thereof; 
+(b) the details of latest social media platforms used by the IMD to reach farmers living in 
+remote areas of various States; 
+(c) whether the IMD has any authentic data about farmers being aware about such weather 
+information and whether the farmers are having such mode etc. with them to get timely 
+information about the weather conditions and if so, the details thereof; and 
+(d) whether the IMD has any data or system developed with  the Ministry of Agriculture 
+and Farmer's Welfare about access of farmers with these modern information tools and 
+helping poor farmers and if so, the details thereof?
+ANSWER: ANSWER 
+THE MINISTER OF STATE (INDEPENDENT CHARGE) FOR 
+MINISTRY OF SCIENCE AND TECHNOLOGY 
+AND EARTH SCIENCES 
+(DR. JITENDRA SINGH) 
+ 
+(a) Yes.  India Meteorological Department (IMD) is providing weather forecasts to farmers 
+from all the States. Under the Gramin Krishi Mausam Sewa (GKMS) scheme, IMD 
+provides medium-range weather forecasts for rainfall, temperature, relative humidity, 
+cloud cover, wind speed, and wind direction at district and block levels for the next five 
+days, along with the subsequent week’s rainfall and temperature outlook at the 
+meteorological sub-division level. In addition based on the observed weather 
+information and forecasts, 130 Agromet Field Units (AMFUs) operational across 127 
+agroclimatic zones of the country prepare Agromet Advisories twice a week (every 
+Tuesday and Friday) in English and regional languages for their respective districts, 
+and communicate with farmers to help them make appropriate decisions for day-to-day 
+agricultural operations. Impact-based forecast (IBFs) and appropriate advisories for 
+agriculture are also being prepared by AMFUs based on the severe weather warnings 
+for different districts of various States and UTs across the country issued by the 
+National Weather Forecasting Centre (NWFC), New Delhi, and Regional 
+Meteorolgoical Centeres and State level Meteorological Centres (MCs) of IMD. 
+  
+   
+(b)-(d) To provide weather updates and early warnings directly to farmers’ mobile phones, 
+weather forecasts and Agromet Advisories are disseminated through real-time 
+mechanisms or multichannel dissemination systems, including print and electronic 
+media, Doordarshan, internet, and SMS under Public-Private Partnership (PPP) 
+initiatives. Under the PPP mode, about 6.16 million farmers are benefiting from 
+weather forecasts, alerts, and Agromet Advisories. SMS-based alerts and warnings, 
+along with suitable remedial measures, are being sent during extreme weather events 
+such as cyclones, deep depressions, etc., through the Kisan Portal. Technological 
+advancements have further enhanced accessibility, enabling farmers to receive 
+location-specific forecasts and advisories through mobile apps such as ‘Meghdoot’ and 
+‘Mausam’, and social media platforms like WhatsApp, Facebook, etc. Additionally, 
+IMD has integrated its services with the IT platforms of 21 State Governments, and 
+about 15.6 million farmers are accessing information in English and regional languages 
+on these State Government IT platforms. 
+ 
+To ensure localised relevance and last-mile connectivity of weather updates in remote 
+and vulnerable regions, IMD, in collaboration with the Ministry of Panchayati Raj 
+(MoPR), has recently launched Panchayat-level weather forecasts covering nearly all 
+Gram Panchayats in India. These forecasts are accessible through digital platforms such 
+as e-Gramswaraj (https://egramswaraj.gov.in), Meri Panchayat app, e-Manchitra of 
+MoPR, and Mausamgram of IMD, MoES (https://mausamgram.imd.gov.in). The main 
+aims and objectives of Gram Panchayat Level Weather Forecasting (GPLWF) are to 
+provide weather forecasts up to Gram Panchayat Levels, covering critical parameters 
+such as temperature, rainfall, humidity, wind, and cloud conditions-essential data that 
+farmers need for informed decision-making regarding sowing, harvesting, and 
+irrigation. The platform is making weather forecast information accessible anytime and 
+anywhere at the panchayat level across the country. This weather information reaches 
+a larger number of people through Pashu Sakhis and Krishi Sakhis under the Ministries 
+of Agriculture and Farmers Welfare and Rural Development.  
+ 
  
  
 ********
-
-----------------------------------------------------------------------
-[Source 5] (ID: 14-10-3536)
-Ministry: EARTH SCIENCES
-Subject: INSTALLATION OF DOPPLER RADARS
-
-QUESTION: GOVERNMENT OF INDIA 
-EARTH SCIENCES
-LOK SABHA
-UNSTARRED QUESTION NO:3536
-ANSWERED ON:27.04.2007
-INSTALLATION OF DOPPLER RADARS 
-Patil Shri Shriniwas Dadasaheb
-Will the Minister of EARTH SCIENCES be pleased to state:
-(a) 
-whether Modernization Plan to install 
-Doppler Weather Radars 
-has been approved by the 
-Government ; 
-(b) 
-if so, the location-wise details thereof ; 
-(c) 
-whether a request 
-to set up a Doppler Radar System and network 
-of Rain Gauge Stations at Koyananagar in Satara District of
-Maharashtra 
-has been received by the Government ; and 
-(d) if so, the details thereof and the action taken thereon?
-ANSWER: Answer
-MINISTER OF SCIENCE AND TECHNOLOGY AND 
-MINISTER OF EARTH SCIENCES (SHRI KAPIL SIBAL) 
-(a) No. Sir Phase-I of the proposed modernization plan to install Doppler Weather radars (DWRs) as well as Automatic rain gauges
-has been approved by the Earth 
-Commission. It is now under process of approval by the Government. 
-(b) As per the proposed modernization plan Doppler Weather Radars (DWRs) to 
-be installed in Phase-I are at Mumbai , Paradip,
-Goa, Karaikal, Patiala, Delhi, Bhopal, Mohanbari, Agartala, Nagpur, 
-Lucknow and Patna. 
-(c&d) No, there is no specific proposal to install a Doppler Weather Radar at 
-Koyananagar in Satara District of Maharashtra.
-However, the DWRs proposed 
-to be installed at Mumbai & Goa will have contiguous coverage to include Satara District for weather
-monitoring. As far as the network of rain gauges are concerned, five of them are planned in the Koyana catchment area.
 
 ----------------------------------------------------------------------
 
 ======================================================================
 USER QUESTION:
 ======================================================================
-doppler weather radar
+How does IMD's Doppler Weather Radar data feed into the Agromet advisories farmers receive?
 
 ======================================================================
 ANSWER:

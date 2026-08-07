@@ -109,6 +109,11 @@ class SourceItem(BaseModel):
     score: float
     question: str
     answer: str
+    # Retrieval trace — per-component scores (hybrid path only; None for graph path)
+    dense_score: Optional[float] = None
+    bm25_score: Optional[float] = None
+    rrf_score: Optional[float] = None
+    rerank_score: Optional[float] = None
 
 
 class ChatResponse(BaseModel):
@@ -130,6 +135,8 @@ class ChatResponse(BaseModel):
     context_window: int
     prompt_budget: int
     network_latency_ms: Optional[float] = None
+    # Retrieval trace: per-component scores per hit + stage timings (ms)
+    trace: Optional[dict] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -527,7 +534,11 @@ async def chat_endpoint(request: ChatRequest):
                 subject=r.metadata.get("subject") or "-",
                 score=float(r.score),
                 question=r.question,
-                answer=r.answer
+                answer=r.answer,
+                dense_score=float(r.dense_score) if r.dense_score is not None else None,
+                bm25_score=float(r.bm25_score) if r.bm25_score is not None else None,
+                rrf_score=float(r.rrf_score) if r.rrf_score is not None else None,
+                rerank_score=float(r.rerank_score) if r.rerank_score is not None else None,
             ))
 
         t_gen_start = time.perf_counter()
@@ -536,25 +547,54 @@ async def chat_endpoint(request: ChatRequest):
         llm_available = llm_client.check_health(api_key=api_key)
 
         network_latency_ms = 0.0
+        gen_error: Optional[str] = None
 
         if llm_available and results:
-            gen_res = generator.generate(query, results)
-            gen_latency = gen_res.generation_latency_ms
-            answer = gen_res.answer
-            prompt_tok = gen_res.prompt_tokens
-            comp_tok = gen_res.completion_tokens
-            total_tok = gen_res.total_tokens
-            is_fallback = False
+            try:
+                gen_res = generator.generate(query, results)
+                gen_latency = gen_res.generation_latency_ms
+                answer = gen_res.answer
+                prompt_tok = gen_res.prompt_tokens
+                comp_tok = gen_res.completion_tokens
+                total_tok = gen_res.total_tokens
+                is_fallback = False
 
-            # Extract exact network overhead for Groq (Objective 7)
-            if ACTIVE_CONFIG["provider"] == "groq" and gen_res.raw_response:
-                usage = gen_res.raw_response.get("usage", {})
-                total_time_sec = usage.get("total_time", 0.0)
-                if total_time_sec > 0:
-                    model_processing_ms = total_time_sec * 1000
-                    network_latency_ms = max(0.0, gen_latency - model_processing_ms)
-                else:
-                    network_latency_ms = gen_latency * 0.15  # Fallback 15% overhead estimate
+                # Extract exact network overhead for Groq (Objective 7)
+                if ACTIVE_CONFIG["provider"] == "groq" and gen_res.raw_response:
+                    usage = gen_res.raw_response.get("usage", {})
+                    total_time_sec = usage.get("total_time", 0.0)
+                    if total_time_sec > 0:
+                        model_processing_ms = total_time_sec * 1000
+                        network_latency_ms = max(0.0, gen_latency - model_processing_ms)
+                    else:
+                        network_latency_ms = gen_latency * 0.15  # Fallback 15% overhead estimate
+            except Exception as e:  # noqa: BLE001 - generation must never 500 the endpoint
+                # An unhandled generation error (Ollama context-length exceeded,
+                # timeout, connection drop, non-413 HTTP error) currently
+                # surfaces as HTTP 500 with no trace. Log the REAL cause and
+                # return the retrieved sources with a graceful notice instead.
+                import traceback
+                print(f"[Generation failed] {type(e).__name__}: {e}")
+                print(traceback.format_exc(limit=5))
+                gen_error = f"{type(e).__name__}: {str(e)[:300]}"
+                is_fallback = True
+                gen_latency = (time.perf_counter() - t_gen_start) * 1000
+                provider_label = (
+                    "Ollama (Local)" if ACTIVE_CONFIG["provider"] == "ollama" else "Groq (Cloud)"
+                )
+                answer = (
+                    f"**[System Notice: {provider_label} Generation Failed]**\n\n"
+                    f"The retrieved documents below were found, but the LLM could "
+                    f"not generate an answer for this query.\n"
+                    f"* **Error**: `{gen_error}`\n\n"
+                    f"**Suggestions**:\n"
+                    f"1. Switch to **Fast Mode** (lighter context budget) and retry.\n"
+                    f"2. Make the question more specific.\n"
+                    f"3. If this recurs, check the server console for the full traceback.\n"
+                )
+                prompt_tok = 0
+                comp_tok = len(answer) // 4
+                total_tok = comp_tok
         else:
             is_fallback = True
             gen_latency = (time.perf_counter() - t_gen_start) * 1000
@@ -578,6 +618,17 @@ async def chat_endpoint(request: ChatRequest):
             comp_tok = len(answer) // 4
             total_tok = comp_tok
 
+        trace_payload = None
+        if ret_mode != "graph":
+            trace_payload = {
+                "dense_search_ms": round(timings.dense_search_ms, 2),
+                "bm25_search_ms": round(timings.bm25_search_ms, 2),
+                "rrf_fusion_ms": round(timings.rrf_fusion_ms, 2),
+                "rerank_ms": round(timings.rerank_ms, 2),
+                "embed_query_ms": round(timings.embed_query_ms, 2),
+                "retrieval_total_ms": round(ret_latency, 2),
+            }
+
         return ChatResponse(
             answer=answer,
             sources=sources,
@@ -595,7 +646,8 @@ async def chat_endpoint(request: ChatRequest):
             resolved_model=resolved_model,
             context_window=family.context_window,
             prompt_budget=prompt_budget,
-            network_latency_ms=network_latency_ms
+            network_latency_ms=network_latency_ms,
+            trace=trace_payload
         )
 
 

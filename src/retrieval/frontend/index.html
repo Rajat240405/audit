@@ -458,6 +458,16 @@
           </div>
         </div>
 
+        <!-- ── 6. RETRIEVAL TRACE PANEL (component scores + stage timings) ── -->
+        <div>
+          <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">
+            Retrieval Trace
+          </h2>
+          <div id="trace-panel" class="bg-slate-900/60 rounded-xl border border-slate-700/80 p-3 space-y-2.5 shadow-sm">
+            <p class="text-sm text-slate-500 italic text-center py-4">Run a query to see the dense / BM25 / RRF / rerank breakdown.</p>
+          </div>
+        </div>
+
       </div>
     </aside>
   </main>
@@ -829,6 +839,7 @@
 
         renderStats(data);
         renderSources(data.sources);
+        renderTrace(data.trace);
 
         if (data.is_fallback) {
           pulsePing.classList.replace("bg-emerald-400", "bg-amber-400");
@@ -1003,6 +1014,14 @@
       sources.forEach((src) => {
         const item = document.createElement("div");
         item.className = "bg-slate-900/60 rounded-xl border border-slate-700/80 p-3 space-y-2.5 shadow-sm";
+        const compScores = (src.dense_score != null || src.bm25_score != null)
+          ? `<div class="flex flex-wrap gap-1.5 text-[9px] font-mono">
+               ${src.dense_score != null ? `<span class="bg-blue-500/10 text-blue-300 border border-blue-500/20 px-1.5 py-0.5 rounded">dense: ${src.dense_score.toFixed(3)}</span>` : ""}
+               ${src.bm25_score != null ? `<span class="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.5 rounded">bm25: ${src.bm25_score.toFixed(3)}</span>` : ""}
+               ${src.rrf_score != null ? `<span class="bg-purple-500/10 text-purple-300 border border-purple-500/20 px-1.5 py-0.5 rounded">rrf: ${src.rrf_score.toFixed(3)}</span>` : ""}
+               ${src.rerank_score != null ? `<span class="bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded">rerank: ${src.rerank_score.toFixed(3)}</span>` : ""}
+             </div>`
+          : "";
         item.innerHTML = `
           <div class="flex items-center justify-between">
             <span class="text-xs font-bold text-indigo-400">Doc ID: ${src.doc_id}</span>
@@ -1012,6 +1031,7 @@
             <p><strong class="text-slate-400">Ministry:</strong> ${src.ministry}</p>
             <p><strong class="text-slate-400">Subject:</strong> ${src.subject}</p>
           </div>
+          ${compScores}
           <details class="text-[11px] text-slate-400 cursor-pointer">
             <summary class="hover:text-slate-200 transition-colors font-medium">Toggle Full Transcript</summary>
             <div class="mt-2 bg-slate-950 p-2.5 rounded border border-slate-800/80 max-h-40 overflow-y-auto custom-scroll text-[10px] font-mono leading-relaxed select-all">
@@ -1022,6 +1042,30 @@
         `;
         sourcesList.appendChild(item);
       });
+    }
+
+    function renderTrace(trace) {
+      const tracePanel = document.getElementById("trace-panel");
+      if (!trace) {
+        tracePanel.innerHTML = `<p class="text-sm text-slate-500 italic text-center py-4">No hybrid trace available (graph/metadata path).</p>`;
+        return;
+      }
+      const stageRows = [
+        ["Embed query", trace.embed_query_ms],
+        ["Dense (FAISS)", trace.dense_search_ms],
+        ["BM25", trace.bm25_search_ms],
+        ["RRF fusion", trace.rrf_fusion_ms],
+        ["Rerank (cross-encoder)", trace.rerank_ms],
+        ["Total retrieval", trace.retrieval_total_ms]
+      ];
+      tracePanel.innerHTML = `
+        <div class="text-[10px] text-slate-400 font-mono space-y-1">
+          ${stageRows.map(([label, ms]) => `
+            <div class="flex justify-between items-center">
+              <span class="text-slate-400">${label}</span>
+              <span class="text-indigo-300 font-semibold">${(ms ?? 0).toFixed(1)} ms</span>
+            </div>`).join("")}
+        </div>`;
     }
 
     function scrollThread() {
@@ -1037,5 +1081,5 @@
         .replace(/'/g, "&#039;");
     }
   </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2767d7ead72494f',t:'MTc4NjEwNzg5OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
