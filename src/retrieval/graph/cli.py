@@ -24,7 +24,6 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.graphrag.config import GraphRAGConfig
-from src.graphrag.llm import LLMBackendExhaustedError
 from src.graphrag.pipeline import GraphRAGPipeline
 from src.graphrag.query import GraphRAGQuerier
 from src.graphrag.verify import GraphVerifier
@@ -32,6 +31,9 @@ from src.graphrag.verify import GraphVerifier
 console = Console()
 
 _GRAPHRAG_DEFAULT_ENRICHED = "data/enriched/enriched_*.jsonl"
+
+# LLM backends selectable via --llm-provider (must match build_llm_provider in llm.py).
+_LLM_PROVIDERS = ["ollama", "groq", "openai_compatible"]
 
 
 @click.group()
@@ -48,6 +50,8 @@ def _load_config(
     no_resume: bool,
     retry_failed: bool,
     llm_provider: str | None = None,
+    llm_models: str | None = None,
+    debug_one: str | None = None,
 ) -> GraphRAGConfig:
     base = GraphRAGConfig()
     return base.with_overrides(
@@ -59,6 +63,8 @@ def _load_config(
         resume=not no_resume,
         retry_failed=retry_failed,
         llm_provider=llm_provider,
+        llm_models=llm_models,
+        debug_one=debug_one,
     )
 
 
@@ -67,28 +73,43 @@ def _load_config(
 @click.option("--checkpoint", type=str, default=None, help="Checkpoint file path")
 @click.option("--embedding-model", type=str, default=None, help="Override embedding model (default BAAI/bge-m3)")
 @click.option("--ollama-model", type=str, default=None, help="Override Ollama model (default qwen3:8b)")
+@click.option(
+    "--llm-provider",
+    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+)
+@click.option(
+    "--llm-models",
+    type=str,
+    default=None,
+    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
+)
 @click.option("--limit", type=int, default=None, help="Process at most N documents (testing)")
 @click.option("--no-resume", is_flag=True, help="Ignore the checkpoint and reprocess everything")
 @click.option("--retry-failed/--no-retry-failed", default=True, help="Retry failed documents on resume")
 @click.option("--verify-only", is_flag=True, help="Run only the 10-document verification, then stop")
 @click.option("--no-verify", is_flag=True, help="Skip the pre-build verification (use with care)")
-@click.option("--llm-provider", type=click.Choice(["ollama", "groq", "openai_compatible"]), default=None, help="Override LLM provider (default: GRAPHRAG_LLM_PROVIDER or ollama)")
-@click.option("--llm-models", type=str, default=None, help="Comma-separated models in priority order, e.g. 'qwen/qwen3.6-27b,llama-3.3-70b-versatile'")
+@click.option("--debug-one", type=str, default=None, help="Question ID of the ONE document to debug (payload, est tokens, raw body, content analysis)")
 def build(
     enriched: str | None,
     checkpoint: str | None,
     embedding_model: str | None,
     ollama_model: str | None,
+    llm_provider: str | None,
+    llm_models: str | None,
     limit: int | None,
     no_resume: bool,
     retry_failed: bool,
     verify_only: bool,
     no_verify: bool,
-    llm_provider: str | None,
-    llm_models: str | None,
+    debug_one: str | None,
 ) -> None:
     """Build (or resume) the Neo4j graph from the enriched corpus."""
-    config = _load_config(enriched, checkpoint, embedding_model, ollama_model, limit, no_resume, retry_failed, llm_provider=llm_provider, llm_models=llm_models)
+    config = _load_config(
+        enriched, checkpoint, embedding_model, ollama_model, limit, no_resume, retry_failed,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
+    )
     console.print(Panel.fit("[bold cyan]GraphRAG — Build (Neo4j)[/bold cyan]", border_style="cyan"))
 
     pipeline = GraphRAGPipeline(config)
@@ -118,20 +139,36 @@ def build(
 @click.option("--checkpoint", type=str, default=None)
 @click.option("--embedding-model", type=str, default=None)
 @click.option("--ollama-model", type=str, default=None)
+@click.option(
+    "--llm-provider",
+    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+)
+@click.option(
+    "--llm-models",
+    type=str,
+    default=None,
+    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
+)
 @click.option("--limit", type=int, default=None)
-@click.option("--llm-provider", type=click.Choice(["ollama", "groq", "openai_compatible"]), default=None, help="Override LLM provider")
-@click.option("--llm-models", type=str, default=None, help="Comma-separated models in priority order")
+@click.option("--debug-one", type=str, default=None, help="Question ID of the ONE document to debug")
 def rebuild(
     enriched: str | None,
     checkpoint: str | None,
     embedding_model: str | None,
     ollama_model: str | None,
-    limit: int | None,
     llm_provider: str | None,
     llm_models: str | None,
+    limit: int | None,
+    debug_one: str | None,
 ) -> None:
     """Drop the graph and rebuild from scratch (destructive)."""
-    config = _load_config(enriched, checkpoint, embedding_model, ollama_model, limit, no_resume=True, retry_failed=True, llm_provider=llm_provider, llm_models=llm_models)
+    config = _load_config(
+        enriched, checkpoint, embedding_model, ollama_model, limit,
+        no_resume=True, retry_failed=True,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
+    )
     console.print(Panel.fit("[bold yellow]GraphRAG — Rebuild (drops existing graph)[/bold yellow]", border_style="yellow"))
 
     pipeline = GraphRAGPipeline(config)
@@ -156,19 +193,34 @@ def rebuild(
 @click.option("--enriched", type=str, default=None, help="Glob/path to enriched JSONL")
 @click.option("--embedding-model", type=str, default=None, help="Override embedding model (default BAAI/bge-m3)")
 @click.option("--ollama-model", type=str, default=None, help="Override Ollama model (default qwen3:8b)")
+@click.option(
+    "--llm-provider",
+    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+)
+@click.option(
+    "--llm-models",
+    type=str,
+    default=None,
+    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
+)
 @click.option("--n", type=int, default=10, help="Number of random documents to verify")
-@click.option("--llm-provider", type=click.Choice(["ollama", "groq", "openai_compatible"]), default=None, help="Override LLM provider")
-@click.option("--llm-models", type=str, default=None, help="Comma-separated models in priority order")
+@click.option("--debug-one", type=str, default=None, help="Question ID of the ONE document to debug (payload, est tokens, raw body, content analysis)")
 def verify(
     enriched: str | None,
     embedding_model: str | None,
     ollama_model: str | None,
-    n: int,
     llm_provider: str | None,
     llm_models: str | None,
+    n: int,
+    debug_one: str | None,
 ) -> None:
     """Verify extraction quality on a sample of documents (no full build)."""
-    config = _load_config(enriched, None, embedding_model, ollama_model, None, False, True, llm_provider=llm_provider, llm_models=llm_models)
+    config = _load_config(
+        enriched, None, embedding_model, ollama_model, None, False, True,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
+    )
     console.print(Panel.fit("[bold cyan]GraphRAG — Verification (sample)[/bold cyan]", border_style="cyan"))
 
     pipeline = GraphRAGPipeline(config)
@@ -179,13 +231,7 @@ def verify(
         records = pipeline.load_enriched()
         console.print(f"[cyan]Loaded {len(records):,} enriched records. Verifying {n} random documents...[/cyan]")
         verifier = GraphVerifier(config)
-        try:
-            report = verifier.run(records, n=n)
-        except LLMBackendExhaustedError as e:
-            console.print(f"[bold red]LLM backends exhausted — verification stopped.[/bold red]")
-            console.print(f"[red]{e}[/red]")
-            console.print("[yellow]Fix API keys/quota and re-run `graphrag verify`.[/yellow]")
-            sys.exit(2)
+        report = verifier.run(records, n=n)
         verifier.render(report)
         grade = report.grade()
         if grade in ("Needs prompt tuning", "Poor"):
@@ -236,16 +282,33 @@ def stats(checkpoint: str | None) -> None:
 @click.option("--top-k", type=int, default=10)
 @click.option("--embedding-model", type=str, default=None)
 @click.option("--ollama-model", type=str, default=None)
+@click.option(
+    "--llm-provider",
+    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM backend for entity extraction (ollama | groq | openai_compatible; default ollama)",
+)
+@click.option(
+    "--llm-models",
+    type=str,
+    default=None,
+    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
+)
 @click.option("--json-output", is_flag=True, help="Emit results as JSON")
 def query(
     question: str,
     top_k: int,
     embedding_model: str | None,
     ollama_model: str | None,
+    llm_provider: str | None,
+    llm_models: str | None,
     json_output: bool,
 ) -> None:
     """Graph-aware query: entity expansion + vector search."""
-    config = _load_config(None, None, embedding_model, ollama_model, None, False, True)
+    config = _load_config(
+        None, None, embedding_model, ollama_model, None, False, True,
+        llm_provider=llm_provider, llm_models=llm_models,
+    )
     querier = GraphRAGQuerier(config)
     try:
         results = querier.query(question, top_k=top_k)
@@ -287,13 +350,8 @@ def _print_result(result, title: str) -> None:
         f"Nodes created       : {d['nodes_created']:,}",
         f"Relationships created: {d['relationships_created']:,}",
         f"Embedding count     : {d['embedding_count']:,}",
-        f"Total LLM requests  : {d.get('llm_requests', 0):,}",
-        f"Provider/model usage: {d.get('provider_model_usage', {})}",
-        f"API key usage       : {d.get('key_usage', {})}",
         f"Failures            : {d['failures']}",
         f"Retries             : {d['retries']}",
-        f"API key switches    : {d.get('provider_switches', 0)}",
-        f"Model switches      : {d.get('model_switches', 0)}",
         f"Build duration      : {d['duration_seconds']:.1f}s",
         f"Checkpoint counts   : {d['checkpoint']}",
         f"Skipped via checkpoint: {d['skipped_from_checkpoint']}",

@@ -51,6 +51,7 @@ def _load_config(
     retry_failed: bool,
     llm_provider: str | None = None,
     llm_models: str | None = None,
+    debug_one: str | None = None,
 ) -> GraphRAGConfig:
     base = GraphRAGConfig()
     return base.with_overrides(
@@ -63,6 +64,7 @@ def _load_config(
         retry_failed=retry_failed,
         llm_provider=llm_provider,
         llm_models=llm_models,
+        debug_one=debug_one,
     )
 
 
@@ -83,6 +85,12 @@ def _load_config(
     default=None,
     help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
 )
+@click.option(
+    "--debug-one",
+    type=str,
+    default=None,
+    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
+)
 @click.option("--limit", type=int, default=None, help="Process at most N documents (testing)")
 @click.option("--no-resume", is_flag=True, help="Ignore the checkpoint and reprocess everything")
 @click.option("--retry-failed/--no-retry-failed", default=True, help="Retry failed documents on resume")
@@ -95,6 +103,7 @@ def build(
     ollama_model: str | None,
     llm_provider: str | None,
     llm_models: str | None,
+    debug_one: str | None,
     limit: int | None,
     no_resume: bool,
     retry_failed: bool,
@@ -104,7 +113,7 @@ def build(
     """Build (or resume) the Neo4j graph from the enriched corpus."""
     config = _load_config(
         enriched, checkpoint, embedding_model, ollama_model, limit, no_resume, retry_failed,
-        llm_provider=llm_provider, llm_models=llm_models,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
     )
     console.print(Panel.fit("[bold cyan]GraphRAG — Build (Neo4j)[/bold cyan]", border_style="cyan"))
 
@@ -147,6 +156,12 @@ def build(
     default=None,
     help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
 )
+@click.option(
+    "--debug-one",
+    type=str,
+    default=None,
+    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
+)
 @click.option("--limit", type=int, default=None)
 def rebuild(
     enriched: str | None,
@@ -155,13 +170,14 @@ def rebuild(
     ollama_model: str | None,
     llm_provider: str | None,
     llm_models: str | None,
+    debug_one: str | None,
     limit: int | None,
 ) -> None:
     """Drop the graph and rebuild from scratch (destructive)."""
     config = _load_config(
         enriched, checkpoint, embedding_model, ollama_model, limit,
         no_resume=True, retry_failed=True,
-        llm_provider=llm_provider, llm_models=llm_models,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
     )
     console.print(Panel.fit("[bold yellow]GraphRAG — Rebuild (drops existing graph)[/bold yellow]", border_style="yellow"))
 
@@ -199,6 +215,12 @@ def rebuild(
     default=None,
     help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
 )
+@click.option(
+    "--debug-one",
+    type=str,
+    default=None,
+    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
+)
 @click.option("--n", type=int, default=10, help="Number of random documents to verify")
 def verify(
     enriched: str | None,
@@ -206,12 +228,13 @@ def verify(
     ollama_model: str | None,
     llm_provider: str | None,
     llm_models: str | None,
+    debug_one: str | None,
     n: int,
 ) -> None:
     """Verify extraction quality on a sample of documents (no full build)."""
     config = _load_config(
         enriched, None, embedding_model, ollama_model, None, False, True,
-        llm_provider=llm_provider, llm_models=llm_models,
+        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
     )
     console.print(Panel.fit("[bold cyan]GraphRAG — Verification (sample)[/bold cyan]", border_style="cyan"))
 

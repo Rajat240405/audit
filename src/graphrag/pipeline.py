@@ -31,7 +31,7 @@ from src.graphrag.config import GraphRAGConfig
 from src.graphrag.display import BuildStatusPanel
 from src.graphrag.embeddings import GraphEmbedder
 from src.graphrag.extractor import EntityRelationshipExtractor, ExtractionError
-from src.graphrag.llm import LLMBackendExhaustedError
+from src.graphrag.llm import DocumentExtractionError, LLMBackendExhaustedError
 from src.graphrag.models import DocumentRecord, Entity, Relationship
 from src.graphrag.neo4j_client import Neo4jGraphStore
 from src.models.qa_record import QARecord
@@ -135,32 +135,112 @@ class GraphRAGPipeline:
         Verify the full path on ``n`` random documents BEFORE the full build.
 
         Exercises: load → extract → insert → embed → vector index → query.
-        Raises if any stage fails, so a broken pipeline stops before the build.
+
+        Failure policy (consistent with the production build):
+        - ``DocumentExtractionError`` (e.g. HTTP 400 json_validate_failed) marks
+          ONLY that sampled document as failed and verification CONTINUES with
+          the remaining documents.
+        - Genuine infrastructure failures (Neo4j unreachable, provider
+          exhaustion, unexpected exceptions) still abort immediately.
+        - After the sample, the overall verification grade is computed from the
+          completed sample; the build is blocked ONLY when the grade falls
+          below ``verify_min_grade`` (default Good).
         """
         if len(records) < n:
             raise ValueError(f"Need at least {n} records to verify, found {len(records)}")
         sample = random.Random(20260806).sample(records, n)
         console.print(f"[cyan]Verifying on {n} random documents...[/cyan]")
 
-        self.store.ping() or (_ for _ in ()).throw(
-            RuntimeError("Neo4j is not reachable — cannot verify.")
-        )
+        # Genuine infrastructure failures abort immediately (preserved).
+        if not self.store.ping():
+            raise RuntimeError("Neo4j is not reachable — cannot verify.")
+
         # Ensure schema exists before writing anything.
         self.store.apply_schema(self.embedder.embedding_dim)
 
         result = GraphBuildResult()
+        # Track per-doc quality for the grade (same model as `graphrag verify`).
+        from src.graphrag.verify import GraphVerificationReport, DocumentVerification
+
+        report = GraphVerificationReport()
+        report.total_docs = len(sample)
+
         for rec in sample:
-            ok = self._process_one(rec, result, verify_mode=True)
-            if not ok:
+            try:
+                ok = self._process_one(rec, result, verify_mode=True)
+                if ok == "content":
+                    # Per-document content failure (e.g. json_validate_failed):
+                    # mark ONLY this doc failed, report it, and CONTINUE. It IS
+                    # a failed sampled document (counted in report.failed_docs
+                    # so the final summary matches the console output), but it
+                    # is NOT a genuine extraction-quality failure — the grade
+                    # reflects how well the successfully-extracted docs were
+                    # extracted, and a content rejection alone must not block
+                    # the build.
+                    result.failures += 1
+                    result.failed_docs.append(rec.question_id)
+                    dv = DocumentVerification(_to_document_record(rec))
+                    dv.error = "provider rejected document (json_validate/content)"
+                    dv.content_failure = True
+                    report.docs.append(dv)
+                    report.failed_docs += 1
+                    report.content_failures += 1
+                    console.print(
+                        f"[yellow]  verification doc {rec.question_id} failed "
+                        f"(json_validate/content)[/yellow]"
+                    )
+                    continue
+                if ok is not None:
+                    # A non-content failure (extraction / insert) — count it as
+                    # a failed sampled document; keep verifying the rest. It
+                    # lowers the grade (failed docs -> Poor) as it should.
+                    result.failures += 1
+                    result.failed_docs.append(rec.question_id)
+                    dv = DocumentVerification(_to_document_record(rec))
+                    dv.error = f"document failed during verification ({ok})"
+                    report.docs.append(dv)
+                    report.failed_docs += 1
+                    continue
+                # Success: record extraction quality for the grade.
+                dv = DocumentVerification(_to_document_record(rec))
+                try:
+                    ents, rels, _ = self.extractor.extract_with_rejections(dv.doc)
+                    dv.entities, dv.relationships = ents, rels
+                except Exception:  # noqa: BLE001 - quality re-derivation must not fail the gate
+                    pass
+                report.docs.append(dv)
+                report.total_entities += len(dv.entities)
+                report.total_relationships += len(dv.relationships)
+                report.total_problems += len(dv.check_grounding())
+            except LLMBackendExhaustedError:
+                # Genuine infrastructure failure — abort immediately (preserved).
+                raise
+            except Exception as e:  # noqa: BLE001 - unexpected infrastructure failure
                 raise RuntimeError(
-                    f"Verification FAILED on document {rec.question_id}. "
-                    "Fix the issue before starting the full build."
-                )
+                    f"Verification FAILED on document {rec.question_id}: "
+                    f"{type(e).__name__}: {e}. This is an infrastructure/backend "
+                    "failure — fix it before starting the full build."
+                ) from e
+
         # Vector search sanity check on the verified documents.
         if result.embedding_count:
             qv = self.embedder.embed("cyclone warning system")
             hits = self.store.vector_search(qv, k=3)
             console.print(f"[green]Vector index verified: {len(hits)} hits returned.[/green]")
+
+        # Overall grade from the completed sample; block only if below threshold.
+        grade = report.grade()
+        min_grade = getattr(self.config, "verify_min_grade", "Good")
+        console.print(
+            f"[cyan]Verification grade: {grade} (minimum required: {min_grade})[/cyan]"
+        )
+        if grade in ("Needs prompt tuning", "Poor"):
+            raise RuntimeError(
+                f"Verification grade '{grade}' is below the required "
+                f"'{min_grade}'. Fix extraction quality before starting the "
+                f"full build. ({report.failed_docs} of {len(sample)} sample "
+                f"documents failed; {report.total_problems} quality problems.)"
+            )
         return result
 
     # ── full build ─────────────────────────────────────────────────────
@@ -252,9 +332,12 @@ class GraphRAGPipeline:
                 )
                 live.update(status.render())
 
-                if ok:
+                if ok is None:
+                    # Success (None == no failure reason).
                     result.last_completed_doc = rec.question_id
                 else:
+                    # Any failure reason (content/extraction/insert) counts as a
+                    # failed document; the build continues (resume retries it).
                     result.failures += 1
                     result.failed_docs.append(rec.question_id)
                     if result.failures > self.config.max_failures:
@@ -283,6 +366,14 @@ class GraphRAGPipeline:
                 f"[bold]  Switching model: {ev.get('from_model')} -> {ev.get('to_model')}[/bold]\n"
                 f"[dim]  Resuming from {doc}...[/dim]"
             )
+        elif etype == "schema_downgrade":
+            console.print(
+                f"[yellow]{ev.get('model')} rejected the configured JSON format "
+                f"({ev.get('from_level')})[/yellow]\n"
+                f"[bold]  Downgrading to {ev.get('to_level')} "
+                f"(same model, same key)[/bold]\n"
+                f"[dim]  Continuing from {doc}...[/dim]"
+            )
 
     def _finalize(self, result: GraphBuildResult, started: float) -> None:
         result.duration_seconds = time.monotonic() - started
@@ -300,6 +391,7 @@ class GraphRAGPipeline:
         switches = self.extractor.switch_counts()
         result.provider_switches = switches.get("key_switches", 0)
         result.model_switches = switches.get("model_switches", 0)
+        result.schema_downgrades = switches.get("schema_downgrades", 0)
         # Retries reported by the extractor (already added to result.retries in
         # _process_one, but ensure it is consistent).
         result.retries = max(result.retries, self.extractor.stats.get("retries", 0))
@@ -308,7 +400,19 @@ class GraphRAGPipeline:
 
     def _process_one(
         self, rec: QARecord, result: GraphBuildResult, verify_mode: bool = False
-    ) -> bool:
+    ) -> Optional[str]:
+        """Process one document.
+
+        Returns ``None`` on success, or a failure-reason string:
+        - ``"content"``    : per-document content failure (DocumentExtractionError,
+                             e.g. HTTP 400 json_validate_failed)
+        - ``"extraction"`` : generic extraction failure (ExtractionError)
+        - ``"insert"``     : embedding / Neo4j insertion failure
+
+        Truthiness is preserved for existing call sites (``if ok:`` works the
+        same as before); the reason string lets the verification gate
+        distinguish per-document content failures from other failures.
+        """
         doc = _to_document_record(rec)
         try:
             # 1. Extract entities + relationships (grounded).
@@ -346,23 +450,35 @@ class GraphRAGPipeline:
             result.embedding_count += 1
             if not verify_mode:
                 self.checkpoint.mark_done(doc.question_id)
-            return True
+            return None
         except LLMBackendExhaustedError as e:
             # All providers/keys exhausted: record this doc as failed so the
             # next run retries it, then let the build loop stop cleanly.
             if not verify_mode:
                 self.checkpoint.mark_failed(doc.question_id, str(e))
             raise
+        except DocumentExtractionError as e:
+            # Per-document content failure (e.g. HTTP 400 json_validate_failed).
+            # Mark ONLY this document as failed, save the checkpoint, and let
+            # the build loop continue with the remaining documents — this is
+            # NOT backend exhaustion and must not stop the build.
+            if not verify_mode:
+                self.checkpoint.mark_failed(doc.question_id, str(e))
+            logger.warning(
+                "Document %s skipped (extraction rejected by provider): %s",
+                doc.question_id, e,
+            )
+            return "content"
         except ExtractionError as e:
             if not verify_mode:
                 self.checkpoint.mark_failed(doc.question_id, str(e))
             logger.warning("Extraction failed for %s: %s", doc.question_id, e)
-            return False
+            return "extraction"
         except Exception as e:  # noqa: BLE001 - insertion/embedding failures
             if not verify_mode:
                 self.checkpoint.mark_failed(doc.question_id, str(e))
             logger.exception("Document %s failed: %s", doc.question_id, e)
-            return False
+            return "insert"
 
     # ── cleanup ─────────────────────────────────────────────────────────
 

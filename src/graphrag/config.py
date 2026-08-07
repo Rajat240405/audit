@@ -153,6 +153,48 @@ class GraphRAGConfig:
     extract_max_chars: int = field(
         default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_MAX_CHARS", "12000"))
     )
+    # Max output tokens for an extraction call (the INITIAL budget — small, so
+    # we never reserve huge token counts per request). If the model truncates
+    # the JSON (finish_reason=length / truncated failed_generation), the
+    # provider escalates the budget automatically up to
+    # extract_max_tokens_cap. Default 1536 fits extraction JSON for a single
+    # document; it is NOT chain-of-thought headroom.
+    extract_max_tokens: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_MAX_TOKENS", "1536"))
+    )
+    # Upper bound for automatic budget escalation on truncation. Not reserved
+    # per request — only reached when the model actually cuts output off.
+    extract_max_tokens_cap: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_MAX_TOKENS_CAP", "8192"))
+    )
+    # Chat-completions response format for Groq / OpenAI-compatible providers:
+    #   json_object  -> legacy JSON mode  ({ "type": "json_object" })
+    #   json_schema  -> Structured Outputs ({ "type": "json_schema", ... });
+    #                   server-side schema validation — eliminates
+    #                   json_validate_failed on models that support it
+    #                   (qwen3.6-27b, gpt-oss-120b; llama-3.3-70b-versatile is
+    #                   deprecated). Unsupported models 400 -> failover.
+    chat_response_format: str = field(
+        default_factory=lambda: _env("GRAPHRAG_CHAT_RESPONSE_FORMAT", "json_object")
+    )
+    # reasoning_format for chat providers (Groq requires "parsed" or "hidden"
+    # when JSON mode is used with reasoning models). None = do not send.
+    chat_reasoning_format: Optional[str] = field(
+        default_factory=lambda: _env("GRAPHRAG_CHAT_REASONING_FORMAT", None) or None
+    )
+    # Dump full request payloads + raw response bodies to the log (debug).
+    llm_debug: bool = field(
+        default_factory=lambda: _env("GRAPHRAG_LLM_DEBUG", "0").lower()
+        in ("1", "true", "yes")
+    )
+    # Enable the full per-request debug printout for EXACTLY ONE document
+    # (question_id). When set, the provider prints the exact payload (no API
+    # key), estimated input tokens, the raw HTTP response body, and a
+    # content/empty-string analysis for that document only. Everything else
+    # runs with debugging off. Overrides apply to build/rebuild/verify.
+    debug_one: Optional[str] = field(
+        default_factory=lambda: _env("GRAPHRAG_DEBUG_ONE", None) or None
+    )
 
     # ── Pipeline behaviour ──────────────────────────────────────────────
     limit: Optional[int] = field(default=None)          # process at most N docs (testing)
@@ -161,6 +203,11 @@ class GraphRAGConfig:
     max_failures: int = field(
         default_factory=lambda: int(_env("GRAPHRAG_MAX_FAILURES", "50"))
     )  # abort build if failures exceed this
+    # Minimum verification grade required before a full build is allowed.
+    # One of: Excellent, Good, Needs prompt tuning, Poor.
+    verify_min_grade: str = field(
+        default_factory=lambda: _env("GRAPHRAG_VERIFY_MIN_GRADE", "Good")
+    )
 
     # ── Neo4j write batching ────────────────────────────────────────────
     write_batch_size: int = field(
@@ -184,6 +231,7 @@ class GraphRAGConfig:
         retry_failed: Optional[bool] = None,
         llm_provider: Optional[str] = None,
         llm_models: Optional[str] = None,
+        debug_one: Optional[str] = None,
     ) -> "GraphRAGConfig":
         """Return a copy with CLI-level overrides applied (highest precedence)."""
         import dataclasses
@@ -207,4 +255,6 @@ class GraphRAGConfig:
             kw["llm_provider"] = llm_provider
         if llm_models is not None:
             kw["llm_models"] = [m.strip() for m in llm_models.split(",") if m.strip()]
+        if debug_one is not None:
+            kw["debug_one"] = debug_one
         return dataclasses.replace(self, **kw)

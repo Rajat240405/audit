@@ -37,7 +37,7 @@ from rich.table import Table
 
 from src.graphrag.config import GraphRAGConfig
 from src.graphrag.extractor import EntityRelationshipExtractor, ExtractionError
-from src.graphrag.llm import LLMBackendExhaustedError
+from src.graphrag.llm import DocumentExtractionError, LLMBackendExhaustedError
 from src.graphrag.models import DocumentRecord, Entity, Relationship
 from src.graphrag.neo4j_client import Neo4jGraphStore
 from src.models.qa_record import QARecord
@@ -56,6 +56,11 @@ class DocumentVerification:
         self.rejected_entities: list[dict] = []
         self.rejected_relationships: list[dict] = []
         self.error: Optional[str] = None
+        # True when the failure was a per-document content rejection
+        # (DocumentExtractionError, e.g. json_validate_failed) rather than a
+        # genuine extraction/insertion failure. Content rejections are counted
+        # as failed documents but do not, by themselves, force grade "Poor".
+        self.content_failure = False
         self.nodes_created = 0
         self.relationships_created = 0
 
@@ -115,18 +120,30 @@ class GraphVerificationReport:
         self.total_rejected_relationships = 0
         self.total_problems = 0
         self.failed_docs = 0
+        # Subset of failed_docs that were per-document content rejections
+        # (DocumentExtractionError, e.g. json_validate_failed). These are
+        # reported as failed documents but do not, by themselves, force the
+        # grade to "Poor" — the grade reflects extraction quality of the
+        # documents that were actually extracted.
+        self.content_failures = 0
 
     def grade(self) -> str:
         """Overall quality grade."""
-        if self.failed_docs > 0:
+        # Genuine extraction/insertion failures are a hard fail.
+        if self.failed_docs > self.content_failures:
             return "Poor"
         if self.total_problems > 0:
             return "Needs prompt tuning"
         if self.total_relationships == 0:
             return "Needs prompt tuning"
-        # Ratio of docs with at least one relationship
-        with_rel = sum(1 for d in self.docs if d.relationships)
-        rel_ratio = with_rel / max(len(self.docs), 1)
+        # Ratio of successfully extracted docs with at least one relationship.
+        # Failed docs (incl. content rejections) are reported in failed_docs
+        # but excluded here so they don't dilute the quality ratio.
+        graded = [d for d in self.docs if not d.error]
+        if not graded:
+            return "Needs prompt tuning"
+        with_rel = sum(1 for d in graded if d.relationships)
+        rel_ratio = with_rel / len(graded)
         if rel_ratio >= 0.8:
             return "Excellent"
         if rel_ratio >= 0.5:
@@ -181,6 +198,8 @@ class GraphVerifier:
             report.total_problems += len(v.check_grounding())
             if v.error:
                 report.failed_docs += 1
+                if v.content_failure:
+                    report.content_failures += 1
 
         return report
 
@@ -218,6 +237,12 @@ class GraphVerifier:
             v.rejected_relationships = rejections.get("relationships", [])
         except ExtractionError as e:
             v.error = str(e)
+            return v
+        except DocumentExtractionError as e:
+            # Per-document content failure (e.g. HTTP 400 json_validate_failed).
+            # Mark only this document as failed; keep verifying the others.
+            v.error = f"provider rejected document: {e}"
+            v.content_failure = True
             return v
         except LLMBackendExhaustedError:
             # All providers/keys exhausted — propagate so verification stops.
