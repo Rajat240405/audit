@@ -1,0 +1,210 @@
+"""
+GraphRAG configuration.
+
+Single source of truth for the Neo4j GraphRAG pipeline. Every value can be
+overridden via environment variables (``GRAPHRAG_*``) or CLI flags; CLI flags
+take precedence.
+
+This module is intentionally dependency-light (pydantic only) so it can be
+imported anywhere without pulling in the neo4j driver.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+def _env(key: str, default: str) -> str:
+    return os.environ.get(key, default)
+
+
+@dataclass
+class GraphRAGConfig:
+    """Runtime configuration for the GraphRAG pipeline."""
+
+    # ── Neo4j connection ────────────────────────────────────────────────
+    neo4j_uri: str = field(
+        default_factory=lambda: _env("GRAPHRAG_NEO4J_URI", "bolt://localhost:7687")
+    )
+    neo4j_user: Optional[str] = field(
+        default_factory=lambda: os.environ.get("GRAPHRAG_NEO4J_USER", "neo4j")
+    )
+    neo4j_password: Optional[str] = field(
+        default_factory=lambda: os.environ.get("GRAPHRAG_NEO4J_PASSWORD", "neo4j")
+    )
+    neo4j_database: str = field(
+        default_factory=lambda: _env("GRAPHRAG_NEO4J_DATABASE", "neo4j")
+    )
+
+    # ── Input / checkpoint paths ────────────────────────────────────────
+    enriched_glob: str = field(
+        default_factory=lambda: _env("GRAPHRAG_ENRICHED_GLOB", "data/enriched/enriched_*.jsonl")
+    )
+    checkpoint_path: str = field(
+        default_factory=lambda: _env("GRAPHRAG_CHECKPOINT", "storage/graphrag/checkpoint.json")
+    )
+
+    # ── Embeddings (reuse the Hybrid RAG model: BAAI/bge-m3) ────────────
+    embedding_model: str = field(
+        default_factory=lambda: _env("GRAPHRAG_EMBEDDING_MODEL", "BAAI/bge-m3")
+    )
+    embedding_device: Optional[str] = field(
+        default_factory=lambda: os.environ.get("GRAPHRAG_EMBEDDING_DEVICE", "cpu")
+    )
+    embedding_batch_size: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_EMBEDDING_BATCH", "16"))
+    )
+
+    # ── Local LLM (Ollama) entity/relationship extraction ───────────────
+    ollama_base_url: str = field(
+        default_factory=lambda: _env("GRAPHRAG_OLLAMA_URL", "http://localhost:11434")
+    )
+    ollama_model: str = field(
+        default_factory=lambda: _env("GRAPHRAG_OLLAMA_MODEL", "qwen3:8b")
+    )
+    ollama_models: list[str] = field(
+        default_factory=lambda: [
+            m.strip()
+            for m in _env(
+                "GRAPHRAG_OLLAMA_MODELS",
+                _env("GRAPHRAG_OLLAMA_MODEL", "qwen3:8b"),
+            ).split(",")
+            if m.strip()
+        ]
+    )
+    ollama_timeout_seconds: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_OLLAMA_TIMEOUT", "300"))
+    )
+
+    # ── LLM provider selection (ollama | groq | openai_compatible) ─────
+    llm_provider: str = field(
+        default_factory=lambda: _env("GRAPHRAG_LLM_PROVIDER", "ollama")
+    )
+    llm_timeout_seconds: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_LLM_TIMEOUT", "300"))
+    )
+    # Generic model-list override (e.g. --llm-models "m1,m2,m3"); applies to
+    # whichever provider is active. None = use the provider-specific list.
+    llm_models: Optional[list[str]] = field(default=None)
+    # Exponential-backoff tuning (per provider / per API key)
+    llm_backoff_base: float = field(
+        default_factory=lambda: float(_env("GRAPHRAG_LLM_BACKOFF_BASE", "1.0"))
+    )
+    llm_max_attempts_per_key: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_LLM_ATTEMPTS_PER_KEY", "3"))
+    )
+
+    # ── Groq (cloud; multi-key + multi-model failover) ──────────────────
+    groq_api_keys: list[str] = field(
+        default_factory=lambda: [
+            k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()
+        ]
+    )
+    groq_model: str = field(
+        default_factory=lambda: _env("GRAPHRAG_GROQ_MODEL", "llama-3.3-70b-versatile")
+    )
+    groq_models: list[str] = field(
+        default_factory=lambda: [
+            m.strip()
+            for m in _env(
+                "GRAPHRAG_GROQ_MODELS",
+                _env("GRAPHRAG_GROQ_MODEL", "llama-3.3-70b-versatile"),
+            ).split(",")
+            if m.strip()
+        ]
+    )
+    groq_base_url: str = field(
+        default_factory=lambda: _env(
+            "GRAPHRAG_GROQ_BASE_URL", "https://api.groq.com/openai/v1"
+        )
+    )
+
+    # ── OpenAI-compatible (future; same code path as Groq) ──────────────
+    openai_api_keys: list[str] = field(
+        default_factory=lambda: [
+            k.strip() for k in os.environ.get("OPENAI_API_KEYS", "").split(",") if k.strip()
+        ]
+    )
+    openai_model: str = field(
+        default_factory=lambda: _env("GRAPHRAG_OPENAI_MODEL", "gpt-4o-mini")
+    )
+    openai_models: list[str] = field(
+        default_factory=lambda: [
+            m.strip()
+            for m in _env(
+                "GRAPHRAG_OPENAI_MODELS",
+                _env("GRAPHRAG_OPENAI_MODEL", "gpt-4o-mini"),
+            ).split(",")
+            if m.strip()
+        ]
+    )
+    openai_base_url: str = field(
+        default_factory=lambda: _env(
+            "GRAPHRAG_OPENAI_BASE_URL", "https://api.openai.com/v1"
+        )
+    )
+    extract_max_attempts: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_ATTEMPTS", "3"))
+    )
+    # Max characters of the document sent to the LLM per extraction call.
+    extract_max_chars: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_MAX_CHARS", "12000"))
+    )
+
+    # ── Pipeline behaviour ──────────────────────────────────────────────
+    limit: Optional[int] = field(default=None)          # process at most N docs (testing)
+    resume: bool = field(default=True)                  # honor the checkpoint file
+    retry_failed: bool = field(default=True)            # re-attempt previously failed docs
+    max_failures: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_MAX_FAILURES", "50"))
+    )  # abort build if failures exceed this
+
+    # ── Neo4j write batching ────────────────────────────────────────────
+    write_batch_size: int = field(
+        default_factory=lambda: int(_env("GRAPHRAG_WRITE_BATCH", "50"))
+    )
+
+    # Derived helpers
+    @property
+    def checkpoint_file(self) -> Path:
+        return Path(self.checkpoint_path)
+
+    def with_overrides(
+        self,
+        *,
+        enriched_glob: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        ollama_model: Optional[str] = None,
+        limit: Optional[int] = None,
+        resume: Optional[bool] = None,
+        retry_failed: Optional[bool] = None,
+        llm_provider: Optional[str] = None,
+        llm_models: Optional[str] = None,
+    ) -> "GraphRAGConfig":
+        """Return a copy with CLI-level overrides applied (highest precedence)."""
+        import dataclasses
+
+        kw: dict = {}
+        if enriched_glob is not None:
+            kw["enriched_glob"] = enriched_glob
+        if checkpoint_path is not None:
+            kw["checkpoint_path"] = checkpoint_path
+        if embedding_model is not None:
+            kw["embedding_model"] = embedding_model
+        if ollama_model is not None:
+            kw["ollama_model"] = ollama_model
+        if limit is not None:
+            kw["limit"] = limit
+        if resume is not None:
+            kw["resume"] = resume
+        if retry_failed is not None:
+            kw["retry_failed"] = retry_failed
+        if llm_provider is not None:
+            kw["llm_provider"] = llm_provider
+        if llm_models is not None:
+            kw["llm_models"] = [m.strip() for m in llm_models.split(",") if m.strip()]
+        return dataclasses.replace(self, **kw)
