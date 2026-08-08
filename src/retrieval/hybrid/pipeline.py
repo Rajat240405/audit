@@ -11,7 +11,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -220,30 +220,50 @@ class HybridRAGPipeline:
         self,
         query: str,
         top_k: int = 5,
+        on_stage: Optional[Callable[[str, dict], None]] = None,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
         Retrieve relevant results with standardized runtime logging (Phase 11).
+
+        ``on_stage`` is an optional callback invoked as each pipeline stage
+        completes (stage name -> info dict); used by the frontend SSE endpoint
+        to drive the live Pipeline tab.
         """
         total_start = time.perf_counter()
         timings = RetrievalTimings()
 
-        # ── Stage 1: Dense Retrieval ───────────────────────────────────────
+        # ── Query expansion (Q3-class fix) ────────────────────────────────
+        # Expand entity mentions with role keywords so both sides of a
+        # comparison surface (e.g. "INCOIS and NIOT" also retrieves NIOT docs).
+        from src.retrieval.hybrid.query_expansion import expand_query
+        expanded_query = expand_query(query)
+
+        # ── Stage 1: Embed query ───────────────────────────────────────────
         t_embed = time.perf_counter()
-        query_embedding = self.embedder.embed(query)
+        if on_stage:
+            on_stage("embed", {})
+        # Use the expanded query for retrieval; the reranker still sees the
+        # original user query for relevance scoring.
+        query_embedding = self.embedder.embed(expanded_query)
         timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
 
+        # ── Stage 2: Dense retrieval ───────────────────────────────────────
         t_dense = time.perf_counter()
         dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
         timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
         print(f"Dense candidates : {len(dense_results)}")
+        if on_stage:
+            on_stage("dense", {"count": len(dense_results)})
 
-        # ── Stage 2: BM25 Retrieval ────────────────────────────────────────
+        # ── Stage 3: BM25 retrieval ────────────────────────────────────────
         t_bm25 = time.perf_counter()
-        bm25_results = self.bm25_index.search(query, k=self.dense_top_k)
+        bm25_results = self.bm25_index.search(expanded_query, k=self.dense_top_k)
         timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
         print(f"BM25 candidates : {len(bm25_results)}")
+        if on_stage:
+            on_stage("bm25", {"count": len(bm25_results)})
 
-        # ── Stage 3: RRF Fusion ─────────────────────────────────────────────
+        # ── Stage 4: RRF fusion ────────────────────────────────────────────
         t_rrf = time.perf_counter()
         fused_results = RRF.fuse(
             [dense_results, bm25_results],
@@ -252,8 +272,10 @@ class HybridRAGPipeline:
         )
         timings.rrf_fusion_ms = (time.perf_counter() - t_rrf) * 1000
         print(f"RRF candidates : {len(fused_results)}")
+        if on_stage:
+            on_stage("rrf", {"count": len(fused_results)})
 
-        # ── Stage 4: Cross-Encoder Reranking ────────────────────────────────
+        # ── Stage 5: Cross-encoder reranking ───────────────────────────────
         if self.use_reranker and fused_results:
             t_rerank = time.perf_counter()
             active_texts = self._chunk_texts if self.use_chunking else self._doc_texts
@@ -269,6 +291,8 @@ class HybridRAGPipeline:
         else:
             final_results = fused_results[:top_k]
         print(f"CrossEncoder candidates : {len(final_results)}")
+        if on_stage:
+            on_stage("rerank", {"count": len(final_results)})
 
         # ── Stage 5: Context Assembly & Document Re-Grouping ────────────────
         retrieved: list[RetrievedResult] = []

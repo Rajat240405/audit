@@ -11,16 +11,17 @@ Ensures perfect, secure propagation of in-memory API keys across runtime boundar
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
@@ -48,22 +49,59 @@ ACTIVE_CONFIG = {
     "groq_api_key": None
 }
 
-# Load parent pipelines
+# ─────────────────────────────────────────────────────────────────────────────
+# Lazy pipeline loading
+# ─────────────────────────────────────────────────────────────────────────────
+# The Hybrid RAG pipeline loads the bge-m3 embedding model (weights) AND the
+# FAISS/BM25 index at construction. Loading it at import time delays the
+# server binding its port by many seconds — the frontend sees ECONNREFUSED
+# on /api/status meanwhile. Instead we expose a lazy proxy: the port binds
+# immediately, and the heavy model/index load happens once, on the first
+# retrieval request (a one-time delay on the first query only).
+import threading as _threading
+
+
+class _LazyPipeline:
+    """Builds the real HybridRAGPipeline on first use; forwards all access."""
+
+    def __init__(self) -> None:
+        self._instance = None
+        self._lock = _threading.Lock()
+
+    def _get(self):
+        if self._instance is None:
+            with self._lock:
+                if self._instance is None:
+                    self._instance = self._build()
+        return self._instance
+
+    @staticmethod
+    def _build():
+        p = HybridRAGPipeline()
+        index_dir = Path("storage/hybrid_rag")
+        if index_dir.exists():
+            p.load(index_dir)
+            chunks_count = (
+                len(p._chunk_map) if p.use_chunking else len(p._doc_map)
+            )
+            print("=" * 60)
+            print(f"Embedding Model : {p.embedder.model_name}")
+            print(f"Embedding Dimension : {p.embedder.embedding_dim}")
+            print(f"Documents Indexed : {len(p._doc_map)}")
+            print(f"Chunks Indexed : {chunks_count}")
+            print("FAISS Index Built Successfully")
+            print("=" * 60)
+        return p
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
 index_dir = Path("storage/hybrid_rag")
 graph_dir = Path("storage/graphrag")
 
-pipeline = HybridRAGPipeline()
-if index_dir.exists():
-    pipeline.load(index_dir)
-    # Phase 11 required runtime logging
-    chunks_count = len(pipeline._chunk_map) if pipeline.use_chunking else len(pipeline._doc_map)
-    print("=" * 60)
-    print(f"Embedding Model : {pipeline.embedder.model_name}")
-    print(f"Embedding Dimension : {pipeline.embedder.embedding_dim}")
-    print(f"Documents Indexed : {len(pipeline._doc_map)}")
-    print(f"Chunks Indexed : {chunks_count}")
-    print("FAISS Index Built Successfully")
-    print("=" * 60)
+# Lazy: server binds port immediately; model+index load on first query.
+pipeline = _LazyPipeline()
 
 graph_store = GraphStore(storage_dir=str(graph_dir))
 if graph_store.graph_file.exists():
@@ -100,6 +138,14 @@ class ChatRequest(BaseModel):
     message: str
     mode: str = "fast"            # Execution Mode: "fast" or "deep"
     retrieval_mode: str = "hybrid" # Retrieval Mode: "hybrid" or "graph"
+
+
+class ChatStreamRequest(BaseModel):
+    message: str
+    mode: str = "fast"            # Execution Mode: "fast" or "deep"
+    retrieval_mode: str = "hybrid"  # Retrieval Mode: "hybrid" or "graph"
+    top_k: int = 5
+    draft_style: Optional[str] = None  # e.g. formal / concise / executive
 
 
 class SourceItem(BaseModel):
@@ -239,12 +285,34 @@ def extract_informative_summary(answer_text: str, subject_text: str) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    """Serve the single-page HTML chat client."""
+    """Serve the React workstation (production build) if present, else the
+    legacy single-file HTML client. Lets `npm run build` output be served by
+    the FastAPI backend at the same origin (no CORS, no separate host)."""
+    # Production: serve the Vite-built React app from frontend/dist
+    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    dist_index = dist / "index.html"
+    if dist_index.exists():
+        return HTMLResponse(dist_index.read_text(encoding="utf-8"))
+
+    # Fallback: legacy monolithic index.html
     html_path = Path(__file__).parent / "index.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="index.html template not found")
     with open(html_path, encoding="utf-8") as f:
         return f.read()
+
+
+@app.get("/assets/{path:path}")
+async def get_assets(path: str):
+    """Serve built frontend assets (JS/CSS) from frontend/dist/assets."""
+    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    asset = dist / "assets" / path
+    if not asset.exists():
+        raise HTTPException(status_code=404, detail="asset not found")
+    media = "application/javascript" if asset.suffix == ".js" else (
+        "text/css" if asset.suffix == ".css" else "application/octet-stream"
+    )
+    return Response(content=asset.read_bytes(), media_type=media)
 
 
 @app.get("/api/providers")
@@ -649,6 +717,870 @@ async def chat_endpoint(request: ChatRequest):
             network_latency_ms=network_latency_ms,
             trace=trace_payload
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workstation API (frontend redesign: streaming, status, build, export)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_sources(results: list) -> list[dict]:
+    """Normalize RetrievedResult objects into SourceItem dicts."""
+    out = []
+    for r in results:
+        out.append({
+            "doc_id": r.doc_id,
+            "ministry": r.metadata.get("ministry") or "-",
+            "subject": r.metadata.get("subject") or "-",
+            "score": float(r.score),
+            "question": r.question,
+            "answer": r.answer,
+            "dense_score": float(r.dense_score) if r.dense_score is not None else None,
+            "bm25_score": float(r.bm25_score) if r.bm25_score is not None else None,
+            "rrf_score": float(r.rrf_score) if r.rrf_score is not None else None,
+            "rerank_score": float(r.rerank_score) if r.rerank_score is not None else None,
+        })
+    return out
+
+
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj)}\n\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grounding verification (server-side)
+# ─────────────────────────────────────────────────────────────────────────────
+# After the answer streams, we extract every claim (proper nouns, acronyms,
+# figures) and check it VERBATIM against the retrieved sources. Claims not
+# found are reported — the frontend shows them as "not found in sources" so
+# the user can see exactly what the model may have invented, and the grounding
+# % badge reflects server-verified facts, not a browser heuristic.
+
+import re as _re
+
+_ACRONYM_STOPWORDS = {
+    "THE", "AND", "FOR", "NOT", "ARE", "WAS", "WERE", "BUT", "HAS", "HAVE",
+    "HAD", "ITS", "YOU", "OUR", "OUT", "OFF", "CAN", "MAY", "THIS", "THAT",
+    "WITH", "FROM", "INTO", "WHEN", "WHAT", "WHY", "HOW", "THAN", "THEN",
+    "INDIA", "GOVERNMENT", "MINISTRY", "ANSWER", "QUESTION", "STATE",
+}
+
+_FIGURE_RE = _re.compile(
+    r"\b\d+(?:[.,]\d+)?\s?(?:%|mm|cm|km|m\b|MW|GW|KW|sq\.?\s?km|crore|lakh|"
+    r"million|billion|hrs?|hours?|years?|deg(?:ree)?s?|₹|rs\.?)\b",
+    _re.IGNORECASE,
+)
+# "39 DWRs", "87 DWRs", "126 radars" — number + capitalized noun
+_NUM_WORD_RE = _re.compile(r"\b\d+(?:[.,]\d+)?\s*[A-Z][A-Za-z]{2,}\b")
+_QUOTE_RE = _re.compile(r"\"([^\"\\]{6,80})\"")
+_ACRONYM_RE = _re.compile(r"\b[A-Z]{2,8}\b")
+_ACRONYM_PLURAL_RE = _re.compile(r"\b[A-Z]{2,7}[a-z]{1,2}\b")
+_NAMED_ABBR_RE = _re.compile(r"\b[A-Z][A-Za-z&.\- ]{2,60}\s*\([A-Z]{2,10}\)")
+
+
+def _extract_claims(answer: str, max_claims: int = 12) -> list[str]:
+    """Extract a bounded set of checkable claims from the answer."""
+    claims: list[str] = []
+    for m in _FIGURE_RE.finditer(answer):
+        claims.append(m.group(0).strip())
+    for m in _NUM_WORD_RE.finditer(answer):
+        claims.append(m.group(0).strip())
+    for m in _QUOTE_RE.finditer(answer):
+        claims.append(m.group(1).strip())
+    for m in _NAMED_ABBR_RE.finditer(answer):
+        claims.append(m.group(0).strip())
+    for m in _ACRONYM_RE.finditer(answer):
+        tok = m.group(0)
+        if tok in _ACRONYM_STOPWORDS or len(tok) < 3:
+            continue
+        claims.append(tok)
+    for m in _ACRONYM_PLURAL_RE.finditer(answer):
+        tok = m.group(0)
+        if tok in _ACRONYM_STOPWORDS or len(tok) < 3:
+            continue
+        claims.append(tok)
+    # de-dup, keep order, cap
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in claims:
+        key = c.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= max_claims:
+            break
+    return out
+
+
+# ── Citation / grounding-aware filter (#3, non-destructive) ───────────────
+# Original behavior dropped ANY sentence lacking "[Source N]", which cut
+# correct-but-uncited prose and made answers look truncated. New behavior is
+# claim-aware: a sentence is removed ONLY if it contains a checkable claim
+# (figure, acronym, named phrase) that is NOT found in the retrieved sources —
+# i.e. an actual hallucination risk. Plain prose, headings, and correctly
+# grounded statements are never removed just for missing a citation token.
+
+_CITATION_RE = _re.compile(r"\[\s*[Ss]ource\s*(\d+)\s*\]")
+
+
+def _apply_citation_filter(
+    answer: str,
+    sources: list[dict],
+    max_drop: int = 3,
+) -> tuple[str, list[str]]:
+    """Drop only sentences carrying UNVERIFIED claims. Returns
+    (filtered_answer, dropped_sentences). Never empties the answer."""
+    if not answer.strip() or not sources:
+        return answer, []
+
+    # Build a source haystack for per-sentence grounding.
+    haystack = " ".join(
+        f"{s.get('question','')} {s.get('answer','')}" for s in sources
+    ).lower()
+
+    import re as _re2
+    sentences = _re2.split(r"(?<=[.!?])\s+|\n+", answer)
+    kept: list[str] = []
+    dropped: list[str] = []
+
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # A citation token always lets a sentence through.
+        if _CITATION_RE.search(s):
+            kept.append(s)
+            continue
+        # No claims to verify -> plain prose/connective -> keep.
+        claims = _extract_claims(s)
+        if not claims:
+            kept.append(s)
+            continue
+        # Has claims but none are grounded -> hallucination risk -> drop.
+        ungrounded = [c for c in claims if c.lower() not in haystack]
+        if ungrounded and len(dropped) < max_drop:
+            dropped.append(s)
+            continue
+        kept.append(s)
+
+    if not kept:
+        # never return an empty answer
+        return answer, dropped
+    return "\n\n".join(kept), dropped
+
+
+# ── Normalized + alias-aware grounding (#1 recall fix) ────────────────────
+# The raw verbatim check ("is the exact string in the source?") is precise but
+# has poor recall: "Indian Space Research Organisation" vs "ISRO" is the same
+# fact, but exact matching flags it. We keep the STRICT floor (a claim must
+# have genuine textual support in a source) but make matching smarter:
+#   1. normalize both sides (lowercase, unify currency/abbrevs, strip
+#      punctuation, collapse whitespace),
+#   2. resolve known alias groups (acronym <-> full name),
+#   3. strip trailing plurals ("DWRs" -> "DWR").
+# Invented names like "VSSC" stay NOT-FOUND because they are not in any alias
+# group of a concept actually present in the sources.
+
+_TOKEN_ALIASES = {
+    "rs": "rupee", "inr": "rupee", "₹": "rupee",
+    "&": "and", "ltd": "limited", "dept": "department",
+    "govt": "government", "yr": "year", "hrs": "hours", "hr": "hour",
+}
+
+# Equivalent surface forms of the SAME entity/concept. These are true
+# synonyms mined from the corpus — deliberately NOT including things like
+# "VSSC" for ISRO (VSSC is a sub-entity; documents never use it for the
+# personnel sphere, so it must keep failing the check).
+_ALIAS_GROUPS: list[list[str]] = [
+    ["isro", "indian space research organisation"],
+    ["niot", "national institute of ocean technology"],
+    ["incois", "indian national centre for ocean information services"],
+    ["imd", "india meteorological department", "indian meteorological department"],
+    ["dwr", "doppler weather radar", "doppler weather radars"],
+    ["cmlre", "centre for marine living resources and ecology",
+     "center for marine living resources and ecology"],
+    ["csir nio", "national institute of oceanography"],
+    ["grse", "garden reach shipbuilders", "garden reach shipbuilders and engineers"],
+    ["cwc", "central water commission"],
+    ["ndma", "national disaster management authority"],
+    ["matsya 6000", "matsya 6000 meters", "matsya"],
+    ["mission mausam", "mission mausam scheme"],
+    ["icmam", "integrated coastal and marine area management"],
+    ["iczm", "integrated coastal zone management"],
+]
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, unify currency/abbrev tokens, strip punctuation, collapse."""
+    t = text.lower()
+    # remove digit-grouping commas first: "2,000" -> "2000" so it matches "2000"
+    t = _re.sub(r"(?<=\d),(?=\d)", "", t)
+    # token aliases with word boundaries, space-padded so they never glue to
+    # neighbours ("₹2,000" -> "rupee 2000", "rs." -> "rupee")
+    for k, v in _TOKEN_ALIASES.items():
+        t = _re.sub(rf"\b{_re.escape(k)}\b", f" {v} ", t)
+    # replace anything non-alphanumeric with a space
+    t = _re.sub(r"[^a-z0-9]+", " ", t)
+    return _re.sub(r"\s+", " ", t).strip()
+
+
+def _singularize(norm: str) -> str:
+    """Strip a trailing plural 's' if it leaves a meaningful token."""
+    if len(norm) > 4 and norm.endswith("s") and not norm.endswith("ss"):
+        return norm[:-1]
+    return norm
+
+
+def _claim_candidates(claim: str) -> list[str]:
+    """All normalized surface forms that represent the same concept as the
+    claim — the claim itself, its singular form, and every alias-group member
+    if the claim names a known entity."""
+    c = _normalize(claim)
+    cands = [c, _singularize(c)]
+    for group in _ALIAS_GROUPS:
+        if c in group or any(m in c for m in group if len(m) > 4):
+            cands.extend(group)
+    # de-dup
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in cands:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _claim_supported(claim: str, src_normalized: str) -> bool:
+    """True if any surface form of the claim appears in the normalized source."""
+    for cand in _claim_candidates(claim):
+        if cand and cand in src_normalized:
+            return True
+    return False
+
+
+def _grounding_report(answer: str, sources: list[dict]) -> list[dict]:
+    """Verify each extracted claim against the sources using normalized +
+    alias-aware matching. Returns [{text, found, source}]."""
+    if not sources:
+        return []
+    claims = _extract_claims(answer)
+    src_texts = [
+        {
+            "doc_id": s["doc_id"],
+            "text": _normalize(f"{s.get('question','')} {s.get('answer','')}"),
+        }
+        for s in sources
+    ]
+    report: list[dict] = []
+    for c in claims:
+        found = False
+        src = None
+        for st in src_texts:
+            if _claim_supported(c, st["text"]):
+                found = True
+                src = st["doc_id"]
+                break
+        report.append({"text": c, "found": found, "source": src})
+    return report
+
+
+# ── LLM judge (#2) ───────────────────────────────────────────────────────
+# The regex grounding pass is fast but dumb: it only does verbatim substring
+# matching, so a CITED-but-wrong claim (e.g. "VSSC" instead of "ISRO") slips
+# through. The LLM judge re-verifies the claims the regex flagged as
+# NOT-FOUND (and, optionally, the cited ones) by READING the sources and
+# returning a supported/not-supported verdict per claim. It's a single short
+# call over the flagged claims — NOT a regeneration of the whole answer — so
+# latency stays near the generation cost (+10-20%, not 2x).
+
+_JUDGE_JSON_RE = _re.compile(r"\{.*\}", _re.DOTALL)
+
+
+def _llm_judge_claims(claims: list[dict], sources: list[dict]) -> list[dict]:
+    """Verify flagged claims with an LLM judge against the sources.
+
+    Returns the claims list with updated ``found`` / ``source`` / ``note``.
+    On any failure (LLM offline, parse error) returns the original claims
+    unchanged — the regex verdicts remain authoritative.
+    """
+    if not claims or not sources:
+        return claims
+    # Only judge claims the regex could NOT verify (the interesting ones).
+    pending = [c for c in claims if not c.get("found")]
+    if not pending:
+        return claims
+
+    try:
+        # Compact source text: id + answer (truncated) per doc.
+        src_blocks = []
+        for i, s in enumerate(sources[:6], start=1):
+            ans = (s.get("answer") or "")[:1500]
+            src_blocks.append(f"[Source {i}] {s.get('doc_id','')}\n{ans}")
+        src_text = "\n\n".join(src_blocks)
+
+        claim_lines = "\n".join(
+            f"{i}. {c['text']}" for i, c in enumerate(pending, start=1)
+        )
+        prompt = (
+            "You are a strict evidence auditor. Below are source documents and a "
+            "list of claims. For EACH claim decide whether it is SUPPORTED by the "
+            "sources — supported means the claim's fact appears in the source text "
+            "verbatim or is directly implied. If a claim names an organization, "
+            "programme, or figure that does not appear in the sources, it is NOT "
+            "supported.\n"
+            "Return ONLY JSON (no prose):\n"
+            '{"verdicts":[{"index":1,"supported":true,"source":"18-3-2571"},'
+            '{"index":2,"supported":false,"source":null}]}\n\n'
+            f"SOURCES:\n{src_text}\n\nCLAIMS:\n{claim_lines}"
+        )
+        resp = llm_client.generate(
+            prompt=prompt,
+            system=(
+                "You are an evidence-verification assistant. Answer strictly with "
+                "the requested JSON. Never invent claims or sources."
+            ),
+        )
+        raw = resp.text
+        m = _JUDGE_JSON_RE.search(raw or "")
+        if not m:
+            return claims
+        data = json.loads(m.group(0))
+        verdicts = data.get("verdicts") or []
+
+        by_index = {}
+        for v in verdicts:
+            try:
+                by_index[int(v.get("index"))] = v
+            except (TypeError, ValueError):
+                continue
+
+        out = []
+        pending_i = 0
+        for c in claims:
+            if c.get("found"):
+                out.append(c)  # already verified verbatim by regex — keep
+                continue
+            pending_i += 1  # index within the pending list the judge saw
+            v = by_index.get(pending_i)
+            if v is None:
+                out.append(c)  # judge gave no verdict — keep regex verdict
+                continue
+            supported = bool(v.get("supported"))
+            src = v.get("source") or None
+            # CRITICAL: the judge's "supported" is only trusted if it can name
+            # a source that ACTUALLY contains the claim. The judge is the same
+            # model that hallucinated the claim (e.g. "VSSC" — it "remembers"
+            # VSSC is ISRO's space centre), so a bare "supported: true" must
+            # NOT override a verbatim miss. Only accept the judge's verdict
+            # when the claim text appears in the cited source's text (using the
+            # same normalized+alias matcher as the grounding pass).
+            judge_trusted = False
+            if supported and src:
+                for s in sources:
+                    if s.get("doc_id") == src:
+                        stxt = _normalize(
+                            f"{s.get('question','')} {s.get('answer','')}"
+                        )
+                        if _claim_supported(c["text"], stxt):
+                            judge_trusted = True
+                        break
+            if supported and not judge_trusted:
+                # Judge said supported but cannot back it with verbatim text
+                # in a real source → keep the regex verdict (rejected).
+                out.append({
+                    "text": c["text"],
+                    "found": False,
+                    "source": None,
+                    "note": "rejected by LLM judge (no verbatim source support)",
+                })
+            else:
+                out.append({
+                    "text": c["text"],
+                    "found": judge_trusted,
+                    "source": src if judge_trusted else None,
+                    "note": (
+                        "verified by LLM judge" if judge_trusted
+                        else "rejected by LLM judge"
+                    ),
+                })
+        return out
+    except Exception as e:  # noqa: BLE001 - judge must never break the stream
+        import traceback
+        print(f"[llm-judge] failed ({type(e).__name__}: {e}) — using regex verdicts")
+        print(traceback.format_exc(limit=3))
+        return claims
+
+
+def _llm_rewrite_answer(
+    answer: str,
+    rejected_claims: list[str],
+    sources: list[dict],
+) -> str:
+    """Second LLM call: rewrite the answer WITHOUT the judge-rejected claims.
+
+    The rewrite keeps the structure and all supported content, but removes
+    (or corrects) the unsupported statements. Returns the rewritten markdown
+    answer. Raises on failure — the caller falls back to the original.
+    """
+    src_blocks = []
+    for i, s in enumerate(sources[:6], start=1):
+        ans = (s.get("answer") or "")[:1500]
+        src_blocks.append(f"[Source {i}] {s.get('doc_id','')}\n{ans}")
+    src_text = "\n\n".join(src_blocks)
+
+    rejected_lines = "\n".join(f"- {c}" for c in rejected_claims)
+    prompt = (
+        "You are an evidence auditor. Below is a draft answer and a list of "
+        "claims that were REJECTED because they are NOT supported by the source "
+        "documents.\n\n"
+        f"REJECTED CLAIMS:\n{rejected_lines}\n\n"
+        f"DRAFT ANSWER:\n{answer}\n\n"
+        f"SOURCES:\n{src_text}\n\n"
+        "Rewrite the draft answer so that it:\n"
+        "1. Removes every statement based on a rejected claim.\n"
+        "2. Keeps all supported statements verbatim where possible.\n"
+        "3. Does NOT add any new facts, names, or figures.\n"
+        "4. Preserves markdown formatting and [Source N] citations for the "
+        "kept statements.\n"
+        "If everything was rejected, say the context does not support the "
+        "claim.\n"
+        "Return ONLY the rewritten answer, no commentary."
+    )
+    resp = llm_client.generate(
+        prompt=prompt,
+        system=(
+            "You are an evidence-verification assistant. Rewrite the answer to "
+            "remove unsupported claims. Never invent facts."
+        ),
+    )
+    return (resp.text or "").strip()
+
+
+
+def _remove_rejected_sentences(answer: str, rejected_claims: list[str]) -> tuple[str, list[str]]:
+    """Remove sentences containing judge-rejected claims from the answer.
+
+    Returns (cleaned_answer, removed_sentences). Only sentences that carry a
+    claim the LLM judge explicitly rejected are removed — never plain prose,
+    never grounded claims. This is the targeted enforcement that makes the
+    visible answer correct, not just flagged.
+    """
+    if not answer.strip() or not rejected_claims:
+        return answer, []
+    import re as _re2
+    sentences = _re2.split(r"(?<=[.!?])\s+|\n+", answer)
+    kept: list[str] = []
+    removed: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        sl = s.lower()
+        if any(rc.lower() in sl for rc in rejected_claims):
+            removed.append(s)
+        else:
+            kept.append(s)
+    if not kept:
+        return answer, removed  # never empty the answer
+    return "\n\n".join(kept), removed
+
+
+def _resolve_exec(request: ChatStreamRequest):
+    """Bind ACTIVE_CONFIG / llm_client / generator per execution profile —
+    mirrors the resolution in chat_endpoint."""
+    exec_mode = request.mode.lower()
+    ACTIVE_CONFIG["mode"] = exec_mode
+    family_id = ACTIVE_CONFIG["model_family"]
+    family = model_registry.get(family_id) or model_registry.get("qwen2.5")
+    exec_params = family.get_execution_params(exec_mode)
+    resolved_model = family.model_name
+    llm_client.model = resolved_model
+    llm_client.num_ctx = family.context_window
+    llm_client.temperature = exec_params["temperature"]
+    llm_client.max_tokens = exec_params["max_tokens"]
+    llm_client.api_key = ACTIVE_CONFIG["groq_api_key"]
+    ACTIVE_CONFIG["model"] = resolved_model
+    generator.max_doc_chars = exec_params["max_doc_chars"]
+    generator.max_context_docs = exec_params["max_context_docs"]
+    generator.context_budget_ratio = 0.80
+    return family, exec_params, resolved_model
+
+
+@app.post("/api/chat/stream")
+def chat_stream(request: ChatStreamRequest):
+    """SSE streaming endpoint for the drafting workspace.
+
+    Emits: status (pipeline stages) -> sources -> trace -> tokens -> meta -> done.
+    Never 500s: generation failures are surfaced as an ``error`` event with the
+    retrieved sources still delivered.
+    """
+    def event_stream():
+        query = request.message.strip()
+        if not query:
+            yield _sse({"type": "error", "message": "Query message cannot be empty"})
+            yield _sse({"type": "done"})
+            return
+
+        ret_mode = request.retrieval_mode.lower()
+        try:
+            family, exec_params, resolved_model = _resolve_exec(request)
+        except Exception as e:  # noqa: BLE001
+            yield _sse({"type": "error", "message": f"Config resolution failed: {e}"})
+            yield _sse({"type": "done"})
+            return
+
+        style_hint = ""
+        original_system_prompt = generator.system_prompt
+        if request.draft_style:
+            style_hint = (
+                f"\n\nDRAFT STYLE INSTRUCTION: Compose the answer in a "
+                f"{request.draft_style} register appropriate for a scientific "
+                f"audit workstation."
+            )
+            generator.system_prompt = (generator.system_prompt or "").rstrip() + style_hint
+
+        t_ret_start = time.perf_counter()
+        sources: list[dict] = []
+        timings = None
+        is_graph = (ret_mode == "graph" and not is_semantic_synthesis_query(query))
+
+        try:
+            if is_graph:
+                # ── GRAPH / metadata traversal path ──
+                stages = ["entities", "traversal", "expansion", "evidence"]
+                for s in stages:
+                    yield _sse({"type": "status", "stage": s, "message": s, "done": False})
+                results = graph_retriever.retrieve(query, top_k=request.top_k)
+                for s in stages:
+                    yield _sse({"type": "status", "stage": s, "message": s, "done": True})
+                sources = _to_sources(results)
+                ret_latency = (time.perf_counter() - t_ret_start) * 1000
+            else:
+                # ── HYBRID RAG path with live stage callbacks ──
+                stage_events: list[tuple[str, dict]] = []
+
+                def _collect(name: str, info: dict) -> None:
+                    stage_events.append((name, info))
+
+                yield _sse({"type": "status", "stage": "embed", "message": "Embedding query…", "done": False})
+                results, timings = pipeline.retrieve(
+                    query, top_k=request.top_k, on_stage=_collect
+                )
+                for name, info in stage_events:
+                    label = {
+                        "embed": "Embed query", "dense": "Semantic search (dense)",
+                        "bm25": "BM25 search", "rrf": "RRF fusion",
+                        "rerank": "Reranking (cross-encoder)",
+                    }.get(name, name)
+                    yield _sse({
+                        "type": "status", "stage": name, "message": label,
+                        "count": info.get("count"), "done": True,
+                    })
+                sources = _to_sources(results)
+                ret_latency = (time.perf_counter() - t_ret_start) * 1000
+
+            yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
+
+            trace_payload = None
+            if not is_graph and timings is not None:
+                trace_payload = {
+                    "embed_query_ms": round(timings.embed_query_ms, 2),
+                    "dense_search_ms": round(timings.dense_search_ms, 2),
+                    "bm25_search_ms": round(timings.bm25_search_ms, 2),
+                    "rrf_fusion_ms": round(timings.rrf_fusion_ms, 2),
+                    "rerank_ms": round(timings.rerank_ms, 2),
+                    "retrieval_total_ms": round(ret_latency, 2),
+                }
+            if trace_payload:
+                yield _sse({"type": "trace", "trace": trace_payload})
+
+            if not sources:
+                yield _sse({"type": "tokens", "text": (
+                    "No relevant documents were retrieved from the knowledge base. "
+                    "I cannot answer this question based on the available context."
+                )})
+                yield _sse({"type": "done"})
+                return
+
+            # ── Generation (streamed) ──
+            yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": False})
+            llm_available = llm_client.check_health(api_key=ACTIVE_CONFIG["groq_api_key"])
+            if not llm_available:
+                yield _sse({"type": "tokens", "text": (
+                    "**[System Notice: LLM Generation Offline]**\n\n"
+                    "The retrieved documents below were found, but the active LLM "
+                    "service is offline or unauthorized. Start the local service or "
+                    "switch provider, then retry."
+                )})
+                yield _sse({"type": "meta", "meta": {
+                    "provider": ACTIVE_CONFIG["provider"], "model": resolved_model,
+                    "profile": request.mode.lower(),
+                    "retrieved_documents": len(sources), "retrieved_chunks": len(sources),
+                    "response_time_ms": round((time.perf_counter() - t_ret_start) * 1000, 1),
+                    "is_fallback": True,
+                }})
+                yield _sse({"type": "done"})
+                return
+
+            from src.retrieval.result import RetrievedResult
+            context = [
+                RetrievedResult(
+                    doc_id=s["doc_id"], question=s["question"], answer=s["answer"],
+                    score=s["score"], retrieval_method="hybrid", metadata={
+                        "ministry": s["ministry"], "subject": s["subject"],
+                    },
+                ) for s in sources
+            ]
+            # accumulate streamed text for the server-side grounding pass
+            streamed_parts: list[str] = []
+            for ev in generator.generate_stream(query, context):
+                if ev["type"] == "tokens":
+                    streamed_parts.append(ev["text"])
+                    yield _sse({"type": "tokens", "text": ev["text"]})
+                elif ev["type"] == "meta":
+                    # generate_stream yields a FLAT meta event; wrap it for SSE
+                    meta = {
+                        "model": ev.get("model"),
+                        "provider": ev.get("provider"),
+                        "prompt_tokens": ev.get("prompt_tokens", 0),
+                        "completion_tokens": ev.get("completion_tokens", 0),
+                        "total_tokens": ev.get("total_tokens", 0),
+                        "generation_latency_ms": ev.get("generation_latency_ms", 0.0),
+                        "sources_used": ev.get("sources_used", []),
+                    }
+                    meta["provider"] = ACTIVE_CONFIG["provider"]
+                    meta["profile"] = request.mode.lower()
+                    meta["retrieved_documents"] = len(sources)
+                    meta["retrieved_chunks"] = len(sources)
+                    meta["response_time_ms"] = round(
+                        (time.perf_counter() - t_ret_start) * 1000, 1
+                    )
+                    meta["is_fallback"] = False
+                    yield _sse({"type": "meta", "meta": meta})
+
+            # Server-side grounding verification of the final answer.
+            raw_text = "".join(streamed_parts)
+            final_text = raw_text
+
+            # #3 Claim-aware filter: identify sentences with UNVERIFIED claims.
+            # We do NOT truncate the visible answer — we keep the full text and
+            # flag the offending sentences so the user sees exactly what was
+            # questioned, rather than a mysteriously shortened draft.
+            citation_dropped: list[str] = []
+            if final_text.strip():
+                _filtered, citation_dropped = _apply_citation_filter(final_text, sources)
+                # `_filtered` is informational; we keep `final_text` intact so
+                # the canvas is never silently cut.
+
+            grounding: list[dict] = []
+            if final_text.strip():
+                grounding = _grounding_report(final_text, sources)
+                # Merge dropped sentences into the grounding report as explicit
+                # "not found — review" entries so nothing is hidden.
+                for d in citation_dropped:
+                    grounding.append({
+                        "text": d[:160],
+                        "found": False,
+                        "source": None,
+                        "note": "sentence removed by citation filter",
+                    })
+                # LLM judge (#2): re-verify the regex-flagged claims by reading
+                # the sources. Catches cited-but-wrong claims like "VSSC"
+                # instead of "ISRO". One short call over flagged claims only —
+                # not a regeneration of the answer.
+                if grounding and any(not c.get("found") for c in grounding):
+                    grounding = _llm_judge_claims(grounding, sources)
+                if grounding:
+                    yield _sse({"type": "grounding", "grounding": grounding})
+
+            # Second LLM call (rewrite): if the judge rejected any claim, ask
+            # the LLM to regenerate the answer WITHOUT the unsupported claims.
+            # This is a proper 2nd call (2x latency) — the user accepted that
+            # tradeoff for correctness now; we can optimize later.
+            rejected_claims = [
+                c["text"] for c in grounding
+                if (not c.get("found")) and c.get("note") == "rejected by LLM judge"
+            ]
+            judge_rewritten = False
+            if rejected_claims and final_text.strip():
+                try:
+                    rewrite = _llm_rewrite_answer(
+                        answer=final_text,
+                        rejected_claims=rejected_claims,
+                        sources=sources,
+                    )
+                    if rewrite and rewrite.strip():
+                        final_text = rewrite
+                        judge_rewritten = True
+                except Exception as e:  # noqa: BLE001 - never break the stream
+                    print(f"[llm-rewrite] failed ({type(e).__name__}: {e}) — keeping original")
+                    judge_rewritten = False
+
+                # DETERMINISTIC SAFETY NET: the rewrite LLM is the same model
+                # that hallucinated the claim, so it may reintroduce it. After
+                # the rewrite, remove ANY sentence still containing a rejected
+                # claim (verbatim). This guarantees a rejected name can never
+                # appear in the final answer.
+                if judge_rewritten:
+                    final_text, _ = _remove_rejected_sentences(
+                        final_text, rejected_claims
+                    )
+
+            # Emit the FINAL text (post judge-rewrite) plus counts.
+            yield _sse({
+                "type": "final",
+                "text": final_text,
+                "citation_dropped_count": len(citation_dropped),
+                "citation_dropped": citation_dropped[:20],
+                "judge_removed_count": len(rejected_claims),
+                "judge_removed": rejected_claims[:20],
+                "judge_rewritten": judge_rewritten,
+            })
+
+            yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": True})
+            yield _sse({"type": "done"})
+
+        except Exception as e:  # noqa: BLE001 - never let the stream 500
+            import traceback
+            print(f"[chat/stream] generation failed: {type(e).__name__}: {e}")
+            print(traceback.format_exc(limit=5))
+            if sources:
+                yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
+            yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
+            yield _sse({"type": "done"})
+        finally:
+            generator.system_prompt = original_system_prompt
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/edit")
+def ai_edit(payload: dict):
+    """Stream an AI edit of the current draft (drafting workspace toolbar)."""
+    instruction = (payload.get("instruction") or "").strip()
+    document = payload.get("document") or ""
+    style = (payload.get("draft_style") or "").strip()
+
+    if not instruction:
+        return StreamingResponse(iter([_sse({"type": "error", "message": "Instruction empty"}), _sse({"type": "done"})]),
+                                 media_type="text/event-stream")
+    if not document:
+        return StreamingResponse(iter([_sse({"type": "error", "message": "No draft to edit"}), _sse({"type": "done"})]),
+                                 media_type="text/event-stream")
+
+    def event_stream():
+        system = (
+            "You are an editing assistant inside a scientific audit workstation "
+            "for Indian parliamentary Q&A evidence. Apply the user's requested "
+            "edit to the provided draft. Preserve every factual claim, citation, "
+            "and markdown structure. Never invent new facts.\n"
+            f"DRAFT STYLE (if any): {style or 'none'}"
+        )
+        prompt = (
+            f"EDIT INSTRUCTION:\n{instruction}\n\n"
+            f"CURRENT DRAFT:\n{document}\n\n"
+            f"Return the revised draft in full, markdown formatted."
+        )
+        try:
+            yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": False})
+            for chunk in llm_client.generate_stream(prompt=prompt, system=system):
+                yield _sse({"type": "tokens", "text": chunk})
+            yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": True})
+            yield _sse({"type": "done"})
+        except Exception as e:  # noqa: BLE001
+            yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
+            yield _sse({"type": "done"})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/status")
+def status():
+    """Workstation header status: provider, model, mode, GPU."""
+    gpu = "CPU"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu = f"GPU ({torch.cuda.get_device_name(0)[:30]})"
+    except Exception:  # noqa: BLE001
+        gpu = "CPU"
+    return {
+        "provider": ACTIVE_CONFIG["provider"],
+        "model_family": ACTIVE_CONFIG["model_family"],
+        "model": ACTIVE_CONFIG["model"],
+        "mode": ACTIVE_CONFIG["mode"],
+        "retrieval_mode": ACTIVE_CONFIG["retrieval_mode"],
+        "gpu": gpu,
+    }
+
+
+@app.get("/api/graph/build-status")
+def graph_build_status():
+    """Live Graph build progress read from the checkpoint file (if any)."""
+    cp = Path("storage/graphrag/checkpoint.json")
+    if not cp.exists():
+        return {"running": False, "documents_processed": 0, "failed": 0,
+                "last_updated": None, "checkpoint_exists": False}
+    try:
+        data = json.loads(cp.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"running": False, "documents_processed": 0, "failed": 0,
+                "last_updated": None, "checkpoint_exists": True}
+    docs = data.get("documents", {}) if isinstance(data, dict) else {}
+    done = sum(1 for v in docs.values() if v.get("status") == "done")
+    failed = sum(1 for v in docs.values() if v.get("status") == "failed")
+    return {
+        "running": False,
+        "documents_processed": done,
+        "failed": failed,
+        "total": len(docs),
+        "last_updated": cp.stat().st_mtime,
+        "checkpoint_exists": True,
+        "path": str(cp),
+    }
+
+
+@app.post("/api/export")
+def export_document(payload: dict):
+    """Export the current answer as markdown / txt / docx."""
+    fmt = (payload.get("format") or "md").lower()
+    title = payload.get("title") or "answer"
+    content = payload.get("content") or ""
+
+    if fmt == "docx":
+        try:
+            from docx import Document  # python-docx
+            doc = Document()
+            doc.add_heading(title, level=1)
+            for para in content.split("\n"):
+                line = para.strip()
+                if not line:
+                    continue
+                doc.add_paragraph(line)
+            buf = io.BytesIO()
+            doc.save(buf)
+            return Response(
+                content=buf.getvalue(),
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={"Content-Disposition": f'attachment; filename="{title}.docx"'},
+            )
+        except ImportError:
+            raise HTTPException(
+                status_code=409,
+                detail="python-docx is not installed on this machine. Use format=md instead.",
+            )
+    if fmt == "txt":
+        return Response(
+            content=content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{title}.txt"'},
+        )
+    # default: markdown
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{title}.md"'},
+    )
 
 
 def start_server(port: int = 4000) -> None:

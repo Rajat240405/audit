@@ -43,6 +43,7 @@ from rich.console import Console
 
 from src.generation.client import LLMClient
 from src.retrieval.result import RetrievedResult
+from src.generation.registry import model_registry
 
 console = Console()
 
@@ -58,7 +59,13 @@ RULES:
 3. Do NOT hallucinate or make up facts, statistics, or claims not present in the context.
 4. Quote or paraphrase relevant passages from the context in your answer.
 5. If multiple context items are relevant, synthesize information from all of them.
-6. Keep your answer concise, factual, and directly responsive to the question."""
+6. Keep your answer concise, factual, and directly responsive to the question.
+
+VERBATIM GROUNDING RULES (critical — audit transparency):
+7. Every proper noun — organization name, programme/scheme name, acronym, institute, city, ministry — MUST appear EXACTLY as written in the retrieved context (same spelling, same abbreviation). NEVER expand an abbreviation (e.g. keep "NIOT", never write "National Institute of Ocean Technology"), NEVER substitute a modern or official alternative name, NEVER use a name from your general knowledge.
+8. Every number, figure, date, budget amount, percentage, and measurement MUST be copied VERBATIM from the retrieved context. NEVER supply a statistic from memory or training data (e.g. sea-level rise rates, radar counts, year ranges).
+9. If a name, programme, or figure is NOT in the retrieved context, OMIT it. An omitted detail is always better than an invented one. If the retrieved documents are silent on a point, state that the documents do not address it.
+10. Cite the source for each substantive claim using its [Source N] tag from the context (e.g. "[Source 1]")."""
 
 
 def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> str:
@@ -226,8 +233,6 @@ class AnswerGenerator:
         """
         Generate a grounded answer from retrieved context with provider-aware budgeting.
         """
-        from src.generation.registry import model_registry
-
         # Limit context to max_context_docs
         context = retrieved_results[: self.max_context_docs]
 
@@ -429,6 +434,81 @@ class AnswerGenerator:
             else:
                 # Re-raise other HTTPStatusErrors
                 raise e
+
+    def generate_stream(self, question: str, context: list, **overrides):
+        """Stream a grounded answer token-by-token.
+
+        Mirrors ``generate``'s context assembly (doc limit + adaptive
+        compression) but yields text chunks as the LLM produces them, so the
+        frontend drafting workspace can render live (ChatGPT-style).
+        Yields dicts: {"type": "tokens", "text": ...} then a final
+        {"type": "meta", ...} with token estimates + latency.
+        """
+        context = context[: self.max_context_docs]
+        if not context:
+            yield {"type": "tokens", "text": (
+                "No relevant documents were retrieved from the knowledge base. "
+                "I cannot answer this question based on the available context."
+            )}
+            return
+
+        provider = getattr(self.llm_client, "provider", "ollama")
+        if isinstance(provider, MagicMock):
+            provider = "groq"
+        model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
+        if isinstance(model_name, MagicMock):
+            model_name = "llama-3.3-70b-versatile"
+
+        family = model_registry.get(model_name)
+        if family:
+            effective_window = family.context_window
+        else:
+            effective_window = getattr(self.llm_client, "num_ctx", 8192)
+            if not isinstance(effective_window, (int, float)):
+                effective_window = 8192
+
+        if provider == "groq" and effective_window > 16384:
+            operational_window = 16384
+        else:
+            operational_window = effective_window
+
+        budget_threshold = int(operational_window * self.context_budget_ratio)
+        uncompressed_prompt = build_user_prompt(question, context, max_doc_chars=999999)
+        uncompressed_tokens = len(
+            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{uncompressed_prompt}"
+        ) // 4
+
+        if self.compression_enabled and uncompressed_tokens > budget_threshold:
+            user_prompt = build_user_prompt(question, context, self.max_doc_chars)
+        else:
+            user_prompt = uncompressed_prompt
+
+        start_time = time.monotonic()
+        full_text = []
+        try:
+            for chunk in self.llm_client.generate_stream(
+                prompt=user_prompt, system=self.system_prompt
+            ):
+                full_text.append(chunk)
+                yield {"type": "tokens", "text": chunk}
+        finally:
+            latency_ms = (time.monotonic() - start_time) * 1000
+
+        text = "".join(full_text)
+        prompt_tokens = len(
+            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+        ) // 4
+        completion_tokens = len(text) // 4
+        yield {
+            "type": "meta",
+            "model": model_name,
+            "provider": provider,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "generation_latency_ms": latency_ms,
+            "sources_used": [r.doc_id for r in context],
+        }
 
     def check_health(self) -> bool:
         """Check if the LLM service is available."""

@@ -7,9 +7,16 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv-ml/
 venv/
 env/
 ENV/
+
+# ==========================
+# Node / Frontend
+# ==========================
+node_modules/
+frontend/node_modules/
 
 # ==========================
 # IDE

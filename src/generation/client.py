@@ -14,6 +14,7 @@ Design Decisions
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -255,11 +256,123 @@ class LLMClient:
         else:
             raise ValueError(f"Provider {self.provider!r} not implemented yet.")
 
+    # ── Streaming (token-by-token) ───────────────────────────────────────
+
+    def generate_stream(
+        self,
+        prompt: str,
+        system: str | None = None,
+        api_key: str | None = None,
+        **kwargs,
+    ):
+        """Yield text chunks as the model generates them (streaming).
+
+        Provider-agnostic streaming used by the frontend SSE endpoint so the
+        drafting workspace can render tokens live (ChatGPT-style) instead of
+        waiting for the full generation. Ollama uses its NDJSON stream; Groq /
+        OpenAI-compatible use SSE ``chat/completions`` streaming.
+        """
+        resolved_key = api_key or self.api_key
+        if self.provider == "ollama":
+            yield from self._stream_ollama(prompt, system, **kwargs)
+        elif self.provider in ("openai", "groq"):
+            yield from self._stream_openai_compatible(
+                prompt, system, api_key=resolved_key, **kwargs
+            )
+        else:
+            raise ValueError(f"Provider {self.provider!r} does not support streaming.")
+
+    def _stream_ollama(
+        self,
+        prompt: str,
+        system: str | None = None,
+        **kwargs,
+    ):
+        """Stream from Ollama's /api/generate (stream: true, NDJSON lines)."""
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        payload = {
+            "model": self.model,
+            "prompt": full_prompt,
+            "stream": True,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+                "num_ctx": self.num_ctx,
+            },
+        }
+        with httpx.Client(timeout=self.timeout_seconds) as client:
+            with client.stream(
+                "POST", f"{self.base_url}/api/generate", json=payload
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    chunk = (data.get("response") or "")
+                    if chunk:
+                        yield chunk
+                    if data.get("done"):
+                        break
+
+    def _stream_openai_compatible(
+        self,
+        prompt: str,
+        system: str | None = None,
+        api_key: str | None = None,
+        **kwargs,
+    ):
+        """Stream from Groq / OpenAI-compatible /chat/completions (SSE)."""
+        resolved_key = api_key or self.api_key
+        if not resolved_key:
+            raise ValueError(
+                f"{self.provider.upper()} API key not configured for streaming."
+            )
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        headers = {"Authorization": f"Bearer {resolved_key}"}
+        with httpx.Client(timeout=self.timeout_seconds) as client:
+            with client.stream(
+                "POST", f"{self.base_url}/chat/completions",
+                json=payload, headers=headers,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    chunk = delta.get("content") or ""
+                    if chunk:
+                        yield chunk
+
     def check_health(self, api_key: str | None = None) -> bool:
         """Check if the selected LLM service is reachable/authorized using Provider Registry."""
         from src.generation.registry import provider_registry
 
         resolved_key = api_key or self.api_key
+
         prov_inst = provider_registry.get(self.provider)
         if prov_inst:
             return prov_inst.health(api_key=resolved_key)

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>INCOIS Audit Pro</title>
+    <meta name="description" content="AI-powered parliamentary audit and scientific research workstation" />
+    <script>
+      // Apply persisted theme before paint (prevents flash). Default: dark.
+      (function () {
+        try {
+          var t = localStorage.getItem("incois-theme");
+          if (t !== "light" && t !== "dark") t = "dark";
+          document.documentElement.classList.toggle("dark", t === "dark");
+        } catch (e) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
