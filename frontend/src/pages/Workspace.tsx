@@ -4,17 +4,21 @@ import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useAppStore } from "@/store/useAppStore";
 import { DraftCanvas } from "@/components/workspace/DraftCanvas";
-import { VersionPanel } from "@/components/workspace/VersionPanel";
+import { NotesEditor } from "@/components/workspace/NotesEditor";
+import { HistoryPanel } from "@/components/workspace/HistoryPanel";
 import { ExportMenu } from "@/components/workspace/ExportMenu";
 import { EvidencePanel } from "@/components/evidence/EvidencePanel";
+import { DocViewerModal } from "@/components/evidence/DocViewerModal";
 import { PipelineView } from "@/components/pipeline/PipelineView";
 import { Metrics } from "@/components/pipeline/Metrics";
 import { GraphPlaceholder } from "@/components/graph/GraphPlaceholder";
+import { ModelActivityPanel } from "@/components/activity/ModelActivityPanel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/utils/cn";
 
 const TABS = [
   { key: "draft", label: "Draft" },
+  { key: "history", label: "History" },
   { key: "sources", label: "Sources" },
   { key: "pipeline", label: "RAG Pipeline" },
   { key: "notes", label: "Notes" },
@@ -29,15 +33,23 @@ type TabKey = (typeof TABS)[number]["key"];
  */
 export function Workspace() {
   const { send, stop, running } = useChatStream();
+  // Tab state is LOCAL (useState) so it always works even if the actions
+  // store is a stale copy; we mirror the local tab + a setter into the store
+  // as an optional bridge for the Model Activity panel's "Go to canvas".
   const [tab, setTab] = useState<TabKey>("draft");
-  const [showVersions, setShowVersions] = useState(false);
   const [copied, setCopied] = useState(false);
   const isGraph = useAppStore((s) => s.retrievalMode) === "graph";
 
-  // expose the streaming actions to the sidebar's query input
+  // expose the streaming actions + tab bridge to the sidebar/activity panel
   useEffect(() => {
-    useChatActionsStore.setState({ send, stop, running });
-  }, [send, stop, running]);
+    useChatActionsStore.setState({
+      send,
+      stop,
+      running,
+      tab,
+      setTab: (t: string) => setTab(t as TabKey),
+    });
+  }, [send, stop, running, tab]);
 
   const copy = async () => {
     const c = useDraftStore.getState().content;
@@ -71,9 +83,6 @@ export function Workspace() {
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setShowVersions((v) => !v)}>
-            Versions
-          </Button>
           <Button variant="outline" size="sm" onClick={copy}>
             {copied ? "Copied ✓" : "Copy"}
           </Button>
@@ -82,7 +91,8 @@ export function Workspace() {
       </nav>
 
       <div className="min-h-0 flex-1">
-        {tab === "draft" && (showVersions ? <VersionPanel /> : <DraftCanvas />)}
+        {tab === "draft" && <DraftCanvas />}
+        {tab === "history" && <HistoryPanel onRestored={() => setTab("draft")} />}
         {tab === "sources" && (
           <div className="h-full">
             <EvidencePanel />
@@ -97,21 +107,14 @@ export function Workspace() {
         {tab === "notes" && <NotesTab />}
         {tab === "graph" && <GraphPlaceholder />}
       </div>
+      {/* Full-document reader — opened from the Sources tab or Cross-Verify Facts */}
+      <DocViewerModal />
+      {/* Live model activity — thinking, received context, go-to-canvas */}
+      <ModelActivityPanel />
     </section>
   );
 }
 
 function NotesTab() {
-  const [notes, setNotes] = useState("");
-  return (
-    <div className="flex h-full flex-col p-4">
-      <p className="mb-2 text-xs font-semibold text-muted">Personal workspace</p>
-      <textarea
-        className="min-h-0 flex-1 resize-none rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        placeholder="Bookmarks, important findings, needs-verification items, scientist feedback…"
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-      />
-    </div>
-  );
+  return <NotesEditor />;
 }

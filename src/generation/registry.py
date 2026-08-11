@@ -102,7 +102,7 @@ model_registry.register(ModelFamily(
     display_name="Qwen 3",
     provider="ollama",
     model_name="qwen3:8b",
-    context_window=8192,
+    context_window=32768,
     thinking_capable=True,
     recommended_execution_mode="GPU"
 ))
@@ -198,6 +198,17 @@ model_registry.register(ModelFamily(
     recommended_execution_mode="GPU"
 ))
 
+# OpenRouter Families (OpenAI-compatible aggregation of many models)
+model_registry.register(ModelFamily(
+    id="qwen3.6_27b",
+    display_name="Qwen 3.6 27B",
+    provider="openrouter",
+    model_name="qwen/qwen3.6-27b",
+    context_window=262144,
+    thinking_capable=True,
+    recommended_execution_mode="GPU"
+))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider Interface and Implementations
@@ -216,7 +227,7 @@ class BaseProvider(ABC):
         system: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
-        num_ctx: int = 8192,
+        num_ctx: int = 16384,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
     ) -> LLMResponse:
@@ -259,15 +270,23 @@ class OllamaProvider(BaseProvider):
         system: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
-        num_ctx: int = 8192,
+        num_ctx: int = 16384,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
     ) -> LLMResponse:
-        full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        # CRITICAL: use /api/chat + messages so Ollama applies the model's own
+        # chat template (Qwen3's <|im_start|> format). The old /api/generate +
+        # raw "prompt" string confused chat-templated models like the
+        # fine-tuned incois-qa — they refused or emitted <think> blocks.
+        # This matches the already-correct _generate_ollama() in client.py.
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
         payload = {
             "model": model,
-            "prompt": full_prompt,
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": temperature,
@@ -280,7 +299,7 @@ class OllamaProvider(BaseProvider):
 
         with httpx.Client(timeout=timeout_seconds) as client:
             response = client.post(
-                f"{self.base_url}/api/generate",
+                f"{self.base_url}/api/chat",
                 json=payload,
             )
             response.raise_for_status()
@@ -288,12 +307,13 @@ class OllamaProvider(BaseProvider):
 
         latency_ms = (time.monotonic() - start_time) * 1000
 
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
         prompt_tokens = self._estimate_tokens(full_prompt)
-        completion_tokens = self._estimate_tokens(data.get("response", ""))
+        completion_tokens = self._estimate_tokens(data.get("message", {}).get("content", ""))
         total_tokens = prompt_tokens + completion_tokens
 
         return LLMResponse(
-            text=data.get("response", "").strip(),
+            text=data.get("message", {}).get("content", "").strip(),
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -518,6 +538,104 @@ class OpenAIProvider(BaseProvider):
         }
 
 
+class OpenRouterProvider(BaseProvider):
+    """
+    Provider implementation for OpenRouter (aggregates many open models under
+    one OpenAI-compatible API). Base URL https://openrouter.ai/api/v1.
+    Key resolution: explicit ``api_key`` arg, else ``OPENROUTER_API_KEY`` env.
+    """
+
+    def __init__(self, base_url: str = "https://openrouter.ai/api/v1") -> None:
+        self.base_url = base_url.rstrip("/")
+
+    def generate(
+        self,
+        model: str,
+        prompt: str,
+        system: Optional[str] = None,
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+        num_ctx: int = 262144,
+        api_key: Optional[str] = None,
+        timeout_seconds: int = 300,
+    ) -> LLMResponse:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        if not resolved_key:
+            raise ValueError(
+                "OpenRouter API key not found. Set OPENROUTER_API_KEY env or supply it."
+            )
+
+        start_time = time.monotonic()
+
+        with httpx.Client(timeout=timeout_seconds) as client:
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {resolved_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        latency_ms = (time.monotonic() - start_time) * 1000
+
+        choice = data["choices"][0]
+        text = choice["message"]["content"]
+        usage = data.get("usage", {})
+
+        return LLMResponse(
+            text=text.strip(),
+            model=model,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            latency_ms=latency_ms,
+            finish_reason=choice.get("finish_reason", "stop"),
+            raw_response=data,
+        )
+
+    def models(self) -> List[str]:
+        return [
+            "qwen/qwen3.6-27b",
+            "qwen/qwen3-32b",
+        ]
+
+    def health(self, api_key: Optional[str] = None) -> bool:
+        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        if not resolved_key:
+            return False
+        try:
+            with httpx.Client(timeout=5) as client:
+                response = client.get(
+                    f"{self.base_url}/models",
+                    headers={"Authorization": f"Bearer {resolved_key}"},
+                )
+                return response.status_code == 200
+        except Exception:
+            return False
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "execution_environment": "Cloud (OpenRouter aggregation)",
+            "default_context": 262144,
+            "latency_profile": "Provider-dependent, network overhead"
+        }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider Registry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -542,3 +660,4 @@ provider_registry = ProviderRegistry()
 provider_registry.register("ollama", OllamaProvider())
 provider_registry.register("groq", GroqProvider())
 provider_registry.register("openai", OpenAIProvider())
+provider_registry.register("openrouter", OpenRouterProvider())

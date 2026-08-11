@@ -1,11 +1,8 @@
 import { useState } from "react";
 import { Send, Square } from "lucide-react";
-import { useAppStore } from "@/store/useAppStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/utils/cn";
-import type { ExecutionMode } from "@/types";
 
 interface ChatInputProps {
   onSend: (q: string) => void;
@@ -13,14 +10,13 @@ interface ChatInputProps {
   streaming: boolean;
 }
 
-/** Query input docked in the left sidebar (matches the Stitch design). */
+/**
+ * Query input docked in the left sidebar (matches the Stitch design).
+ * Mode (Standard/Deep), draft style, and Hybrid/GraphRAG selection live in
+ * the header — this stays a pure query box.
+ */
 export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
   const [value, setValue] = useState("");
-  const retrievalMode = useAppStore((s) => s.retrievalMode);
-  const setRetrievalMode = useAppStore((s) => s.setRetrievalMode);
-  const mode = useAppStore((s) => s.mode);
-  const setMode = useAppStore((s) => s.setMode);
-  const saveVersion = useDraftStore((s) => s.saveVersion);
   const resetDraft = useDraftStore((s) => s.reset);
   const clearMessages = useSessionStore((s) => s.clearMessages);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -67,40 +63,6 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
           className="w-full resize-none border-none bg-transparent p-0 text-sm text-foreground placeholder:text-muted focus:outline-none"
         />
 
-        <div className="mt-2 flex w-fit items-center gap-0.5 rounded-full bg-surface-2 p-0.5">
-          {(["hybrid", "graph"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setRetrievalMode(m)}
-              className={cn(
-                "rounded-full px-2.5 py-0.5 text-[10px] font-medium",
-                retrievalMode === m
-                  ? "bg-foreground text-background"
-                  : "text-muted hover:text-foreground"
-              )}
-            >
-              {m === "hybrid" ? "Hybrid RAG" : "GraphRAG"}
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value as ExecutionMode)}
-            className="rounded-full border border-border bg-surface-2 px-2.5 py-1 text-[11px] text-foreground focus:outline-none"
-          >
-            <option value="fast">Standard</option>
-            <option value="deep">Smart Auto</option>
-          </select>
-          <Button variant="secondary" size="sm" onClick={() => saveVersion()}>
-            Save Last Reply
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => saveVersion()}>
-            Save Draft
-          </Button>
-        </div>
-
         <div className="mt-2 flex items-center justify-between border-t border-border pt-2">
           <span className="text-[11px] text-muted">{turns} turns</span>
           <div className="flex items-center gap-2">
@@ -122,7 +84,10 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
               <button
                 onClick={submit}
                 disabled={!value.trim()}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background disabled:opacity-40"
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background",
+                  value.trim() ? "disabled:opacity-40" : "opacity-40"
+                )}
                 title="Send"
               >
                 <Send className="h-3.5 w-3.5" />

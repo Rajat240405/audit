@@ -19,7 +19,11 @@ export function useBackendStatus(pollMs = 10000) {
       set.getState().setProvider(query.data.provider);
       set.getState().setModelFamily(query.data.model_family);
       set.getState().setModel(query.data.model);
-      set.getState().setMode(query.data.mode);
+      // NOTE: we deliberately do NOT sync `mode` from /api/status. Mode is a
+      // client-side selection sent with every request; the server's
+      // ACTIVE_CONFIG["mode"] only reflects the last request (defaults to
+      // "fast"), so syncing it here clobbered the user's "Deep" selection
+      // back to "Standard" on the next 10s poll.
       set.getState().setGpu(query.data.gpu);
       set.getState().setBackendOnline(true);
     }

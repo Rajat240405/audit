@@ -36,6 +36,8 @@ export interface StreamHandlers {
   onSources?: (sources: unknown[], isGraph: boolean) => void;
   onTrace?: (trace: unknown) => void;
   onTokens?: (text: string) => void;
+  onReasoning?: (text: string) => void;
+  onPhase?: (phase: string, model?: string) => void;
   onMeta?: (meta: unknown) => void;
   onGrounding?: (grounding: unknown) => void;
   onFinal?: (text: string, droppedCount: number, dropped: string[], judgeRewritten: boolean) => void;
@@ -101,6 +103,12 @@ export function consumeSSE(
             break;
           case "tokens":
             handlers.onTokens?.(String(ev.text ?? ""));
+            break;
+          case "reasoning":
+            handlers.onReasoning?.(String(ev.text ?? ""));
+            break;
+          case "phase":
+            handlers.onPhase?.(String(ev.phase ?? ""), typeof ev.model === "string" ? ev.model : undefined);
             break;
           case "meta":
             handlers.onMeta?.(ev.meta);

@@ -46,8 +46,35 @@ ACTIVE_CONFIG = {
     "model": "qwen2.5:7b",     # Resolved model
     "mode": "fast",            # "fast" or "deep"
     "retrieval_mode": "hybrid",# "hybrid" or "graph"
-    "groq_api_key": None
+    "groq_api_key": None,
+    "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY") or None,
 }
+
+
+def _active_api_key(provider: str | None = None) -> str | None:
+    """Return the in-memory API key for the active (or given) cloud provider."""
+    prov = (provider or ACTIVE_CONFIG.get("provider", "ollama")).lower()
+    if prov == "groq":
+        return ACTIVE_CONFIG.get("groq_api_key")
+    if prov == "openrouter":
+        return ACTIVE_CONFIG.get("openrouter_api_key")
+    return None
+
+
+def _resolve_max_tokens(provider: str, mode: str, family) -> int:
+    """Execution-profile max_tokens, with headroom for reasoning models.
+
+    Qwen3.6 (and other thinking models) consume ``max_tokens`` with their
+    chain-of-thought BEFORE writing the answer. With a small budget the model
+    thinks, hits the cap, and returns content:null — a billed query that
+    produces nothing. For reasoning-capable cloud models we raise the cap so
+    tokens are guaranteed left for the final answer (reasoning tokens are
+    billed regardless, so truncating them just wastes the call).
+    """
+    base = family.get_execution_params(mode).get("max_tokens", 512)
+    if provider.lower() == "openrouter" and getattr(family, "thinking_capable", False):
+        return max(base, 8192)
+    return base
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lazy pipeline loading
@@ -123,6 +150,25 @@ llm_client = LLMClient(
     num_ctx=_num_ctx
 )
 generator = AnswerGenerator(llm_client=llm_client)
+
+# Dedicated small/fast model for AI-edit buttons (bullets/formal/concise/
+# grammar/prose). Simple rewrites don't need the big model — a small local
+# model makes edits finish in seconds instead of a minute.
+# Override with GRAPHRAG_EDIT_MODEL env (e.g. "qwen2.5:0.5b" for fastest).
+_EDIT_MODEL = os.environ.get("GRAPHRAG_EDIT_MODEL", "qwen2.5:3b")
+_edit_ctx = 8192
+try:
+    _edit_fam = model_registry.get(_EDIT_MODEL)
+    if _edit_fam:
+        _edit_ctx = _edit_fam.context_window
+except Exception:
+    _edit_ctx = 8192
+edit_llm_client = LLMClient(
+    provider=ACTIVE_CONFIG["provider"],
+    model=_EDIT_MODEL,
+    num_ctx=_edit_ctx,
+    max_tokens=2048,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Request / Response Schemas
@@ -318,7 +364,7 @@ async def get_assets(path: str):
 @app.get("/api/providers")
 async def get_providers():
     """Get list of active provider backends."""
-    return ["ollama", "groq"]
+    return ["ollama", "groq", "openrouter"]
 
 
 @app.get("/api/models")
@@ -329,8 +375,8 @@ async def get_models(provider: str):
     or dynamic family generation for un-registered local models (Objective 1).
     """
     prov = provider.lower().strip()
-    if prov == "groq":
-        families = model_registry.list_by_provider("groq")
+    if prov in ("groq", "openrouter"):
+        families = model_registry.list_by_provider(prov)
         return [
             {
                 "id": f.id,
@@ -436,7 +482,7 @@ async def switch_provider(request: ProviderSwitchRequest):
     Also registers the Groq API key in-memory for the current session.
     """
     prov = request.provider.lower().strip()
-    if prov not in ["ollama", "groq"]:
+    if prov not in ["ollama", "groq", "openrouter"]:
         raise HTTPException(status_code=400, detail="Unknown provider")
 
     family_id = request.model
@@ -446,7 +492,11 @@ async def switch_provider(request: ProviderSwitchRequest):
 
     ACTIVE_CONFIG["provider"] = prov
     ACTIVE_CONFIG["model_family"] = family.id
-    ACTIVE_CONFIG["groq_api_key"] = request.api_key
+    # Store the API key in the provider-appropriate slot (or clear it)
+    if prov == "groq":
+        ACTIVE_CONFIG["groq_api_key"] = request.api_key
+    elif prov == "openrouter":
+        ACTIVE_CONFIG["openrouter_api_key"] = request.api_key
 
     # Resolve concrete model parameters based on execution mode profile
     exec_mode = ACTIVE_CONFIG["mode"]
@@ -460,8 +510,8 @@ async def switch_provider(request: ProviderSwitchRequest):
     llm_client.model = resolved_model
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = exec_params["max_tokens"]
-    llm_client.api_key = request.api_key # Securely store session API key in client memory!
+    llm_client.max_tokens = _resolve_max_tokens(prov, exec_mode, family)
+    llm_client.api_key = _active_api_key(prov)  # session API key (slot or env)
     generator.max_context_docs = exec_params["max_context_docs"]
     generator.max_doc_chars = exec_params["max_doc_chars"]
     generator.llm_client = llm_client
@@ -475,7 +525,7 @@ async def switch_provider(request: ProviderSwitchRequest):
         "prompt_budget": int(family.context_window * 0.80),
         "thinking_capable": family.thinking_capable,
         "recommended_execution_mode": family.recommended_execution_mode,
-        "is_connected": llm_client.check_health(api_key=request.api_key)
+        "is_connected": llm_client.check_health(api_key=_active_api_key(prov))
     }
 
 
@@ -504,8 +554,8 @@ async def chat_endpoint(request: ChatRequest):
     llm_client.model = resolved_model
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = exec_params["max_tokens"]
-    llm_client.api_key = ACTIVE_CONFIG["groq_api_key"] # Propagate cached API key dynamically!
+    llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
+    llm_client.api_key = _active_api_key()  # Propagate cached API key dynamically!
     ACTIVE_CONFIG["model"] = resolved_model
 
     # Configure document and context sizes dynamically from execution profile (Objective 1)
@@ -611,7 +661,7 @@ async def chat_endpoint(request: ChatRequest):
 
         t_gen_start = time.perf_counter()
         
-        api_key = ACTIVE_CONFIG["groq_api_key"]
+        api_key = _active_api_key()
         llm_available = llm_client.check_health(api_key=api_key)
 
         network_latency_ms = 0.0
@@ -647,9 +697,11 @@ async def chat_endpoint(request: ChatRequest):
                 gen_error = f"{type(e).__name__}: {str(e)[:300]}"
                 is_fallback = True
                 gen_latency = (time.perf_counter() - t_gen_start) * 1000
-                provider_label = (
-                    "Ollama (Local)" if ACTIVE_CONFIG["provider"] == "ollama" else "Groq (Cloud)"
-                )
+                provider_label = {
+                    "ollama": "Ollama (Local)",
+                    "groq": "Groq (Cloud)",
+                    "openrouter": "OpenRouter (Cloud)",
+                }.get(ACTIVE_CONFIG["provider"], ACTIVE_CONFIG["provider"].title())
                 answer = (
                     f"**[System Notice: {provider_label} Generation Failed]**\n\n"
                     f"The retrieved documents below were found, but the LLM could "
@@ -666,12 +718,22 @@ async def chat_endpoint(request: ChatRequest):
         else:
             is_fallback = True
             gen_latency = (time.perf_counter() - t_gen_start) * 1000
-            provider_label = "Ollama (Local)" if ACTIVE_CONFIG["provider"] == "ollama" else "Groq (Cloud)"
+            provider_label = {
+                "ollama": "Ollama (Local)",
+                "groq": "Groq (Cloud)",
+                "openrouter": "OpenRouter (Cloud)",
+            }.get(ACTIVE_CONFIG["provider"], ACTIVE_CONFIG["provider"].title())
             
-            if ACTIVE_CONFIG["provider"] == "groq" and not api_key:
-                err_cause = "Authentication Failed: Groq API Key was not supplied or saved."
-            elif ACTIVE_CONFIG["provider"] == "groq":
-                err_cause = "Authentication Failed: The supplied Groq API Key is invalid or expired."
+            if ACTIVE_CONFIG["provider"] in ("groq", "openrouter") and not api_key:
+                err_cause = (
+                    "Authentication Failed: "
+                    f"{provider_label} API Key was not supplied or saved."
+                )
+            elif ACTIVE_CONFIG["provider"] in ("groq", "openrouter"):
+                err_cause = (
+                    "Authentication Failed: The supplied "
+                    f"{provider_label} API Key is invalid or expired."
+                )
             else:
                 err_cause = "Ollama Offline: The local service is currently offline or unreachable."
 
@@ -769,8 +831,13 @@ _FIGURE_RE = _re.compile(
     r"million|billion|hrs?|hours?|years?|deg(?:ree)?s?|₹|rs\.?)\b",
     _re.IGNORECASE,
 )
-# "39 DWRs", "87 DWRs", "126 radars" — number + capitalized noun
-_NUM_WORD_RE = _re.compile(r"\b\d+(?:[.,]\d+)?\s*[A-Z][A-Za-z]{2,}\b")
+# "48 Doppler Weather Radars", "32 Water Quality Buoys", "675 AWS" — number +
+# a capitalized noun phrase (up to 4 words). Catches list-number swaps that a
+# bare figure+unit regex misses ("32 Water Quality Buoys" vs the source's
+# "2 Water Quality Buoys").
+_NUM_WORD_RE = _re.compile(
+    r"\b\d+(?:[.,]\d+)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,3}\b"
+)
 _QUOTE_RE = _re.compile(r"\"([^\"\\]{6,80})\"")
 _ACRONYM_RE = _re.compile(r"\b[A-Z]{2,8}\b")
 _ACRONYM_PLURAL_RE = _re.compile(r"\b[A-Z]{2,7}[a-z]{1,2}\b")
@@ -899,6 +966,10 @@ _ALIAS_GROUPS: list[list[str]] = [
     ["dwr", "doppler weather radar", "doppler weather radars"],
     ["cmlre", "centre for marine living resources and ecology",
      "center for marine living resources and ecology"],
+    ["aws", "automatic weather station", "automatic weather stations"],
+    ["arg", "automatic rain gauge", "automatic rain gauges"],
+    ["adcp", "acoustic doppler current profiler", "acoustic doppler current profilers"],
+    ["gnss", "global navigation satellite system", "global navigation satellite systems"],
     ["csir nio", "national institute of oceanography"],
     ["grse", "garden reach shipbuilders", "garden reach shipbuilders and engineers"],
     ["cwc", "central water commission"],
@@ -934,12 +1005,29 @@ def _singularize(norm: str) -> str:
 def _claim_candidates(claim: str) -> list[str]:
     """All normalized surface forms that represent the same concept as the
     claim — the claim itself, its singular form, and every alias-group member
-    if the claim names a known entity."""
+    if the claim names a known entity. Number+entity claims ("48 DWRs",
+    "675 AWS") additionally expand the entity across its alias group and are
+    matched with the number BEFORE or AFTER the entity (tables often list
+    "AWS 675"), so a swapped figure ("32 Water Quality Buoys" vs the source's
+    "2 Water Quality Buoys") still fails every candidate.
+    """
     c = _normalize(claim)
     cands = [c, _singularize(c)]
-    for group in _ALIAS_GROUPS:
-        if c in group or any(m in c for m in group if len(m) > 4):
-            cands.extend(group)
+    m = _re.match(r"^(\d+)\s+(.+)$", c)
+    if m:
+        num, phrase = m.group(1), m.group(2)
+        phrases = {phrase, _singularize(phrase)}
+        for group in _ALIAS_GROUPS:
+            if any(mem in phrase or phrase in mem for mem in group if len(mem) > 2):
+                phrases.update(group)
+        for p in phrases:
+            if p:
+                cands.append(f"{num} {p}")
+                cands.append(f"{p} {num}")
+    else:
+        for group in _ALIAS_GROUPS:
+            if c in group or any(m in c for m in group if len(m) > 4):
+                cands.extend(group)
     # de-dup
     seen: set[str] = set()
     out: list[str] = []
@@ -1197,8 +1285,8 @@ def _resolve_exec(request: ChatStreamRequest):
     llm_client.model = resolved_model
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = exec_params["max_tokens"]
-    llm_client.api_key = ACTIVE_CONFIG["groq_api_key"]
+    llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
+    llm_client.api_key = _active_api_key()
     ACTIVE_CONFIG["model"] = resolved_model
     generator.max_doc_chars = exec_params["max_doc_chars"]
     generator.max_context_docs = exec_params["max_context_docs"]
@@ -1290,6 +1378,7 @@ def chat_stream(request: ChatStreamRequest):
                     "rrf_fusion_ms": round(timings.rrf_fusion_ms, 2),
                     "rerank_ms": round(timings.rerank_ms, 2),
                     "retrieval_total_ms": round(ret_latency, 2),
+                    "truncated_docs": sorted(getattr(pipeline.reranker, "last_truncated_docs", set()) or set()),
                 }
             if trace_payload:
                 yield _sse({"type": "trace", "trace": trace_payload})
@@ -1304,7 +1393,10 @@ def chat_stream(request: ChatStreamRequest):
 
             # ── Generation (streamed) ──
             yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": False})
-            llm_available = llm_client.check_health(api_key=ACTIVE_CONFIG["groq_api_key"])
+            # Tell the UI the model is now thinking (qwen3 emits reasoning
+            # tokens live; qwen2.5 doesn't, so the UI shows a spinner + timer).
+            yield _sse({"type": "phase", "phase": "thinking", "model": resolved_model})
+            llm_available = llm_client.check_health(api_key=_active_api_key())
             if not llm_available:
                 yield _sse({"type": "tokens", "text": (
                     "**[System Notice: LLM Generation Offline]**\n\n"
@@ -1337,6 +1429,11 @@ def chat_stream(request: ChatStreamRequest):
                 if ev["type"] == "tokens":
                     streamed_parts.append(ev["text"])
                     yield _sse({"type": "tokens", "text": ev["text"]})
+                elif ev["type"] == "reasoning":
+                    # live chain-of-thought — forwarded to the Model Activity panel
+                    yield _sse({"type": "reasoning", "text": ev["text"]})
+                elif ev["type"] == "answer_start":
+                    yield _sse({"type": "phase", "phase": "generating"})
                 elif ev["type"] == "meta":
                     # generate_stream yields a FLAT meta event; wrap it for SSE
                     meta = {
@@ -1358,86 +1455,32 @@ def chat_stream(request: ChatStreamRequest):
                     meta["is_fallback"] = False
                     yield _sse({"type": "meta", "meta": meta})
 
-            # Server-side grounding verification of the final answer.
+            # FAST PATH: emit the answer + done immediately. Verification
+            # (grounding/judge/rewrite) runs AFTER the stream closes via
+            # /api/verify — so the stream never blocks on extra LLM calls
+            # (which caused the UI to appear "stuck" on slow local models).
             raw_text = "".join(streamed_parts)
-            final_text = raw_text
-
-            # #3 Claim-aware filter: identify sentences with UNVERIFIED claims.
-            # We do NOT truncate the visible answer — we keep the full text and
-            # flag the offending sentences so the user sees exactly what was
-            # questioned, rather than a mysteriously shortened draft.
-            citation_dropped: list[str] = []
-            if final_text.strip():
-                _filtered, citation_dropped = _apply_citation_filter(final_text, sources)
-                # `_filtered` is informational; we keep `final_text` intact so
-                # the canvas is never silently cut.
-
-            grounding: list[dict] = []
-            if final_text.strip():
-                grounding = _grounding_report(final_text, sources)
-                # Merge dropped sentences into the grounding report as explicit
-                # "not found — review" entries so nothing is hidden.
-                for d in citation_dropped:
-                    grounding.append({
-                        "text": d[:160],
-                        "found": False,
-                        "source": None,
-                        "note": "sentence removed by citation filter",
-                    })
-                # LLM judge (#2): re-verify the regex-flagged claims by reading
-                # the sources. Catches cited-but-wrong claims like "VSSC"
-                # instead of "ISRO". One short call over flagged claims only —
-                # not a regeneration of the answer.
-                if grounding and any(not c.get("found") for c in grounding):
-                    grounding = _llm_judge_claims(grounding, sources)
-                if grounding:
-                    yield _sse({"type": "grounding", "grounding": grounding})
-
-            # Second LLM call (rewrite): if the judge rejected any claim, ask
-            # the LLM to regenerate the answer WITHOUT the unsupported claims.
-            # This is a proper 2nd call (2x latency) — the user accepted that
-            # tradeoff for correctness now; we can optimize later.
-            rejected_claims = [
-                c["text"] for c in grounding
-                if (not c.get("found")) and c.get("note") == "rejected by LLM judge"
-            ]
-            judge_rewritten = False
-            if rejected_claims and final_text.strip():
-                try:
-                    rewrite = _llm_rewrite_answer(
-                        answer=final_text,
-                        rejected_claims=rejected_claims,
-                        sources=sources,
-                    )
-                    if rewrite and rewrite.strip():
-                        final_text = rewrite
-                        judge_rewritten = True
-                except Exception as e:  # noqa: BLE001 - never break the stream
-                    print(f"[llm-rewrite] failed ({type(e).__name__}: {e}) — keeping original")
-                    judge_rewritten = False
-
-                # DETERMINISTIC SAFETY NET: the rewrite LLM is the same model
-                # that hallucinated the claim, so it may reintroduce it. After
-                # the rewrite, remove ANY sentence still containing a rejected
-                # claim (verbatim). This guarantees a rejected name can never
-                # appear in the final answer.
-                if judge_rewritten:
-                    final_text, _ = _remove_rejected_sentences(
-                        final_text, rejected_claims
-                    )
-
-            # Emit the FINAL text (post judge-rewrite) plus counts.
+            if not raw_text.strip():
+                # Model produced reasoning (or nothing) but zero answer tokens —
+                # surface WHY instead of a silent blank canvas. Usually the
+                # generation hit the token limit during chain-of-thought.
+                raw_text = (
+                    "**[System Notice: model returned reasoning but no answer]**\n\n"
+                    "The model produced its thinking but the final answer was empty. "
+                    "This usually means the generation hit the token limit during "
+                    "reasoning. Retry in Deep mode, or make the question more specific."
+                )
             yield _sse({
                 "type": "final",
-                "text": final_text,
-                "citation_dropped_count": len(citation_dropped),
-                "citation_dropped": citation_dropped[:20],
-                "judge_removed_count": len(rejected_claims),
-                "judge_removed": rejected_claims[:20],
-                "judge_rewritten": judge_rewritten,
+                "text": raw_text,
+                "citation_dropped_count": 0,
+                "citation_dropped": [],
+                "judge_removed_count": 0,
+                "judge_removed": [],
+                "judge_rewritten": False,
             })
-
             yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": True})
+            yield _sse({"type": "phase", "phase": "done"})
             yield _sse({"type": "done"})
 
         except Exception as e:  # noqa: BLE001 - never let the stream 500
@@ -1446,12 +1489,81 @@ def chat_stream(request: ChatStreamRequest):
             print(traceback.format_exc(limit=5))
             if sources:
                 yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
+            yield _sse({"type": "phase", "phase": "error"})
             yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
             yield _sse({"type": "done"})
         finally:
             generator.system_prompt = original_system_prompt
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/verify")
+def verify_answer(payload: dict):
+    """Non-blocking post-generation verification.
+
+    Runs AFTER the chat stream closes (so the stream never blocks on extra LLM
+    calls). Returns the grounding report + a judge-rewritten answer with any
+    unsupported claims removed. All LLM calls have timeouts so this can never
+    hang.
+    """
+    answer = payload.get("answer") or ""
+    sources = payload.get("sources") or []
+    if not answer or not sources:
+        return {"text": answer, "grounding": [], "judge_rewritten": False,
+                "judge_removed_count": 0, "error": "missing answer or sources"}
+
+    try:
+        # 1. regex grounding
+        grounding = _grounding_report(answer, sources)
+
+        # 2. claim-aware filter (identify unverified sentences, informational)
+        citation_dropped: list[str] = []
+        if answer.strip():
+            _filtered, citation_dropped = _apply_citation_filter(answer, sources)
+
+        # 3. LLM judge — with timeout so it can't hang
+        if grounding and any(not c.get("found") for c in grounding):
+            grounding = _llm_judge_claims(grounding, sources)
+
+        # 4. rewrite — remove judge-rejected claims.
+        # NOTE: the judge emits TWO rejection notes:
+        #   "rejected by LLM judge"                                    (judge said unsupported)
+        #   "rejected by LLM judge (no verbatim source support)"       (judge said supported but
+        #                                                            couldn't back it verbatim —
+        #                                                            the VSSC-type hallucination guard)
+        # Both must be collected — use a prefix match so neither is missed.
+        rejected_claims = [
+            c["text"] for c in grounding
+            if (not c.get("found"))
+            and str(c.get("note", "")).startswith("rejected by LLM judge")
+        ]
+        final_text = answer
+        judge_rewritten = False
+        if rejected_claims and answer.strip():
+            rewrite = _llm_rewrite_answer(
+                answer=answer, rejected_claims=rejected_claims, sources=sources,
+            )
+            if rewrite and rewrite.strip():
+                final_text = rewrite
+                judge_rewritten = True
+                # deterministic safety net
+                final_text, _ = _remove_rejected_sentences(final_text, rejected_claims)
+
+        return {
+            "text": final_text,
+            "grounding": grounding,
+            "judge_rewritten": judge_rewritten,
+            "judge_removed_count": len(rejected_claims),
+            "judge_removed": rejected_claims[:20],
+            "citation_dropped_count": len(citation_dropped),
+        }
+    except Exception as e:  # noqa: BLE001 - never break the app
+        import traceback
+        print(f"[api/verify] failed ({type(e).__name__}: {e})")
+        print(traceback.format_exc(limit=3))
+        return {"text": answer, "grounding": [], "judge_rewritten": False,
+                "judge_removed_count": 0, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
 @app.post("/api/edit")
@@ -1470,10 +1582,15 @@ def ai_edit(payload: dict):
 
     def event_stream():
         system = (
-            "You are an editing assistant inside a scientific audit workstation "
-            "for Indian parliamentary Q&A evidence. Apply the user's requested "
-            "edit to the provided draft. Preserve every factual claim, citation, "
-            "and markdown structure. Never invent new facts.\n"
+            "You are an AI editing assistant. Follow the user's instruction "
+            "for the draft below — do whatever is asked (rewrite, restructure, "
+            "summarize, expand, change tone, narrate, translate, etc.). "
+            "Return the result in full, in the requested format.\n"
+            "Grounding guardrail (only when the task is an EDIT of the draft's "
+            "content, not a creative/formatting task): if you keep factual "
+            "claims, preserve names, figures, and [Source N] citations as "
+            "written; do not invent new facts. For creative/formatting tasks "
+            "(story, style, structure), apply them freely.\n"
             f"DRAFT STYLE (if any): {style or 'none'}"
         )
         prompt = (
@@ -1483,8 +1600,17 @@ def ai_edit(payload: dict):
         )
         try:
             yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": False})
-            for chunk in llm_client.generate_stream(prompt=prompt, system=system):
-                yield _sse({"type": "tokens", "text": chunk})
+            # Use the dedicated small model for fast edits.
+            for chunk in edit_llm_client.generate_stream(prompt=prompt, system=system):
+                # Structured events (post client-stream migration): forward
+                # only the visible tokens to the edit panel.
+                if isinstance(chunk, dict):
+                    if chunk.get("type") == "tokens":
+                        yield _sse({"type": "tokens", "text": chunk.get("text", "")})
+                    elif chunk.get("type") == "done":
+                        break
+                else:
+                    yield _sse({"type": "tokens", "text": chunk})
             yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": True})
             yield _sse({"type": "done"})
         except Exception as e:  # noqa: BLE001

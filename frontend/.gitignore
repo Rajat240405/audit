@@ -1,4 +1,14 @@
 node_modules
 dist
+coverage
+vite.svg
+*.log
+*.tsbuildinfo
 *.local
+.vite
+.cache
+.parcel-cache
+.turbo
+.next
+.svelte-kit
 .DS_Store

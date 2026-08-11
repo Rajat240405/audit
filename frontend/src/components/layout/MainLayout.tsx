@@ -1,12 +1,11 @@
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 import { Toast } from "@/components/common/Toast";
-import type { ToastItem } from "@/components/common/Toast";
-import { useState } from "react";
+import { useToastStore } from "@/store/useToastStore";
 
 /** 2-column workstation layout (matches the Stitch design — no right rail). */
 export function MainLayout({ children }: { children: React.ReactNode }) {
-  const [toasts] = useState<ToastItem[]>([]);
+  const toasts = useToastStore((s) => s.toasts);
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <Header />

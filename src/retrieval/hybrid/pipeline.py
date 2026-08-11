@@ -107,6 +107,14 @@ class HybridRAGPipeline:
         self.dense_top_k = dense_top_k
         self.fusion_top_k = fusion_top_k
         self.rrf_k = rrf_k
+        # GLM #5b: targeted chunking for LONG documents only. Docs above this
+        # length get split into ~500-char ANNEXURE chunks at index time so a
+        # figure buried in a long answer can be found. Short docs stay whole
+        # (the working median path is untouched).
+        self.long_doc_chars = 4000
+        self.long_chunk_chars = 500
+        self._long_chunk_map: dict[str, QAChunk] = {}
+        self._long_chunk_texts: dict[str, str] = {}
 
         # In-memory lookups
         self._doc_map: dict[str, QARecord] = {}
@@ -211,10 +219,70 @@ class HybridRAGPipeline:
             self.bm25_index.build(bm25_docs)
             print(f"  BM25 built in {(time.perf_counter() - t0)*1000:.0f}ms")
 
+            # ── GLM #5b: targeted long-doc chunking ─────────────────────────
+            # For docs > long_doc_chars, ALSO index ~500-char ANNEXURE chunks
+            # so a figure buried in a long answer can be found. Parent docs
+            # remain the primary unit; chunks are a recall boost for the
+            # long tail. Short docs are untouched.
+            long_recs = [r for r in records if len(r.answer_text or "") > self.long_doc_chars]
+            if long_recs:
+                chunk_list = []
+                for r in long_recs:
+                    chunk_list.extend(self._split_long_doc(r))
+                self._long_chunk_map = {c.chunk_id: c for c in chunk_list}
+                self._long_chunk_texts = {c.chunk_id: c.chunk_text for c in chunk_list}
+
+                print(f"  [long-doc chunks] {len(long_recs)} long docs -> {len(chunk_list)} chunks")
+                # embed + index chunks into the SAME vector store
+                c_ids = [c.chunk_id for c in chunk_list]
+                c_texts = [c.chunk_text for c in chunk_list]
+                if c_texts:
+                    c_emb = self.embedder.embed_batch(c_texts, batch_size=1, show_progress=False)
+                    self.vector_store.add(c_ids, c_emb)
+                # Rebuild BM25 with docs + chunks (BM25 has no incremental add;
+                # the corpus is small enough to rebuild in ms).
+                c_bm25 = [(c.chunk_id, "", c.chunk_text) for c in chunk_list]
+                combined_bm25 = [
+                    (r.question_id, r.question_text, r.answer_text) for r in records
+                ] + c_bm25
+                self.bm25_index.build(combined_bm25)
+                print(f"  [long-doc chunks] indexed into FAISS + BM25 (rebuilt)")
+
         print(
             f"✓ Index built successfully: {len(self):,} units indexed, "
             f"use_chunking={self.use_chunking}"
         )
+
+    def _split_long_doc(self, r: QARecord) -> list[QAChunk]:
+        """Split a long document's answer into ~500-char ANNEXURE chunks."""
+        chunks = []
+        ans = r.answer_text or ""
+        # split on paragraph boundaries first, then pack into ~500-char chunks
+        paras = [p.strip() for p in ans.split("\n") if p.strip()]
+        current = ""
+        idx = 0
+        for para in paras:
+            if len(current) + len(para) + 2 > self.long_chunk_chars and current:
+                chunks.append(QAChunk(
+                    chunk_id=f"{r.question_id}_L{idx}",
+                    parent_doc_id=r.question_id,
+                    chunk_type=ChunkType.ANNEXURE,
+                    chunk_text=current.strip(),
+                    metadata=r.metadata,
+                ))
+                idx += 1
+                current = para
+            else:
+                current = current + "\n" + para if current else para
+        if current.strip():
+            chunks.append(QAChunk(
+                chunk_id=f"{r.question_id}_L{idx}",
+                parent_doc_id=r.question_id,
+                chunk_type=ChunkType.ANNEXURE,
+                chunk_text=current.strip(),
+                metadata=r.metadata,
+            ))
+        return chunks
 
     def retrieve(
         self,
@@ -362,20 +430,47 @@ class HybridRAGPipeline:
                 ))
         else:
             print(f"Parent aggregation : {len(final_results)}")
-            # Standard document-level construction
+            # Standard document-level construction.
+            # GLM #5b: resolve long-doc chunks back to their parent doc so the
+            # LLM gets the WHOLE document (not just the matching section), and
+            # include the matched section text so the key figure isn't lost.
+            chunk_answers: dict[str, str] = {}   # parent_id -> matched chunk text
+            for doc_id, _score in final_results:
+                chunk = self._long_chunk_map.get(doc_id)
+                if chunk is not None:
+                    chunk_answers.setdefault(chunk.parent_doc_id, chunk.chunk_text)
             for rank, (doc_id, score) in enumerate(final_results):
                 record = self._doc_map.get(doc_id)
                 if record is None:
-                    continue
+                    # it's a long-doc chunk -> resolve to parent
+                    chunk = self._long_chunk_map.get(doc_id)
+                    if chunk is None:
+                        continue
+                    record = self._doc_map.get(chunk.parent_doc_id)
+                    if record is None:
+                        continue
+                    doc_id = chunk.parent_doc_id
+                    score = score  # keep chunk's retrieval score for ranking
+                    chunk_answers.setdefault(doc_id, chunk.chunk_text)
 
                 dense_score = next((s for d_id, s in dense_results if d_id == doc_id), None)
                 bm25_score = next((s for d_id, s in bm25_results if d_id == doc_id), None)
                 rrf_score = next((s for d_id, s in fused_results if d_id == doc_id), None)
 
+                # GLM #5b: if a long-doc chunk matched, prepend that section to
+                # the full answer so the buried figure is present for the LLM.
+                matched_section = chunk_answers.get(doc_id)
+                full_answer = record.answer_text
+                if matched_section and matched_section not in full_answer:
+                    full_answer = (
+                        f"[MATCHED SECTION OF THIS ANSWER]\n{matched_section}\n\n"
+                        f"[FULL ANSWER]\n{full_answer}"
+                    )
+
                 retrieved.append(RetrievedResult(
                     doc_id=doc_id,
                     question=record.question_text,
-                    answer=record.answer_text,
+                    answer=full_answer,
                     score=score,
                     retrieval_method="rrf_fusion",
                     metadata={

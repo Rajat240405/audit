@@ -51,21 +51,21 @@ console = Console()
 # Prompt Templates
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert parliamentary research assistant answering questions about Indian government policies, schemes, and administrative matters based ONLY on the provided Question & Answer context.
+SYSTEM_PROMPT = """You are an expert parliamentary research assistant for Indian government policy, schemes, and administrative matters. Answer the question using ONLY the provided Question & Answer context.
 
-RULES:
-1. Answer using ONLY the information in the provided context below.
-2. If the context does not contain enough information to answer, say: "The provided context does not contain sufficient information to answer this question."
-3. Do NOT hallucinate or make up facts, statistics, or claims not present in the context.
-4. Quote or paraphrase relevant passages from the context in your answer.
-5. If multiple context items are relevant, synthesize information from all of them.
-6. Keep your answer concise, factual, and directly responsive to the question.
+ANSWER STYLE (match the official parliamentary register):
+1. Write in the third-person, passive, official tone used in parliamentary replies (e.g. "The Government has...", "The Ministry provides...", "IMD operates..."). Never use first-person ("I", "we", "my").
+2. If the question has multiple parts (a), (b), (c)..., structure your answer with matching (a), (b), (c) sub-sections.
+3. Be concise and factual — the median official answer is ~700-800 characters. Do not pad or repeat.
+4. If a part of the question is not addressed in the context, state "Does not arise." or "The provided documents do not address this." — do not invent an answer for it.
+5. Synthesize across ALL provided documents when multiple are relevant; do not just copy one document verbatim. Quote or paraphrase the key passages.
 
-VERBATIM GROUNDING RULES (critical — audit transparency):
-7. Every proper noun — organization name, programme/scheme name, acronym, institute, city, ministry — MUST appear EXACTLY as written in the retrieved context (same spelling, same abbreviation). NEVER expand an abbreviation (e.g. keep "NIOT", never write "National Institute of Ocean Technology"), NEVER substitute a modern or official alternative name, NEVER use a name from your general knowledge.
-8. Every number, figure, date, budget amount, percentage, and measurement MUST be copied VERBATIM from the retrieved context. NEVER supply a statistic from memory or training data (e.g. sea-level rise rates, radar counts, year ranges).
-9. If a name, programme, or figure is NOT in the retrieved context, OMIT it. An omitted detail is always better than an invented one. If the retrieved documents are silent on a point, state that the documents do not address it.
-10. Cite the source for each substantive claim using its [Source N] tag from the context (e.g. "[Source 1]")."""
+GROUNDING RULES (critical — audit transparency):
+6. Every proper noun — organization name, programme/scheme name, acronym, institute, city, ministry — MUST appear EXACTLY as written in the retrieved context (same spelling, same abbreviation). NEVER expand an abbreviation (e.g. keep "NIOT", never write "National Institute of Ocean Technology"), NEVER substitute a modern or official alternative name, NEVER use a name from your general knowledge.
+7. Every number, figure, date, budget amount, percentage, and measurement MUST be copied VERBATIM from the retrieved context. NEVER supply a statistic from memory or training data (e.g. sea-level rise rates, radar counts, year ranges).
+8. If a name, programme, or figure is NOT in the retrieved context, OMIT it. An omitted detail is always better than an invented one. If the retrieved documents are silent on a point, state that the documents do not address it.
+9. Cite the source for each substantive claim using its [Source N] tag from the context (e.g. "[Source 1]").
+10. Do NOT hallucinate or make up facts, statistics, or claims not present in the context. If the context does not contain enough information to answer, say: "The provided context does not contain sufficient information to answer this question."""
 
 
 def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> str:
@@ -79,7 +79,7 @@ def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> s
     # Extract keywords from the query
     keywords = [w.lower() for w in re.sub(r"[^\w\s]", " ", query).split() if len(w) > 3]
     if not keywords:
-        return text[:max_chars] + " ... [Truncated to fit context budget]"
+        return truncate_at_sentence(text, max_chars)
 
     # Split answer text into paragraphs
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
@@ -98,21 +98,191 @@ def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> s
             else:
                 remaining = max_chars - len(assembled)
                 if remaining > 100:
-                    assembled += p[:remaining] + " ... [Truncated to fit context budget]"
+                    assembled += truncate_at_sentence(p, remaining)
                 break
-        return assembled.strip() or text[:max_chars] + " ... [Truncated to fit context budget]"
+        return assembled.strip() or truncate_at_sentence(text, max_chars)
 
-    return text[:max_chars] + " ... [Truncated to fit context budget]"
+    return truncate_at_sentence(text, max_chars)
+
+
+
+
+
+def truncate_at_sentence(text: str, max_chars: int, marker: str = " ... [Truncated to fit context budget]") -> str:
+    """Truncate at a SENTENCE boundary — never mid-number/unit.
+
+    GLM critique #3: hard char-slicing (text[:max_chars]) can cut a figure
+    ("₹2,00,000 crore over 2024-2") or sever a [Source N] citation. This cuts
+    at the last sentence boundary before the limit instead.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    limit = max_chars - len(marker)
+    if limit <= 0:
+        return text[:max_chars]
+    # find the last sentence-ending punctuation before the limit
+    cut = -1
+    for end in (".", "!", "?", "\n"):
+        idx = text.rfind(end, 0, limit)
+        if idx > cut:
+            cut = idx
+    if cut > 0:
+        # keep the sentence-ending char + a bit of breathing room
+        return text[: cut + 1] + marker
+    # no sentence boundary found before limit — fall back to word boundary
+    space = text.rfind(" ", 0, limit)
+    if space > 0:
+        return text[:space] + marker
+    return text[:max_chars] + marker
+
+
+def compact_documents_with_llm(
+    question: str,
+    retrieved_results: list[RetrievedResult],
+    max_doc_chars: int = 1500,
+    llm_client=None,
+) -> str:
+    """LLM-based compaction: condense each retrieved document to its key
+    facts (names, figures, dates) instead of lossy keyword-truncation.
+
+    Falls back to extract_relevant_evidence if no LLM client is available
+    or the compaction call fails — never raises.
+    """
+    if not llm_client:
+        return build_user_prompt(question, retrieved_results, max_doc_chars)
+
+    parts = [
+        "Below is the most relevant parliamentary Question & Answer context retrieved for your question.",
+        "",
+        "=" * 70,
+        f"RETRIEVED CONTEXT ({len(retrieved_results)} records):",
+        "=" * 70,
+        "",
+    ]
+    for i, result in enumerate(retrieved_results, start=1):
+        parts.append(f"[Source {i}] (ID: {result.doc_id})")
+        if result.metadata.get("ministry"):
+            parts.append(f"Ministry: {result.metadata['ministry']}")
+        if result.metadata.get("subject"):
+            parts.append(f"Subject: {result.metadata['subject']}")
+        parts.append("")
+
+        q_text = clean_parliament_text(result.question)
+        a_text = clean_parliament_text(result.answer)
+        if len(a_text) > max_doc_chars:
+            try:
+                compact_prompt = (
+                    "Condense the following parliamentary answer into a concise "
+                    "summary that preserves EVERY proper noun (organization, "
+                    "programme, acronym, institute, city, ministry), EVERY number "
+                    "(dates, budgets, percentages, measurements), and EVERY "
+                    "[Source] tag. Keep the official tone. Do not add new facts.\n\n"
+                    f"ANSWER TEXT:\n{a_text}"
+                )
+                resp = llm_client.generate(
+                    prompt=compact_prompt,
+                    system="You are a parliamentary evidence condenser. Preserve all names, figures, and dates verbatim.",
+                )
+                compact = resp.text.strip()
+                if compact and len(compact) < len(a_text):
+                    # GLM #3: never slice mid-figure — cut at a sentence boundary
+                    a_text = truncate_at_sentence(compact, max_doc_chars)
+                else:
+                    a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
+            except Exception:
+                a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
+
+        parts.append(f"QUESTION: {q_text}")
+        parts.append(f"ANSWER: {a_text}")
+        parts.append("")
+        parts.append("-" * 70)
+
+    parts.extend([
+        "",
+        "=" * 70,
+        "USER QUESTION:",
+        "=" * 70,
+        question,
+        "",
+        "=" * 70,
+        "ANSWER:",
+        "=" * 70,
+    ])
+    return "\n".join(parts)
+
+
+
+# ── Parliamentary boilerplate cleaning ──────────────────────────────────
+# Strips structural boilerplate from question/answer text before it reaches
+# the LLM. Reduces token waste + noise (the "noise amplification" problem).
+# KEEPS the substantive (a)/(b)/(c) question parts and answer content.
+# Non-destructive — original docs in the index are untouched.
+
+_BOILER_LINE_PREFIXES = (
+    "GOVERNMENT OF INDIA",
+    "MINISTRY OF EARTH SCIENCES",
+    "LOK SABHA",
+    "RAJYA SABHA",
+    "UNSTARRED QUESTION",
+    "STARRED QUESTION",
+    "QUESTION NO.",
+    "TO BE ANSWERED ON",
+    "WILL THE MINISTER",
+    "THE MINISTER OF STATE",
+    "THE MINISTER FOR STATE",
+    "MINISTRY OF SCIENCE AND TECHNOLOGY",
+    "AND EARTH SCIENCES",
+    "ANSWER",
+    "(DR.",
+    "DR. ",
+    "PROF. ",
+    "********",
+    "*****",
+)
+
+_MEMBER_NAME_RE = re.compile(r"^(SHRI|SMT|SMT\.|MS|MRS|DR|PROF|KUMARI|MR)\.?\s+[A-Z]", re.IGNORECASE)
+_QUESTION_NUM_RE = re.compile(r"^\d{3,4}\.\s*$")
+_QUESTION_NUM_NAME_RE = re.compile(r"^\d{3,4}\.\s+(SHRI|SMT|DR|PROF)", re.IGNORECASE)
+
+
+def clean_parliament_text(text: str) -> str:
+    """Strip parliamentary boilerplate lines, keep substantive content."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        l = line.strip()
+        if not l:
+            continue
+        u = l.upper()
+        # skip all-star separators
+        if set(u) <= {"*", " "}:
+            continue
+        # skip boilerplate prefixes
+        if any(u.startswith(p) for p in _BOILER_LINE_PREFIXES):
+            continue
+        # skip member-name lines ("SHRI YOGENDER CHANDOLIA:")
+        if _MEMBER_NAME_RE.match(l) and l.rstrip().endswith(":"):
+            continue
+        # skip subject-title lines (short all-caps, not (a)/(b)/(c), no colon)
+        if (u == l and len(l) < 60 and not l.startswith("(") and ":" not in l):
+            continue
+        # skip standalone question numbers ("3035.")
+        if _QUESTION_NUM_RE.match(l):
+            continue
+        # skip "3035. SHRI X" question-number+member lines
+        if _QUESTION_NUM_NAME_RE.match(l):
+            continue
+        cleaned.append(l)
+    return "\n".join(cleaned)
 
 
 def build_user_prompt(
     question: str,
     retrieved_results: list[RetrievedResult],
-    max_doc_chars: int = 999999,  # High default to support uncompressed assembly
+    max_doc_chars: int = 999999,
 ) -> str:
-    """
-    Build the user prompt with retrieved context.
-    """
     parts = [
         "Below is the most relevant parliamentary Question & Answer context retrieved for your question.",
         "",
@@ -130,10 +300,14 @@ def build_user_prompt(
             parts.append(f"Subject: {result.metadata['subject']}")
         parts.append("")
 
-        q_text = result.question
-        a_text = result.answer
+        q_text = clean_parliament_text(result.question)
+        a_text = clean_parliament_text(result.answer)
         if len(a_text) > max_doc_chars:
             a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
+
+        # DEBUG: show cleaning is active (remove later if noisy)
+        console.print(f"[dim][clean] {result.doc_id}: Q {len(result.question)}->{len(q_text)} ch | A {len(result.answer)}->{len(a_text)} ch[/dim]")
+        console.print(f"[dim][clean] Q starts: {q_text[:100]!r}[/dim]")
 
         parts.append(f"QUESTION: {q_text}")
         parts.append(f"ANSWER: {a_text}")
@@ -291,7 +465,9 @@ class AnswerGenerator:
         if self.compression_enabled and uncompressed_tokens > budget_threshold:
             compression_applied = True
             reason = "Prompt exceeded threshold"
-            user_prompt = build_user_prompt(question, context, self.max_doc_chars)
+            user_prompt = compact_documents_with_llm(
+                question, context, self.max_doc_chars, llm_client=self.llm_client
+            )
             total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
             final_tokens = len(total_prompt_text) // 4
         else:
@@ -479,24 +655,61 @@ class AnswerGenerator:
         ) // 4
 
         if self.compression_enabled and uncompressed_tokens > budget_threshold:
-            user_prompt = build_user_prompt(question, context, self.max_doc_chars)
+            user_prompt = compact_documents_with_llm(
+                question, context, self.max_doc_chars, llm_client=self.llm_client
+            )
         else:
             user_prompt = uncompressed_prompt
 
         start_time = time.monotonic()
         full_text = []
+        # GLM #4: port the 413 self-heal from generate() to the streaming path.
+        # If the prompt is too large (HTTP 413), retry once with aggressive
+        # context reduction instead of hard-failing the user-facing stream.
         try:
-            for chunk in self.llm_client.generate_stream(
-                prompt=user_prompt, system=self.system_prompt
-            ):
-                full_text.append(chunk)
-                yield {"type": "tokens", "text": chunk}
+            stream_prompt = user_prompt
+            stream_context = context
+            retried_413 = False
+            while True:
+                try:
+                    for chunk in self.llm_client.generate_stream(
+                        prompt=stream_prompt, system=self.system_prompt
+                    ):
+                        # Structured events from the client: forward reasoning
+                        # + answer_start to the UI, keep visible tokens.
+                        if isinstance(chunk, dict):
+                            ev_type = chunk.get("type", "tokens")
+                            if ev_type == "tokens":
+                                text = chunk.get("text", "")
+                                full_text.append(text)
+                                yield {"type": "tokens", "text": text}
+                            elif ev_type == "reasoning":
+                                yield {"type": "reasoning", "text": chunk.get("text", "")}
+                            elif ev_type == "answer_start":
+                                yield {"type": "answer_start"}
+                            elif ev_type == "done":
+                                break
+                        else:
+                            # legacy string chunk (shouldn't happen after the
+                            # client event migration, but keep it safe)
+                            full_text.append(chunk)
+                            yield {"type": "tokens", "text": chunk}
+                    break  # completed normally
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 413 and not retried_413:
+                        console.print("[bold yellow]⚠️ HTTP 413 during stream — retrying with reduced context...[/bold yellow]")
+                        retried_413 = True
+                        reduced = context[:2]
+                        stream_prompt = build_user_prompt(question, reduced, max_doc_chars=500)
+                        stream_context = reduced
+                        continue
+                    raise  # re-raise other HTTP errors or second 413
         finally:
             latency_ms = (time.monotonic() - start_time) * 1000
 
         text = "".join(full_text)
         prompt_tokens = len(
-            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{stream_prompt}"
         ) // 4
         completion_tokens = len(text) // 4
         yield {
@@ -507,7 +720,7 @@ class AnswerGenerator:
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
             "generation_latency_ms": latency_ms,
-            "sources_used": [r.doc_id for r in context],
+            "sources_used": [r.doc_id for r in stream_context],
         }
 
     def check_health(self) -> bool:

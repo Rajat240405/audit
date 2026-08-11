@@ -4,17 +4,12 @@ LoRA fine-tuning for the INCOIS Audit Pro generator (Qwen3-4B).
 Trains a small LoRA adapter on the Alpaca-format JSONL produced by
 finetune_prepare_data.py. Runs on a 4GB VRAM GPU (RTX 3050 Laptop).
 
-Qwen3-specific notes:
-- Qwen3-4B defaults to THINKING mode (emits <think>...</think> blocks).
-  For our evidence-extraction task we want DIRECT answers, so thinking is
-  disabled at inference AND we use the non-thinking chat template during
-  training so the model never learns to emit <think> noise.
-- Requires transformers>=4.51 (the Qwen3 arch needs it).
-
-Uses `transformers.Trainer` directly (NOT trl.SFTTrainer) because trl's
-SFTTrainer API keeps changing between versions (tokenizer vs
-processing_class) and broke on some installs. transformers.Trainer is
-version-stable.
+IMPORTANT (4GB VRAM path):
+- We do NOT use 4-bit quantization: on a 4GB GPU, 4-bit + LoRA + fp16
+  compute dequantizes to ~10GB and OOMs (verified). Instead we load the
+  model in fp16, use gradient checkpointing, a short max-seq-len, and a
+  small LoRA rank — this fits 4GB.
+- Qwen3 thinking mode is disabled so answers are direct (no <think>).
 
 Usage (create a venv first — see INSTALL below):
     python scripts/finetune_train.py \
@@ -25,21 +20,21 @@ Usage (create a venv first — see INSTALL below):
 
 INSTALL (Windows, PowerShell, your venv):
     pip install torch --index-url https://download.pytorch.org/whl/cu121
-    pip install transformers>=4.51 peft datasets accelerate bitsandbytes
+    pip install transformers>=4.51 peft datasets accelerate
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
@@ -75,41 +70,44 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--grad-accum", type=int, default=8)
-    ap.add_argument("--max-seq-len", type=int, default=2048)
-    ap.add_argument("--lora-r", type=int, default=16)
-    ap.add_argument("--lora-alpha", type=int, default=32)
+    ap.add_argument("--max-seq-len", type=int, default=512)
+    ap.add_argument("--lora-r", type=int, default=8)
+    ap.add_argument("--lora-alpha", type=int, default=16)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--max-steps", type=int, default=-1)
     args = ap.parse_args()
 
-    data_dir = Path(args.data)
-    out_dir = Path(args.out_dir)
+    data_dir = Path(os.path.abspath(args.data))
+    out_dir = Path(os.path.abspath(args.out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     import transformers
     print(f"[versions] transformers={transformers.__version__}, "
           f"torch={torch.__version__}, cuda={torch.cuda.is_available()}")
 
-    print(f"== Loading base model: {args.base_model} ==")
-    # 4-bit quantized base so LoRA fits 4GB VRAM
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
+    print(f"== Loading base model: {args.base_model} (fp16, no 4-bit) ==")
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA not available — cannot train. Reinstall torch with CUDA.")
+
+    # fp16, NO quantization. 4-bit OOMs on 4GB (dequantizes to ~10GB).
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
-        quantization_config=bnb,
-        device_map="auto",
+        torch_dtype=torch.float16,
+        device_map={"": 0},
         trust_remote_code=True,
         attn_implementation="sdpa",
+        low_cpu_mem_usage=True,
     )
+    n_cuda = sum(1 for p in model.parameters() if p.device.type == "cuda")
+    n_cpu = sum(1 for p in model.parameters() if p.device.type == "cpu")
+    print(f"[gpu] layers on cuda: {n_cuda} | layers on cpu: {n_cpu}")
+
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = prepare_model_for_kbit_training(model)
+    # enable gradient checkpointing to fit 4GB
+    model.gradient_checkpointing_enable()
 
     print("== Attaching LoRA adapters ==")
     lora_config = LoraConfig(
@@ -149,10 +147,6 @@ def main() -> None:
     print(train_raw[0]["text"][:600])
     print("\n...\n")
 
-    # Tokenize with the trainer (causal LM labels = input ids).
-    # Drop ALL original columns (instruction/input/output/text) so the collator
-    # only ever sees input_ids + attention_mask — otherwise it tries to pad the
-    # leftover string columns and crashes with "too many dimensions 'str'".
     base_cols = train_raw.column_names
 
     def tokenize_fn(ex):
@@ -176,19 +170,29 @@ def main() -> None:
         logging_steps=10,
         save_strategy="steps",
         save_steps=100,
-        eval_strategy="steps" if len(val_ds) > 0 else "no",
-        eval_steps=100,
-        fp16=torch.cuda.is_available(),
+        eval_strategy="no",  # skip eval — saves time, avoids validation errors
+        fp16=True,
         bf16=False,
+        gradient_checkpointing=True,
+        # CRITICAL for 4GB laptops: force CUDA, never CPU
+        use_cpu=False,
+        # free memory between steps
+        optim="adamw_torch",
         report_to=[],
         remove_unused_columns=False,
+        dataloader_pin_memory=False,
     )
+
+    # Confirm where the model actually is, right before training.
+    dev_counts: dict[str, int] = {}
+    for p in model.parameters():
+        dev_counts[p.device.type] = dev_counts.get(p.device.type, 0) + 1
+    print(f"[gpu] trainable params by device: {dev_counts}")
 
     trainer = Trainer(
         model=model,
         args=args_train,
         train_dataset=train_ds,
-        eval_dataset=val_ds if len(val_ds) > 0 else None,
         data_collator=collator,
         processing_class=tokenizer,
     )

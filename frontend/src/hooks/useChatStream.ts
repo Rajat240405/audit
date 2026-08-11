@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { streamChat } from "@/api/chat";
+import { streamChat, verifyAnswer } from "@/api/chat";
 import { useAppStore } from "@/store/useAppStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { useToastStore } from "@/store/useToastStore";
+import { useActivityStore } from "@/store/useActivityStore";
 import { graphStages, hybridStages } from "@/utils/formatters";
 import type { ChatMessage, SourceItem } from "@/types";
 
@@ -23,6 +25,7 @@ export function useChatStream() {
     abortRef.current?.abort();
     draftStore.getState().cancelStream();
     usePipelineStore.getState().finish();
+    useActivityStore.getState().setPhase("done");
     setRunning(false);
   }, [draftStore]);
 
@@ -66,6 +69,13 @@ export function useChatStream() {
       const draft = useDraftStore.getState();
       draft.startStream();
 
+      // Model Activity: reset + auto-open so the user can watch retrieval →
+      // thinking → answer live instead of staring at a blank canvas.
+      const activity = useActivityStore.getState();
+      activity.reset();
+      activity.setQuestion(question);
+      activity.openPanel();
+
       const abort = new AbortController();
       abortRef.current = abort;
       setRunning(true);
@@ -80,20 +90,39 @@ export function useChatStream() {
           onStatus: (stage, message, done) => {
             usePipelineStore.getState().markStage(stage, done ? "done" : "running");
             usePipelineStore.getState().setMessage(message);
+            // Fallback for backends without explicit phase events: entering
+            // the generate stage means the model is now thinking.
+            if (stage === "generate" && !done) {
+              useActivityStore.getState().setPhase("thinking");
+            }
           },
           onSources: (sources) => {
             const typed = sources as SourceItem[];
             useDraftStore.getState().setSources(typed);
+            useActivityStore.getState().setSources(typed);
             sessions.updateMessage(sessionId, assistantId, { sources: typed });
           },
           onTrace: (trace) => {
             useDraftStore.getState().setTrace(trace as never);
             sessions.updateMessage(sessionId, assistantId, { trace: trace as never });
           },
+          onReasoning: (text) => {
+            const activity = useActivityStore.getState();
+            if (activity.phase !== "thinking") activity.setPhase("thinking");
+            activity.appendReasoning(text);
+          },
+          onPhase: (phase, model) => {
+            useActivityStore.getState().setPhase(phase as never, model);
+          },
           onTokens: (text) => {
             useDraftStore.getState().appendToken(text);
+            const activity = useActivityStore.getState();
+            if (activity.phase === "thinking") activity.setPhase("generating");
+            activity.appendAnswer(text.length);
           },
           onMeta: (meta) => {
+            const m = meta as { model?: string };
+            if (m.model) useActivityStore.getState().setModel(m.model);
             const draft = useDraftStore.getState();
             draft.commitStream();
             draft.setLastMeta(meta as Record<string, unknown>);
@@ -136,6 +165,7 @@ export function useChatStream() {
             const content = useDraftStore.getState().content || `⚠️ ${message}`;
             sessions.updateMessage(sessionId, assistantId, { content });
             usePipelineStore.getState().finish();
+            useActivityStore.getState().setError(message);
             setRunning(false);
           },
           onDone: () => {
@@ -152,7 +182,72 @@ export function useChatStream() {
               sessions.updateMessage(sessionId, assistantId, { content, sources, trace: trace ?? undefined });
             }
             usePipelineStore.getState().finish();
+            // phase done — unless an error already moved it to "error"
+            const activity = useActivityStore.getState();
+            if (activity.phase !== "error") activity.setPhase("done");
             setRunning(false);
+
+            // Non-blocking post-verification: the stream is DONE and the UI is
+            // free. Run grounding/judge/rewrite in the background and apply the
+            // revised text + grounding report when it arrives.
+            const finalContent = useDraftStore.getState().content;
+            const finalSources = useDraftStore.getState().sources;
+            if (finalContent && finalSources.length > 0) {
+              // BUG #1 FIX: snapshot the content when verify is dispatched.
+              // If the user edited the draft (or an AI-toolbar transform ran)
+              // while verify was in flight, do NOT clobber their work — toast
+              // and stage instead.
+              const baselineContent = finalContent;
+              const baselineSources = finalSources;
+              verifyAnswer(baselineContent, baselineSources)
+                .then((res) => {
+                  if (res.error) {
+                    useToastStore.getState().push("error", `Verification failed: ${res.error}`);
+                    return;
+                  }
+                  const draft = useDraftStore.getState();
+                  const userEdited =
+                    draft.content !== baselineContent ||
+                    draft.sources !== baselineSources;
+                  if (userEdited) {
+                    // User changed the draft during verify — don't overwrite.
+                    useToastStore.getState().push(
+                      "info",
+                      "Verification produced revisions, but you edited the draft — review the grounding report instead."
+                    );
+                    // still update the grounding report (safe, doesn't touch content)
+                    if (res.grounding && res.grounding.length) {
+                      useDraftStore.setState({
+                        grounding: res.grounding.map((g) => ({
+                          text: g.text, found: g.found, source: g.source,
+                        })),
+                      });
+                    }
+                    return;
+                  }
+                  if (res.text && res.text !== draft.content) {
+                    draft.applyEdit(res.text);
+                    useToastStore.getState().push(
+                      "success",
+                      "✓ Answer verified & cleaned (unsupported claims removed)"
+                    );
+                  }
+                  if (res.grounding && res.grounding.length) {
+                    useDraftStore.setState({
+                      grounding: res.grounding.map((g) => ({
+                        text: g.text, found: g.found, source: g.source,
+                      })),
+                    });
+                  }
+                  sessions.updateMessage(sessionId, assistantId, {
+                    content: useDraftStore.getState().content,
+                  });
+                })
+                .catch((err) => {
+                  console.warn("[verify] error:", err);
+                  useToastStore.getState().push("error", "Verification failed unexpectedly");
+                });
+            }
           },
         },
       });

@@ -103,6 +103,12 @@ export type StreamEvent =
   | { type: "sources"; sources: SourceItem[]; is_graph: boolean }
   | { type: "trace"; trace: RetrievalTrace }
   | { type: "tokens"; text: string }
+  | { type: "reasoning"; text: string }
+  | {
+      type: "phase";
+      phase: "retrieving" | "thinking" | "generating" | "done" | "error";
+      model?: string;
+    }
   | { type: "meta"; meta: GenerationMeta }
   | { type: "grounding"; grounding: GroundingClaim[] }
   | {

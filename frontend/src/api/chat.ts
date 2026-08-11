@@ -1,4 +1,4 @@
-import { consumeSSE, type StreamHandlers } from "./client";
+import { apiFetch, consumeSSE, type StreamHandlers } from "./client";
 import type {
   ChatMessage,
   DraftStyle,
@@ -40,6 +40,25 @@ export interface EditStreamOptions {
   draftStyle?: string;
   signal?: AbortSignal;
   handlers: StreamHandlers;
+}
+
+/** Post-generation verification (non-blocking, runs after the stream closes).
+ *  Returns the grounding report + a judge-rewritten answer with unsupported
+ *  claims removed. */
+export async function verifyAnswer(
+  answer: string,
+  sources: SourceItem[]
+): Promise<{
+  text: string;
+  grounding: Array<{ text: string; found: boolean; source?: string; note?: string }>;
+  judge_rewritten: boolean;
+  judge_removed_count: number;
+  error?: string;
+}> {
+  return apiFetch("/api/verify", {
+    method: "POST",
+    body: JSON.stringify({ answer, sources }),
+  });
 }
 
 /** Stream an AI edit of the current draft. */

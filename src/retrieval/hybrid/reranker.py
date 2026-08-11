@@ -86,6 +86,10 @@ class CrossEncoderReranker:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_length = max_length
         self._model: CrossEncoder | None = None
+        # GLM #5: docs that exceeded max_length in the last rerank (truncated
+        # by the cross-encoder silently). Populated by rerank() so callers can
+        # surface "this source was only partially considered".
+        self.last_truncated_docs: set[str] = set()
 
     @property
     def model(self) -> CrossEncoder:
@@ -143,6 +147,14 @@ class CrossEncoderReranker:
                 doc_text = doc_texts.get(doc_id, "") if doc_texts else ""
 
             doc_pairs.append((doc_id, doc_text))
+
+        # GLM #5: detect which docs exceed the cross-encoder token budget so we
+        # can surface silent truncation. Rough token estimate (chars/4) vs
+        # max_length — if a doc is longer, the encoder truncates it.
+        self.last_truncated_docs = {
+            doc_id for doc_id, doc_text in doc_pairs
+            if len(doc_text) // 4 > self.max_length
+        }
 
         # Build query-document pairs for cross-encoder
         query_doc_pairs = [(query, doc_text) for _, doc_text in doc_pairs]

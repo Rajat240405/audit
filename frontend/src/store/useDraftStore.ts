@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { GroundingClaim, RetrievalTrace, SourceItem } from "@/types";
 import { buildGroundingReport } from "@/services/grounding";
 
@@ -15,7 +16,7 @@ interface DraftState {
   /** Metadata from the last committed generation (for the metrics panel). */
   lastMeta: Record<string, unknown> | null;
   /** Version history. */
-  versions: Array<{ id: string; label: string; content: string; createdAt: number }>;
+  versions: Array<{ id: string; label: string; description: string; content: string; createdAt: number }>;
   activeVersion: string | null;
   /** Evidence selection (audit transparency: which sentence is highlighted). */
   selectedEvidence: SourceItem | null;
@@ -28,9 +29,8 @@ interface DraftState {
   setSources: (sources: SourceItem[]) => void;
   setTrace: (trace: RetrievalTrace | null) => void;
   selectEvidence: (src: SourceItem | null) => void;
-  saveVersion: (label?: string) => void;
   restoreVersion: (id: string) => void;
-  applyEdit: (newContent: string) => void;
+  applyEdit: (newContent: string, description?: string) => void;
   setLastMeta: (meta: Record<string, unknown>) => void;
   reset: () => void;
 }
@@ -39,7 +39,9 @@ function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-export const useDraftStore = create<DraftState>((set) => ({
+export const useDraftStore = create<DraftState>()(
+  persist(
+    (set) => ({
   content: "",
   streamingText: "",
   isStreaming: false,
@@ -64,6 +66,7 @@ export const useDraftStore = create<DraftState>((set) => ({
       const version = {
         id: makeId(),
         label: `Version ${s.versions.length + 1}`,
+        description: "Generated answer",
         content,
         createdAt: Date.now(),
       };
@@ -89,7 +92,7 @@ export const useDraftStore = create<DraftState>((set) => ({
         content,
         versions:
           content && content !== s.content
-            ? [...s.versions, { id: makeId(), label: `Version ${s.versions.length + 1}`, content, createdAt: Date.now() }]
+            ? [...s.versions, { id: makeId(), label: `Version ${s.versions.length + 1}`, description: "Partial/stopped generation", content, createdAt: Date.now() }]
             : s.versions,
       };
     }),
@@ -108,35 +111,36 @@ export const useDraftStore = create<DraftState>((set) => ({
 
   selectEvidence: (src) => set({ selectedEvidence: src }),
 
-  saveVersion: (label) =>
-    set((s) => {
-      if (!s.content.trim()) return {};
-      const version = {
-        id: makeId(),
-        label: label || `Version ${s.versions.length + 1}`,
-        content: s.content,
-        createdAt: Date.now(),
-      };
-      return { versions: [...s.versions, version], activeVersion: version.id };
-    }),
-
   restoreVersion: (id) =>
     set((s) => {
       const v = s.versions.find((x) => x.id === id);
       if (!v) return {};
-      return { content: v.content, activeVersion: id };
+      // restore the full answer onto the canvas and re-verify it against the
+      // currently attached sources
+      return {
+        content: v.content,
+        activeVersion: id,
+        grounding: buildGroundingReport(v.content, s.sources),
+      };
     }),
 
-  applyEdit: (newContent) =>
-    set((s) => ({
-      content: newContent,
-      grounding: buildGroundingReport(newContent, s.sources),
-      versions: [
-        ...s.versions,
-        { id: makeId(), label: `Version ${s.versions.length + 1}`, content: newContent, createdAt: Date.now() },
-      ],
-      activeVersion: null,
-    })),
+  applyEdit: (newContent, description) =>
+    set((s) => {
+      const latest = s.versions[s.versions.length - 1];
+      if (latest && latest.content === newContent) {
+        // content unchanged — update description only, no new version
+        return { content: newContent, activeVersion: latest.id };
+      }
+      return {
+        content: newContent,
+        grounding: buildGroundingReport(newContent, s.sources),
+        versions: [
+          ...s.versions,
+          { id: makeId(), label: `Version ${s.versions.length + 1}`, description: description || "AI edit", content: newContent, createdAt: Date.now() },
+        ],
+        activeVersion: null,
+      };
+    }),
 
   setLastMeta: (meta) => set({ lastMeta: meta }),
 
@@ -153,4 +157,44 @@ export const useDraftStore = create<DraftState>((set) => ({
       activeVersion: null,
       selectedEvidence: null,
     }),
-}));
+  }),
+  {
+      name: "incois-draft",
+      // persist versions + the latest draft content + sources so work survives
+      // refresh; skip transient streaming state.
+      partialize: (state) => ({
+        versions: state.versions,
+        activeVersion: state.activeVersion,
+        content: state.content,
+        sources: state.sources,
+        trace: state.trace,
+        grounding: state.grounding,
+        lastMeta: state.lastMeta,
+      }),
+      // Every reload snapshots the current draft into History automatically
+      // (no manual "Save version" button). Dedup: if the draft is unchanged
+      // from the latest snapshot, don't create a duplicate entry.
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        const content = state.content ?? "";
+        if (!content.trim()) return;
+        const versions = state.versions ?? [];
+        const latest = versions[versions.length - 1];
+        if (!latest || latest.content !== content) {
+          useDraftStore.setState({
+            versions: [
+              ...versions,
+              {
+                id: makeId(),
+                label: `Version ${versions.length + 1}`,
+                description: `Session open (${new Date().toLocaleTimeString()})`,
+                content,
+                createdAt: Date.now(),
+              },
+            ],
+          });
+        }
+      },
+    }
+  )
+);

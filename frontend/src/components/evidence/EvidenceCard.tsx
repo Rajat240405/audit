@@ -1,10 +1,10 @@
-import { CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
-import { useState } from "react";
+import { CheckCircle2, FileText } from "lucide-react";
 import type { SourceItem } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/utils/cn";
 import { confidenceLabel, dominantComponent } from "@/utils/formatters";
 import { useDraftStore } from "@/store/useDraftStore";
+import { useDocViewerStore } from "@/store/useDocViewerStore";
 
 export function EvidenceCard({
   source,
@@ -15,8 +15,8 @@ export function EvidenceCard({
   selected: boolean;
   isGraph: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const selectEvidence = useDraftStore((s) => s.selectEvidence);
+  const openDoc = useDocViewerStore((s) => s.openDoc);
   const dominant = dominantComponent(source);
 
   const scores = [
@@ -65,24 +65,16 @@ export function EvidenceCard({
       </div>
 
       <button
-        className="mt-2 flex w-full items-center gap-1 text-[10px] text-muted hover:text-foreground"
+        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded border border-border bg-surface px-2 py-1 text-[10px] font-semibold text-foreground/80 hover:border-accent/40 hover:text-accent"
         onClick={(e) => {
           e.stopPropagation();
-          setExpanded((v) => !v);
+          openDoc(source);
         }}
+        title="Open the full document this source came from"
       >
-        {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-        {expanded ? "Collapse" : "Expand"} transcript
+        <FileText className="h-3 w-3" />
+        View full document
       </button>
-
-      {expanded && (
-        <div className="mt-2 max-h-44 space-y-1.5 overflow-y-auto rounded border border-border bg-background/60 p-2">
-          <p className="text-[10px] font-medium text-foreground/80">{source.question}</p>
-          <p className="whitespace-pre-wrap border-t border-border pt-1 text-[10px] leading-relaxed text-muted">
-            {source.answer}
-          </p>
-        </div>
-      )}
 
       {selected && (
         <div className="mt-2 flex items-center gap-1 text-[10px] text-success">

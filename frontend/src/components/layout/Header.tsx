@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, Brain } from "lucide-react";
 import { fetchModels, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import { useThemeStore } from "@/store/useThemeStore";
+import { useActivityStore } from "@/store/useActivityStore";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/utils/cn";
 import {
   Select,
   SelectContent,
@@ -41,7 +43,15 @@ export function Header() {
   const changeProvider = async (p: string) => {
     app.setProvider(p);
     try {
-      await setProvider(p, app.modelFamily);
+      // Auto-select the first model family of the new provider so the backend
+      // never ends up with a mismatched (old-provider) family id.
+      const fams = await fetchModels(p);
+      const first = fams[0];
+      if (first) {
+        app.setModelFamily(first.id);
+        app.setModel(first.model_name);
+        await setProvider(p, first.id);
+      }
     } catch {
       /* backend may be offline */
     }
@@ -62,7 +72,7 @@ export function Header() {
           <SelectContent>
             <SelectItem value="ollama">Ollama</SelectItem>
             <SelectItem value="groq">Groq</SelectItem>
-            <SelectItem value="openai">OpenAI</SelectItem>
+            <SelectItem value="openrouter">OpenRouter</SelectItem>
           </SelectContent>
         </Select>
 
@@ -94,13 +104,12 @@ export function Header() {
           </SelectContent>
         </Select>
 
-        <Button variant="secondary" size="sm">
-          Load Model
-        </Button>
-
         <Button size="sm" onClick={() => app.setBuildModalOpen(true)}>
           Build Graph
         </Button>
+
+        {/* Model Activity — shows what the LLM received + its live reasoning */}
+        <ActivityButton />
 
         <GpuBadge gpu={app.gpu} />
 
@@ -133,22 +142,55 @@ export function Header() {
           </SelectContent>
         </Select>
 
-        {/* RAG toggle — Hybrid on, Graph off */}
-        <label className="flex cursor-pointer select-none items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={app.retrievalMode === "hybrid"}
-            onChange={(e) => app.setRetrievalMode(e.target.checked ? "hybrid" : "graph")}
-            className="h-3.5 w-3.5 rounded border-border accent-[#10b981]"
-          />
-          <span className="text-xs font-medium">RAG</span>
-        </label>
+        {/* Retrieval mode — Hybrid RAG vs GraphRAG (was the chatbox pill) */}
+        <div className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold">
+          {(["hybrid", "graph"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => app.setRetrievalMode(m)}
+              className={cn(
+                "rounded-full px-2.5 py-1 transition-colors",
+                app.retrievalMode === m
+                  ? "bg-foreground text-background"
+                  : "text-muted hover:text-foreground"
+              )}
+              title={m === "hybrid" ? "Hybrid RAG: dense + BM25 + rerank" : "GraphRAG: knowledge-graph traversal"}
+            >
+              {m === "hybrid" ? "Hybrid RAG" : "GraphRAG"}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
         <ThemeToggle />
       </div>
     </header>
+  );
+}
+
+function ActivityButton() {
+  const open = useActivityStore((s) => s.open);
+  const phase = useActivityStore((s) => s.phase);
+  const toggle = useActivityStore((s) => s.toggle);
+  const active = phase !== "idle" && phase !== "done" && phase !== "error";
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={toggle}
+      title="Model activity — what the model received and what it's thinking"
+      className={cn("relative", open && "bg-surface-2")}
+    >
+      <Brain className="h-4 w-4" />
+      <span className="ml-1 hidden text-xs lg:inline">Activity</span>
+      {active && (
+        <span className="absolute right-1 top-1 flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+        </span>
+      )}
+    </Button>
   );
 }
 
