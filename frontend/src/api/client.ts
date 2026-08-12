@@ -71,11 +71,15 @@ export function consumeSSE(
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      // SSE event framing (M6): consecutive `data:` lines accumulate until a
+      // blank line, then the whole event is parsed ONCE. This handles
+      // multi-line JSON payloads instead of silently dropping them.
+      let eventData: string[] = [];
 
-      const processLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) return;
-        const payload = trimmed.slice(5).trim();
+      const dispatchEvent = () => {
+        if (eventData.length === 0) return;
+        const payload = eventData.join("\n").trim();
+        eventData = [];
         if (!payload) return;
         let ev: Record<string, unknown>;
         try {
@@ -133,6 +137,18 @@ export function consumeSSE(
         }
       };
 
+      // Feed one line into the SSE framer: blank line ends the event.
+      const processLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          dispatchEvent();
+          return;
+        }
+        if (!trimmed.startsWith("data:")) return;
+        const payload = trimmed.slice(5).trim();
+        if (payload) eventData.push(payload);
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -142,6 +158,7 @@ export function consumeSSE(
         for (const line of lines) processLine(line);
       }
       if (buffer.trim()) processLine(buffer);
+      dispatchEvent(); // flush any trailing event (no final blank line)
       handlers.onDone?.();
     })
     .catch((err) => {

@@ -1,10 +1,19 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
 import type { GroundingClaim, RetrievalTrace, SourceItem } from "@/types";
 import { buildGroundingReport } from "@/services/grounding";
 
+/**
+ * Draft workspace store — NO version history, NO persistence.
+ *
+ * Behaviour (per product decision):
+ *  - App startup: canvas is EMPTY (nothing persisted here).
+ *  - Editing an answer (AI edit / verify / direct canvas edit) replaces the
+ *    content IN-PLACE — no "new version" is ever created.
+ *  - The conversation lives in useSessionStore (persisted). Clicking a
+ *    session in History loads its last answer onto the canvas.
+ */
 interface DraftState {
-  /** The active (latest) version content of the current answer. */
+  /** Current canvas content (the active answer). */
   content: string;
   /** Raw streamed text currently being generated (before commit). */
   streamingText: string;
@@ -15,33 +24,32 @@ interface DraftState {
   grounding: GroundingClaim[];
   /** Metadata from the last committed generation (for the metrics panel). */
   lastMeta: Record<string, unknown> | null;
-  /** Version history. */
-  versions: Array<{ id: string; label: string; description: string; content: string; createdAt: number }>;
-  activeVersion: string | null;
   /** Evidence selection (audit transparency: which sentence is highlighted). */
   selectedEvidence: SourceItem | null;
+  /** Which chat message the canvas currently mirrors (for in-place sync). */
+  activeSessionId: string | null;
+  activeMessageId: string | null;
 
   startStream: () => void;
   appendToken: (text: string) => void;
   commitStream: (meta?: { sources?: SourceItem[]; trace?: RetrievalTrace | null }) => void;
   cancelStream: () => void;
+  /** Load a full answer onto the canvas (session open / restore). */
   setDraft: (content: string, sources?: SourceItem[], trace?: RetrievalTrace | null) => void;
+  /** Direct user edit of the canvas text (no AI). Replaces in place. */
+  setContent: (content: string) => void;
+  /** AI edit / verify result — replaces content in place (no version). */
+  applyEdit: (newContent: string) => void;
   setSources: (sources: SourceItem[]) => void;
   setTrace: (trace: RetrievalTrace | null) => void;
   selectEvidence: (src: SourceItem | null) => void;
-  restoreVersion: (id: string) => void;
-  applyEdit: (newContent: string, description?: string) => void;
   setLastMeta: (meta: Record<string, unknown>) => void;
+  /** Bind the canvas to a chat message (edits then update that message). */
+  bindMessage: (sessionId: string | null, messageId: string | null) => void;
   reset: () => void;
 }
 
-function makeId(): string {
-  return Math.random().toString(36).slice(2, 10);
-}
-
-export const useDraftStore = create<DraftState>()(
-  persist(
-    (set) => ({
+export const useDraftStore = create<DraftState>((set) => ({
   content: "",
   streamingText: "",
   isStreaming: false,
@@ -49,27 +57,19 @@ export const useDraftStore = create<DraftState>()(
   trace: null,
   grounding: [],
   lastMeta: null,
-  versions: [],
-  activeVersion: null,
   selectedEvidence: null,
+  activeSessionId: null,
+  activeMessageId: null,
 
   startStream: () => set({ isStreaming: true, streamingText: "", content: "" }),
 
-  appendToken: (text) =>
-    set((s) => ({ streamingText: s.streamingText + text })),
+  appendToken: (text) => set((s) => ({ streamingText: s.streamingText + text })),
 
   commitStream: (meta) =>
     set((s) => {
       const content = s.streamingText;
       const sources = meta?.sources ?? s.sources;
       const trace = meta?.trace ?? s.trace;
-      const version = {
-        id: makeId(),
-        label: `Version ${s.versions.length + 1}`,
-        description: "Generated answer",
-        content,
-        createdAt: Date.now(),
-      };
       return {
         content,
         streamingText: "",
@@ -77,25 +77,16 @@ export const useDraftStore = create<DraftState>()(
         sources,
         trace,
         grounding: buildGroundingReport(content, sources),
-        versions: [...s.versions, version],
-        activeVersion: version.id,
         selectedEvidence: null,
       };
     }),
 
   cancelStream: () =>
-    set((s) => {
-      const content = s.streamingText || s.content;
-      return {
-        streamingText: "",
-        isStreaming: false,
-        content,
-        versions:
-          content && content !== s.content
-            ? [...s.versions, { id: makeId(), label: `Version ${s.versions.length + 1}`, description: "Partial/stopped generation", content, createdAt: Date.now() }]
-            : s.versions,
-      };
-    }),
+    set((s) => ({
+      streamingText: "",
+      isStreaming: false,
+      content: s.streamingText || s.content,
+    })),
 
   setDraft: (content, sources, trace) =>
     set((s) => ({
@@ -105,44 +96,24 @@ export const useDraftStore = create<DraftState>()(
       grounding: buildGroundingReport(content, sources ?? s.sources),
     })),
 
+  setContent: (content) =>
+    set((s) => ({
+      content,
+      grounding: buildGroundingReport(content, s.sources),
+    })),
+
+  applyEdit: (newContent) =>
+    set((s) => ({
+      content: newContent,
+      grounding: buildGroundingReport(newContent, s.sources),
+    })),
+
   setSources: (sources) => set({ sources }),
-
   setTrace: (trace) => set({ trace }),
-
   selectEvidence: (src) => set({ selectedEvidence: src }),
-
-  restoreVersion: (id) =>
-    set((s) => {
-      const v = s.versions.find((x) => x.id === id);
-      if (!v) return {};
-      // restore the full answer onto the canvas and re-verify it against the
-      // currently attached sources
-      return {
-        content: v.content,
-        activeVersion: id,
-        grounding: buildGroundingReport(v.content, s.sources),
-      };
-    }),
-
-  applyEdit: (newContent, description) =>
-    set((s) => {
-      const latest = s.versions[s.versions.length - 1];
-      if (latest && latest.content === newContent) {
-        // content unchanged — update description only, no new version
-        return { content: newContent, activeVersion: latest.id };
-      }
-      return {
-        content: newContent,
-        grounding: buildGroundingReport(newContent, s.sources),
-        versions: [
-          ...s.versions,
-          { id: makeId(), label: `Version ${s.versions.length + 1}`, description: description || "AI edit", content: newContent, createdAt: Date.now() },
-        ],
-        activeVersion: null,
-      };
-    }),
-
   setLastMeta: (meta) => set({ lastMeta: meta }),
+  bindMessage: (sessionId, messageId) =>
+    set({ activeSessionId: sessionId, activeMessageId: messageId }),
 
   reset: () =>
     set({
@@ -153,48 +124,6 @@ export const useDraftStore = create<DraftState>()(
       trace: null,
       grounding: [],
       lastMeta: null,
-      versions: [],
-      activeVersion: null,
       selectedEvidence: null,
     }),
-  }),
-  {
-      name: "incois-draft",
-      // persist versions + the latest draft content + sources so work survives
-      // refresh; skip transient streaming state.
-      partialize: (state) => ({
-        versions: state.versions,
-        activeVersion: state.activeVersion,
-        content: state.content,
-        sources: state.sources,
-        trace: state.trace,
-        grounding: state.grounding,
-        lastMeta: state.lastMeta,
-      }),
-      // Every reload snapshots the current draft into History automatically
-      // (no manual "Save version" button). Dedup: if the draft is unchanged
-      // from the latest snapshot, don't create a duplicate entry.
-      onRehydrateStorage: () => (state) => {
-        if (!state) return;
-        const content = state.content ?? "";
-        if (!content.trim()) return;
-        const versions = state.versions ?? [];
-        const latest = versions[versions.length - 1];
-        if (!latest || latest.content !== content) {
-          useDraftStore.setState({
-            versions: [
-              ...versions,
-              {
-                id: makeId(),
-                label: `Version ${versions.length + 1}`,
-                description: `Session open (${new Date().toLocaleTimeString()})`,
-                content,
-                createdAt: Date.now(),
-              },
-            ],
-          });
-        }
-      },
-    }
-  )
-);
+}));

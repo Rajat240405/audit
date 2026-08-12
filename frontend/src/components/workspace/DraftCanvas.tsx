@@ -3,6 +3,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertTriangle, CheckCircle2, FileText } from "lucide-react";
 import { useDraftStore } from "@/store/useDraftStore";
+import { useSessionStore } from "@/store/useSessionStore";
+import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
 import { useEditStore } from "@/store/useEditStore";
 import { useDocViewerStore } from "@/store/useDocViewerStore";
@@ -25,6 +27,7 @@ export function DraftCanvas() {
   const { edit, pendingEdit, accept, reject } = useEditDraft();
   const editing = useEditStore((s) => s.editing);
   const [showClaims, setShowClaims] = useState(false);
+  const pushToast = useToastStore((s) => s.push);
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,6 +43,31 @@ export function DraftCanvas() {
     setShowClaims((v) => !v);
   };
 
+  // Direct manual editing of the canvas (no AI). On save the content is set
+  // in-place and the active session's last assistant message is updated so
+  // the sidebar transcript matches.
+  const [editingText, setEditingText] = useState<string | null>(null);
+  const startEdit = () => setEditingText(content);
+  const cancelEdit = () => setEditingText(null);
+  const saveEdit = () => {
+    if (editingText == null) return;
+    const text = editingText;
+    useDraftStore.getState().setContent(text);
+    // update the SPECIFIC message this canvas is bound to (session + message)
+    // so the sidebar transcript always matches the canvas edit
+    const draft = useDraftStore.getState();
+    const sessions = useSessionStore.getState();
+    const sid = draft.activeSessionId;
+    const mid = draft.activeMessageId;
+    if (sid && mid) {
+      const active = sessions.sessions.find((s) => s.id === sid);
+      const msg = active?.messages.find((m) => m.id === mid);
+      if (msg) sessions.updateMessage(sid, mid, { content: text });
+    }
+    setEditingText(null);
+    pushToast("success", "Draft saved — synced to chat");
+  };
+
   const display = content || streamingText;
 
   return (
@@ -50,7 +78,16 @@ export function DraftCanvas() {
           <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">
             Drafting Canvas
           </span>
-          <span className="text-[10px] text-muted">
+          <span className="flex items-center gap-2">
+            {content && !isStreaming && editingText == null && (
+              <button
+                onClick={startEdit}
+                className="rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-bold text-foreground shadow-sm hover:bg-surface-2"
+              >
+                ✏️ Edit
+              </button>
+            )}
+            <span className="text-[10px] text-muted">
             BGE-M3 • 2-STAGE RAG
             {score != null && (
               <span
@@ -62,10 +99,27 @@ export function DraftCanvas() {
                 • Grounding {score}%
               </span>
             )}
+            </span>
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-6">
-          {display ? (
+          {editingText != null ? (
+            <div className="flex h-full flex-col gap-2">
+              <textarea
+                value={editingText}
+                onChange={(e) => setEditingText(e.target.value)}
+                className="min-h-0 flex-1 resize-none rounded-md border border-border bg-background/60 p-3 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <button onClick={cancelEdit} className="rounded border border-border px-3 py-1 text-xs font-semibold text-muted hover:bg-surface-2">
+                  Cancel
+                </button>
+                <button onClick={saveEdit} className="rounded bg-success px-3 py-1 text-xs font-semibold text-white hover:opacity-90">
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : display ? (
             <div ref={streamRef} className="md-body text-[15px] leading-relaxed text-foreground">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{display}</ReactMarkdown>
               {isStreaming && (

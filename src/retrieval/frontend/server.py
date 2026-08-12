@@ -15,12 +15,13 @@ import io
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -36,14 +37,28 @@ app = FastAPI(
     description="Provider-agnostic API backing the Interactive Chat Frontend for Phase 10."
 )
 
+# Project root — ALL data/index paths resolve from here, never from the
+# process CWD (the server may be started from any directory; a relative
+# "data/inbox" silently pointed at the wrong folder and uploads vanished).
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Ensure the inbox (and corpus dir) exist at startup so uploads always land
+# in a visible, known location regardless of how/where the server is started.
+(PROJECT_ROOT / "data" / "inbox").mkdir(parents=True, exist_ok=True)
+(PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
+(PROJECT_ROOT / "data" / "user-knowledge").mkdir(parents=True, exist_ok=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # In-Memory Active Configuration State (Thread-safe single-session storage)
 # ─────────────────────────────────────────────────────────────────────────────
 
+from src.generation.defaults import default_family_id, default_model_name, default_num_ctx
+
 ACTIVE_CONFIG = {
     "provider": "ollama",
-    "model_family": "qwen2.5", # Default family (Objective 3)
-    "model": "qwen2.5:7b",     # Resolved model
+    # Default family/model resolve from src.generation.defaults (single source)
+    "model_family": default_family_id(),
+    "model": default_model_name(),
     "mode": "fast",            # "fast" or "deep"
     "retrieval_mode": "hybrid",# "hybrid" or "graph"
     "groq_api_key": None,
@@ -102,6 +117,12 @@ class _LazyPipeline:
                     self._instance = self._build()
         return self._instance
 
+    def swap(self, new_instance) -> None:
+        """Atomically replace the live pipeline under the same lock used by
+        _get(), so an ingest rebuild can never race a query's load."""
+        with self._lock:
+            self._instance = new_instance
+
     @staticmethod
     def _build():
         p = HybridRAGPipeline()
@@ -141,7 +162,7 @@ if _default_fam:
     ACTIVE_CONFIG["model"] = _default_fam.model_name
     _num_ctx = _default_fam.context_window
 else:
-    _num_ctx = 8192
+    _num_ctx = default_num_ctx()
 
 # Instantiate the active client and generator router
 llm_client = LLMClient(
@@ -156,13 +177,13 @@ generator = AnswerGenerator(llm_client=llm_client)
 # model makes edits finish in seconds instead of a minute.
 # Override with GRAPHRAG_EDIT_MODEL env (e.g. "qwen2.5:0.5b" for fastest).
 _EDIT_MODEL = os.environ.get("GRAPHRAG_EDIT_MODEL", "qwen2.5:3b")
-_edit_ctx = 8192
+_edit_ctx = default_num_ctx()
 try:
     _edit_fam = model_registry.get(_EDIT_MODEL)
     if _edit_fam:
         _edit_ctx = _edit_fam.context_window
 except Exception:
-    _edit_ctx = 8192
+    _edit_ctx = default_num_ctx()
 edit_llm_client = LLMClient(
     provider=ACTIVE_CONFIG["provider"],
     model=_EDIT_MODEL,
@@ -192,12 +213,14 @@ class ChatStreamRequest(BaseModel):
     retrieval_mode: str = "hybrid"  # Retrieval Mode: "hybrid" or "graph"
     top_k: int = 5
     draft_style: Optional[str] = None  # e.g. formal / concise / executive
+    doc_types: Optional[list[str]] = None  # source filter: parliament / annual_report / ...
 
 
 class SourceItem(BaseModel):
     doc_id: str
     ministry: Optional[str] = None
     subject: Optional[str] = None
+    document_type: Optional[str] = None
     score: float
     question: str
     answer: str
@@ -440,12 +463,16 @@ async def get_models(provider: str):
                 # Check thinking capability from substrings
                 thinking_capable = any(t in model_tag.lower() for t in ["thinking", "r1", "reason", "o1", "o3"])
                 
-                # Guess context window
-                context_window = 8192
-                if "llama3" in model_tag.lower() or "llama-3" in model_tag.lower():
+                # Guess context window (must match registry defaults):
+                #   qwen3 family (qwen3:4b, qwen3:8b, qwen3.6, incois-qa) = 32768
+                #   qwen2.5 = 8192 · llama3 = 8192 · gemma = 8192 · else 8192
+                tag = model_tag.lower()
+                if "qwen3" in tag or "incois-qa" in tag:
+                    context_window = 32768
+                elif "llama3" in tag or "llama-3" in tag or "gemma" in tag:
                     context_window = 8192
-                elif "qwen" in model_tag.lower():
-                    context_window = 32768 if "2.5" in model_tag else 8192
+                else:
+                    context_window = 8192
                 
                 # Register in memory
                 from src.generation.registry import ModelFamily
@@ -511,6 +538,8 @@ async def switch_provider(request: ProviderSwitchRequest):
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
     llm_client.max_tokens = _resolve_max_tokens(prov, exec_mode, family)
+    llm_client.think = exec_params.get("thinking", False)  # Fast=off, Deep=on
+    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
     llm_client.api_key = _active_api_key(prov)  # session API key (slot or env)
     generator.max_context_docs = exec_params["max_context_docs"]
     generator.max_doc_chars = exec_params["max_doc_chars"]
@@ -555,6 +584,8 @@ async def chat_endpoint(request: ChatRequest):
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
     llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
+    llm_client.think = exec_params.get("thinking", False)
+    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
     llm_client.api_key = _active_api_key()  # Propagate cached API key dynamically!
     ACTIVE_CONFIG["model"] = resolved_model
 
@@ -638,10 +669,12 @@ async def chat_endpoint(request: ChatRequest):
     else:
         # ── PATH B: SEMANTIC / SYNTHESIS QUERY PATH ──
         if ret_mode == "graph":
-            results = graph_retriever.retrieve(query, top_k=5)
+            results = graph_retriever.retrieve(query, top_k=request.top_k)
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
         else:
-            results, timings = pipeline.retrieve(query, top_k=5)
+            results, timings = pipeline.retrieve(
+                query, top_k=request.top_k, doc_types=request.doc_types
+            )
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
 
         # Format Retrieved Results into Source Items
@@ -793,6 +826,7 @@ def _to_sources(results: list) -> list[dict]:
             "doc_id": r.doc_id,
             "ministry": r.metadata.get("ministry") or "-",
             "subject": r.metadata.get("subject") or "-",
+            "document_type": r.metadata.get("document_type"),
             "score": float(r.score),
             "question": r.question,
             "answer": r.answer,
@@ -958,27 +992,14 @@ _TOKEN_ALIASES = {
 # synonyms mined from the corpus — deliberately NOT including things like
 # "VSSC" for ISRO (VSSC is a sub-entity; documents never use it for the
 # personnel sphere, so it must keep failing the check).
-_ALIAS_GROUPS: list[list[str]] = [
-    ["isro", "indian space research organisation"],
-    ["niot", "national institute of ocean technology"],
-    ["incois", "indian national centre for ocean information services"],
-    ["imd", "india meteorological department", "indian meteorological department"],
-    ["dwr", "doppler weather radar", "doppler weather radars"],
-    ["cmlre", "centre for marine living resources and ecology",
-     "center for marine living resources and ecology"],
-    ["aws", "automatic weather station", "automatic weather stations"],
-    ["arg", "automatic rain gauge", "automatic rain gauges"],
-    ["adcp", "acoustic doppler current profiler", "acoustic doppler current profilers"],
-    ["gnss", "global navigation satellite system", "global navigation satellite systems"],
-    ["csir nio", "national institute of oceanography"],
-    ["grse", "garden reach shipbuilders", "garden reach shipbuilders and engineers"],
-    ["cwc", "central water commission"],
-    ["ndma", "national disaster management authority"],
-    ["matsya 6000", "matsya 6000 meters", "matsya"],
-    ["mission mausam", "mission mausam scheme"],
-    ["icmam", "integrated coastal and marine area management"],
-    ["iczm", "integrated coastal zone management"],
-]
+# Equivalent surface forms of the same entity — SINGLE SOURCE of truth:
+# frontend/src/utils/grounding_aliases.json. Editing the JSON is the ONLY way
+# to change aliases; this list is loaded from it so backend and frontend can
+# never drift again (was: two hardcoded copies, frontend missing 7 terms).
+_ALIAS_GROUPS: list[list[str]] = json.loads(
+    (Path(__file__).resolve().parents[3] / "frontend" / "src" / "utils"
+     / "grounding_aliases.json").read_text(encoding="utf-8")
+)["groups"]
 
 
 def _normalize(text: str) -> str:
@@ -1286,8 +1307,12 @@ def _resolve_exec(request: ChatStreamRequest):
     llm_client.num_ctx = family.context_window
     llm_client.temperature = exec_params["temperature"]
     llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
+    llm_client.think = exec_params.get("thinking", False)
+    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
     llm_client.api_key = _active_api_key()
     ACTIVE_CONFIG["model"] = resolved_model
+    print(f"[exec] mode={exec_mode} think={'ON' if llm_client.think else 'OFF'} "
+          f"model={resolved_model} verify={ACTIVE_CONFIG['verify_depth']}")
     generator.max_doc_chars = exec_params["max_doc_chars"]
     generator.max_context_docs = exec_params["max_context_docs"]
     generator.context_budget_ratio = 0.80
@@ -1310,6 +1335,29 @@ def chat_stream(request: ChatStreamRequest):
             return
 
         ret_mode = request.retrieval_mode.lower()
+
+        # ── User-Knowledge shortcut: same/similar question saved before? ──
+        # If found, return the SAVED curated answer directly (no RAG, no LLM
+        # call) — the user-curated answer always wins.
+        try:
+            hit = knowledge_lookup(query)
+            if hit.get("found"):
+                yield _sse({"type": "sources", "sources": hit.get("sources") or [], "is_graph": False})
+                yield _sse({"type": "tokens", "text": hit.get("answer", "")})
+                yield _sse({"type": "meta", "meta": {
+                    "provider": "user-knowledge", "model": "saved-answer",
+                    "profile": request.mode.lower(),
+                    "retrieved_documents": len(hit.get("sources") or []),
+                    "response_time_ms": 0.0, "is_fallback": False,
+                    "knowledge_match": hit.get("matched"),
+                }})
+                yield _sse({"type": "status", "stage": "generate", "message": "Answered from saved knowledge", "done": True})
+                yield _sse({"type": "phase", "phase": "done"})
+                yield _sse({"type": "done"})
+                return
+        except Exception:  # noqa: BLE001 — lookup must never block a real query
+            pass
+
         try:
             family, exec_params, resolved_model = _resolve_exec(request)
         except Exception as e:  # noqa: BLE001
@@ -1319,11 +1367,45 @@ def chat_stream(request: ChatStreamRequest):
 
         style_hint = ""
         original_system_prompt = generator.system_prompt
-        if request.draft_style:
-            style_hint = (
-                f"\n\nDRAFT STYLE INSTRUCTION: Compose the answer in a "
-                f"{request.draft_style} register appropriate for a scientific "
-                f"audit workstation."
+        # Tone templates — "default" sends NO hint so the LLM answers in its
+        # own natural register. The others are soft style guides (reference,
+        # not hard rules) grounded in the real parliamentary/ministry style.
+        if request.draft_style and request.draft_style != "default":
+            tone_templates = {
+                "professional": (
+                    "\n\nTONE: PROFESSIONAL — write in a clear, formal, "
+                    "business-register style. Be precise, objective and "
+                    "confident. Use short structured paragraphs or labelled "
+                    "points. Avoid slang, hedging and first-person asides. "
+                    "Lead with the answer, then supporting detail."
+                ),
+                "parliamentary": (
+                    "\n\nTONE: PARLIAMENTARY — mirror the style of a Lok Sabha "
+                    "ministry reply. Write in the third person: \"The Government "
+                    "has...\", \"As per available information...\", \"It may be "
+                    "stated that...\". Mirror the question's clauses as "
+                    "(a), (b), (c) sub-answers. Preserve figures, names and "
+                    "[Source N] citations verbatim. Stay factual and official; "
+                    "no opinions, no recommendations."
+                ),
+                "concise": (
+                    "\n\nTONE: CONCISE — be brief and direct. Use short bullet "
+                    "points or 1-2 sentence paragraphs. Give only the key facts "
+                    "and figures; drop elaboration, context and repetition. "
+                    "Keep every [Source N] citation."
+                ),
+                "detailed": (
+                    "\n\nTONE: DETAILED — give a comprehensive answer. Cover "
+                    "every aspect of the question with sub-sections or numbered "
+                    "points, include supporting context, figures, dates and "
+                    "institutional roles, and cite all relevant [Source N] "
+                    "references. Depth over brevity, but stay grounded in the "
+                    "sources."
+                ),
+            }
+            style_hint = tone_templates.get(
+                request.draft_style,
+                f"\n\nTONE: Compose the answer in a {request.draft_style} register.",
             )
             generator.system_prompt = (generator.system_prompt or "").rstrip() + style_hint
 
@@ -1352,7 +1434,8 @@ def chat_stream(request: ChatStreamRequest):
 
                 yield _sse({"type": "status", "stage": "embed", "message": "Embedding query…", "done": False})
                 results, timings = pipeline.retrieve(
-                    query, top_k=request.top_k, on_stage=_collect
+                    query, top_k=request.top_k, on_stage=_collect,
+                    doc_types=request.doc_types,
                 )
                 for name, info in stage_events:
                     label = {
@@ -1420,6 +1503,7 @@ def chat_stream(request: ChatStreamRequest):
                     doc_id=s["doc_id"], question=s["question"], answer=s["answer"],
                     score=s["score"], retrieval_method="hybrid", metadata={
                         "ministry": s["ministry"], "subject": s["subject"],
+                        "document_type": s.get("document_type"),
                     },
                 ) for s in sources
             ]
@@ -1473,6 +1557,10 @@ def chat_stream(request: ChatStreamRequest):
             yield _sse({
                 "type": "final",
                 "text": raw_text,
+                # Honest flag: these judge/citation values are streaming-time
+                # placeholders (all zero). Real grounding/judge/rewrite runs
+                # asynchronously via /api/verify after the stream closes.
+                "verify_pending": True,
                 "citation_dropped_count": 0,
                 "citation_dropped": [],
                 "judge_removed_count": 0,
@@ -1509,6 +1597,9 @@ def verify_answer(payload: dict):
     """
     answer = payload.get("answer") or ""
     sources = payload.get("sources") or []
+    # Mode-aware depth: Fast = light (regex only, no LLM judge/rewrite —
+    # instant). Deep = full (regex + LLM judge + rewrite).
+    depth = payload.get("depth") or ACTIVE_CONFIG.get("verify_depth", "full")
     if not answer or not sources:
         return {"text": answer, "grounding": [], "judge_rewritten": False,
                 "judge_removed_count": 0, "error": "missing answer or sources"}
@@ -1522,8 +1613,8 @@ def verify_answer(payload: dict):
         if answer.strip():
             _filtered, citation_dropped = _apply_citation_filter(answer, sources)
 
-        # 3. LLM judge — with timeout so it can't hang
-        if grounding and any(not c.get("found") for c in grounding):
+        # 3. LLM judge — only in DEEP mode (Fast skips the extra LLM call)
+        if depth == "full" and grounding and any(not c.get("found") for c in grounding):
             grounding = _llm_judge_claims(grounding, sources)
 
         # 4. rewrite — remove judge-rejected claims.
@@ -1540,7 +1631,7 @@ def verify_answer(payload: dict):
         ]
         final_text = answer
         judge_rewritten = False
-        if rejected_claims and answer.strip():
+        if depth == "full" and rejected_claims and answer.strip():
             rewrite = _llm_rewrite_answer(
                 answer=answer, rejected_claims=rejected_claims, sources=sources,
             )
@@ -1638,6 +1729,318 @@ def status():
         "retrieval_mode": ACTIVE_CONFIG["retrieval_mode"],
         "gpu": gpu,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic source catalogue — distinct document_types + ministries in the
+# corpus, so the frontend source-filter renders whatever is actually present
+# (new folder/ministry appears automatically, no hardcoded list).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SOURCES_CACHE: dict = {"data": None, "mtime": None}
+
+
+@app.get("/api/sources")
+def sources_catalogue():
+    """Distinct document types + ministries present in the corpus JSONL."""
+    corpus = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
+    if not corpus.exists():
+        return {"types": [], "ministries": []}
+    mtime = corpus.stat().st_mtime
+    if _SOURCES_CACHE["mtime"] == mtime and _SOURCES_CACHE["data"] is not None:
+        return _SOURCES_CACHE["data"]
+
+    from collections import Counter
+
+    types = Counter()
+    ministries = Counter()
+    for line in open(corpus, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+        t = meta.get("document_type") or "document"
+        types[t] += 1
+        m = meta.get("ministry")
+        if m:
+            ministries[str(m)] += 1
+
+    data = {
+        "types": [{"type": t, "count": c} for t, c in types.most_common()],
+        "ministries": [{"ministry": m, "count": c} for m, c in ministries.most_common()],
+    }
+    _SOURCES_CACHE.update({"data": data, "mtime": mtime})
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User-Knowledge API — curated Q&A saved by scientists
+# ─────────────────────────────────────────────────────────────────────────────
+# user-knowledge/ holds {question, answer, sources, saved_at} JSON files.
+# On a NEW query the system FIRST checks this folder for an exact/normalized
+# question match; if found, the SAVED answer is returned directly (the
+# user-curated answer always wins — no RAG, no hallucination). No embeddings
+# needed for this lookup.
+
+USER_KNOWLEDGE_DIR = PROJECT_ROOT / "data" / "user-knowledge"
+
+
+def _normalize_q(text: str) -> str:
+    """Lowercase, strip punctuation/whitespace for question matching."""
+    import re as _re
+
+    t = text.lower()
+    t = _re.sub(r"[^a-z0-9]+", " ", t)
+    return _re.sub(r"\s+", " ", t).strip()
+
+
+def _load_user_knowledge() -> list[dict]:
+    """All saved knowledge entries (question normalized for matching)."""
+    entries = []
+    if not USER_KNOWLEDGE_DIR.exists():
+        return entries
+    for f in sorted(USER_KNOWLEDGE_DIR.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            data["_file"] = f.name
+            data["_q_norm"] = _normalize_q(str(data.get("question", "")))
+            entries.append(data)
+        except Exception:  # noqa: BLE001
+            continue
+    return entries
+
+
+@app.get("/api/knowledge-lookup")
+def knowledge_lookup(q: str):
+    """Find a saved answer for a question. Exact normalized match first,
+    then fuzzy (difflib ratio >= 0.85) fallback. Returns {found, answer,
+    sources, question} or {found: false}."""
+    if not q or not q.strip():
+        return {"found": False}
+    qn = _normalize_q(q)
+    entries = _load_user_knowledge()
+    if not entries:
+        return {"found": False}
+
+    # exact normalized match
+    for e in entries:
+        if e["_q_norm"] == qn:
+            return {"found": True, "answer": e.get("answer", ""),
+                    "sources": e.get("sources", []), "question": e.get("question", q),
+                    "matched": "exact"}
+    # fuzzy fallback (similar wording, e.g. "Doppler Radars" vs
+    # "Doppler Weather Radars" ~0.91; threshold 0.75)
+    import difflib
+
+    best, best_ratio = None, 0.0
+    for e in entries:
+        r = difflib.SequenceMatcher(None, qn, e["_q_norm"]).ratio()
+        if r > best_ratio:
+            best, best_ratio = e, r
+    if best and best_ratio >= 0.75:
+        return {"found": True, "answer": best.get("answer", ""),
+                "sources": best.get("sources", []), "question": best.get("question", q),
+                "matched": "fuzzy", "score": round(best_ratio, 3)}
+    return {"found": False}
+
+
+@app.post("/api/save-knowledge")
+def save_knowledge(payload: dict):
+    """Save a curated Q&A into user-knowledge/<slug>.json. Overwrites if the
+    same question was saved before (so re-saving an edited answer updates it)."""
+    question = (payload.get("question") or "").strip()
+    answer = (payload.get("answer") or "").strip()
+    if not question or not answer:
+        raise HTTPException(status_code=400, detail="question and answer required")
+    import re as _re
+
+    slug = _re.sub(r"[^a-z0-9]+", "_", question.lower())[:60] or "knowledge"
+    dest = USER_KNOWLEDGE_DIR / f"{slug}.json"
+    # Trim sources to citation identity ONLY (doc_id/subject/ministry/type) —
+    # the full document texts are already in the main index; storing them here
+    # would bloat the file and slow every lookup.
+    def _trim(s: dict) -> dict:
+        return {
+            "doc_id": s.get("doc_id") or "",
+            "subject": s.get("subject") or "",
+            "ministry": s.get("ministry") or "",
+            "document_type": s.get("document_type") or "",
+            "score": s.get("score"),
+        }
+    trimmed_sources = [_trim(s) for s in (payload.get("sources") or []) if isinstance(s, dict)]
+    # update existing file (don't create duplicates for same question)
+    entry = {"question": question, "answer": answer,
+             "sources": trimmed_sources, "saved_at": datetime.now().isoformat(timespec="seconds")}
+    dest.write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"[save-knowledge] {dest.name} ({len(trimmed_sources)} sources trimmed)")
+    return {"status": "saved", "file": dest.name}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingest API — scientists / sir can add internal documents via the UI
+# ─────────────────────────────────────────────────────────────────────────────
+_INGEST_STATE: dict = {
+    "running": False,
+    "last": None,          # {"at": iso, "ok": n, "failed": n, "records": n, "message": str}
+    "pending": 0,
+}
+
+
+@app.get("/api/ingest/status")
+def ingest_status():
+    """How many files are waiting in the inbox + whether ingest is running."""
+    inbox = PROJECT_ROOT / "data" / "inbox"
+    pending = 0
+    if inbox.exists():
+        pending = sum(1 for p in inbox.iterdir() if p.is_file())
+    _INGEST_STATE["pending"] = pending
+    return {
+        "running": _INGEST_STATE["running"],
+        "pending": pending,
+        "last": _INGEST_STATE["last"],
+        "inbox": str(inbox),
+    }
+
+
+def _run_inbox_ingest() -> None:
+    """Append inbox files to the corpus, then rebuild + swap the live index."""
+    _INGEST_STATE["running"] = True
+    try:
+        # 1. Convert inbox files IN-PROCESS (same tested ingest_folder path).
+        #    No subprocess: conversion errors show up directly, and there is
+        #    no cwd/env ambiguity between where uploads land and where the
+        #    converter looks.
+        from src.scripts.ingest_folder import ingest_folder as _ingest_folder
+        import src.scripts.ingest_folder as _ingest_folder_mod
+
+        # pin the converter to PROJECT_ROOT paths (it defaults to cwd-relative)
+        _ingest_folder_mod.CORPUS = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
+        _ingest_folder_mod.LOG = PROJECT_ROOT / "data" / "sync.log"
+        _ingest_folder_mod.INDEX_DIR = str(PROJECT_ROOT / "storage" / "hybrid_rag")
+        _ingest_folder_mod.CORPUS.parent.mkdir(parents=True, exist_ok=True)
+
+        inbox_dir = PROJECT_ROOT / "data" / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        conv = _ingest_folder(str(inbox_dir), move_processed=True)
+        print(f"[ingest] conversion: {conv}")
+        ok = conv.get("files", 0)
+        added_count = conv.get("added", 0)
+        failed = conv.get("failed", 0)
+        # 2. INCREMENTALLY update the index (embed only NEW records) and swap
+        #    the live pipeline — no full re-embed of the whole corpus.
+        try:
+            from src.data.loader import DataLoader
+            from src.retrieval.hybrid.pipeline import HybridRAGPipeline
+            import os as _os2
+
+            corpus = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
+            idx_dir = PROJECT_ROOT / "storage" / "hybrid_rag"
+            _ingest_embedded = 0  # how many new vectors went into the index
+            if corpus.exists():
+                records = DataLoader.load_jsonl(corpus)
+                _env2 = dict(_os2.environ)
+                _env2["PYTHONIOENCODING"] = "utf-8"
+                if all((idx_dir / f).exists() for f in (
+                        "vector_store.index", "bm25_index.pkl", "doc_map.json", "pipeline_metadata.json")):
+                    # existing index -> incremental (fast)
+                    new_pipe = HybridRAGPipeline()
+                    new_pipe.load(str(idx_dir))
+                    n = new_pipe.add_records(records)
+                    _ingest_embedded = int(n or 0)
+                    if n:
+                        new_pipe.save(str(idx_dir))
+                    print(f"[ingest] incremental update: {n} new record(s) embedded+added")
+                else:
+                    # no index yet -> full build
+                    new_pipe = HybridRAGPipeline(records=records)
+                    new_pipe.save(str(idx_dir))
+                    _ingest_embedded = len(records)
+                    print(f"[ingest] full build with {len(records):,} records")
+                pipeline.swap(new_pipe)
+                print(f"[ingest] embeddings done: {_ingest_embedded} new vector(s) in live index")
+        except Exception as e:  # noqa: BLE001
+            print(f"[ingest] index rebuild failed: {e}")
+            _INGEST_STATE["last"] = {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "ok": 0, "failed": 0, "records": 0,
+                "message": f"Corpus updated but index rebuild failed: {e}. Restart server to reload.",
+            }
+            return
+
+        _INGEST_STATE["last"] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "ok": ok, "failed": failed, "records": added_count,
+            "message": f"{ok} file(s) ingested, {added_count} record(s) added, "
+                       f"{_ingest_embedded} new record(s) embedded & indexed.",
+        }
+    except Exception as e:  # noqa: BLE001
+        _INGEST_STATE["last"] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "ok": 0, "failed": 0, "records": 0,
+            "message": f"Ingest failed: {e}",
+        }
+    finally:
+        _INGEST_STATE["running"] = False
+
+
+@app.post("/api/ingest")
+def ingest_trigger(payload: dict):
+    """Trigger ingestion of new files in data/inbox (background thread)."""
+    if _INGEST_STATE["running"]:
+        return {"status": "busy"}
+    _threading.Thread(target=_run_inbox_ingest, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.post("/api/upload")
+async def upload_document(request: Request):
+    """Save an uploaded document (PDF/txt/json/jsonl) into data/inbox/.
+
+    Raw body upload (application/octet-stream) — no python-multipart needed.
+    Filename comes as a query param: POST /api/upload?filename=report.pdf
+    Returns the saved file info; then call POST /api/ingest to process.
+    """
+    filename = request.query_params.get("filename", "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename query param required")
+    name = os.path.basename(filename)  # strip any path traversal
+    if not name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    ext = Path(name).suffix.lower()
+    if ext not in (".pdf", ".txt", ".md", ".json", ".jsonl"):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type {ext}")
+
+    # Size guard BEFORE reading the body into RAM — a 2GB file would OOM the
+    # worker (HPC shared nodes). Reject over-large uploads up front via the
+    # Content-Length header, then cap the actual read as a second check.
+    MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
+
+    body = await request.body()
+    if len(body) < 10:
+        raise HTTPException(status_code=400, detail="File is empty")
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
+
+    inbox = PROJECT_ROOT / "data" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    dest = inbox / name
+    dest.write_bytes(body)
+    print(f"[upload] saved {name} ({len(body)} bytes) -> {dest}")
+    return {"status": "saved", "file": name, "size": len(body)}
 
 
 @app.get("/api/graph/build-status")

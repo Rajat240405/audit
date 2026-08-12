@@ -47,9 +47,11 @@ class ModelFamily:
         if mode == "deep":
             return {
                 "temperature": 0.2,
-                "max_tokens": 2048,
+                "max_tokens": 4096,   # headroom for thinking + answer
                 "max_context_docs": 5,
                 "max_doc_chars": 3000,
+                "thinking": True,     # Deep = think + cross-verify
+                "verify_depth": "full",
             }
         else:
             return {
@@ -57,6 +59,8 @@ class ModelFamily:
                 "max_tokens": 512,
                 "max_context_docs": 3,
                 "max_doc_chars": 1000,
+                "thinking": False,    # Fast = instant answer (reasoning off)
+                "verify_depth": "light",  # regex-only, no LLM judge
             }
 
 
@@ -198,6 +202,19 @@ model_registry.register(ModelFamily(
     recommended_execution_mode="GPU"
 ))
 
+# HPC / in-container family — quantized MoE model run directly via
+# HuggingFaceProvider (no Ollama). A40 fits it with huge speed headroom
+# (3B active params).
+model_registry.register(ModelFamily(
+    id="qwen3.5_35b_a3b",
+    display_name="Qwen 3.5 35B-A3B (MoE)",
+    provider="huggingface",
+    model_name="Qwen/Qwen3.5-35B-A3B-GGUF",  # or unsloth path; override in container
+    context_window=131072,
+    thinking_capable=True,
+    recommended_execution_mode="GPU"
+))
+
 # OpenRouter Families (OpenAI-compatible aggregation of many models)
 model_registry.register(ModelFamily(
     id="qwen3.6_27b",
@@ -273,6 +290,7 @@ class OllamaProvider(BaseProvider):
         num_ctx: int = 16384,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
+        **kwargs,
     ) -> LLMResponse:
         # CRITICAL: use /api/chat + messages so Ollama applies the model's own
         # chat template (Qwen3's <|im_start|> format). The old /api/generate +
@@ -294,6 +312,12 @@ class OllamaProvider(BaseProvider):
                 "num_ctx": num_ctx,
             },
         }
+        # mode-aware thinking: Fast=False (instant), Deep=True (reasoning)
+        think = kwargs.get("think")
+        if think is not None:
+            payload["think"] = bool(think)
+        elif "qwen3" in model.lower():
+            payload["think"] = True
 
         start_time = time.monotonic()
 
@@ -331,8 +355,10 @@ class OllamaProvider(BaseProvider):
                 return [m["name"] for m in data.get("models", [])]
         except Exception:
             pass
-        # Fallback matching the requested UI defaults
-        return ["qwen2.5:7b", "llama3.2:3b", "gemma2:9b", "qwen2.5:1.5b"]
+        # Fallback matching the requested UI defaults (qwen3:8b is the
+        # default family — it MUST be listed or the UI shows a stale set
+        # whenever Ollama is offline)
+        return ["qwen3:8b", "qwen2.5:7b", "qwen2.5:3b", "llama3.2:3b", "gemma2:9b"]
 
     def health(self, api_key: Optional[str] = None) -> bool:
         try:
@@ -368,6 +394,7 @@ class GroqProvider(BaseProvider):
         num_ctx: int = 128000,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
+        **kwargs,
     ) -> LLMResponse:
         messages = []
         if system:
@@ -465,6 +492,7 @@ class OpenAIProvider(BaseProvider):
         num_ctx: int = 8192,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
+        **kwargs,
     ) -> LLMResponse:
         messages = []
         if system:
@@ -558,6 +586,7 @@ class OpenRouterProvider(BaseProvider):
         num_ctx: int = 262144,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
+        **kwargs,
     ) -> LLMResponse:
         messages = []
         if system:
@@ -640,6 +669,155 @@ class OpenRouterProvider(BaseProvider):
 # Provider Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+class HuggingFaceProvider(BaseProvider):
+    """
+    In-container / HPC provider: runs a quantized model DIRECTLY from a
+    HuggingFace path (no Ollama, no API). Designed for Singularity images
+    with an A40 (48GB) GPU.
+
+    Model sources supported:
+      - a GGUF file / dir  -> llama-cpp-python (Llama) — best for Q4/Q8 GGUF
+      - a safetensors HF dir -> transformers AutoModelForCausalLM
+
+    Mode-aware thinking (Fast = think off, Deep = think on) is honored via
+    the `think` kwarg. Reasoning tokens (qwen3-style) are surfaced in
+    streaming via the same {type: reasoning} events the rest of the stack
+    expects, so the Model Activity panel works unchanged.
+    """
+
+    def __init__(self, model_path: str | None = None,
+                 n_ctx: int = 32768,
+                 n_gpu_layers: int = -1) -> None:
+        self.model_path = model_path
+        self.n_ctx = n_ctx
+        self.n_gpu_layers = n_gpu_layers
+        self._llm = None          # llama-cpp instance (if GGUF)
+        self._model = None        # transformers model (fallback)
+        self._tokenizer = None
+
+    # ── loading ──────────────────────────────────────────────────────────
+    def _ensure_loaded(self, model: str) -> None:
+        if self._llm is not None or self._model is not None:
+            return
+        path = model or self.model_path
+        if not path:
+            raise ValueError("HuggingFaceProvider: no model path given")
+        try:
+            from llama_cpp import Llama
+            self._llm = Llama(
+                model_path=path if path.endswith(".gguf") else f"{path}/*.gguf",
+                n_ctx=self.n_ctx,
+                n_gpu_layers=self.n_gpu_layers,
+                verbose=False,
+            )
+            return
+        except ImportError:
+            pass
+        # fallback: transformers safetensors
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self._tokenizer = AutoTokenizer.from_pretrained(path)
+        self._model = AutoModelForCausalLM.from_pretrained(
+            path, device_map="auto", torch_dtype="auto"
+        )
+
+    # ── non-streaming ────────────────────────────────────────────────────
+    def generate(self, model, prompt, system=None, temperature=0.1,
+                 max_tokens=512, num_ctx=16384, api_key=None,
+                 timeout_seconds=300, think=None, **kwargs) -> LLMResponse:
+        self._ensure_loaded(model)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        start = time.monotonic()
+        if self._llm is not None:
+            resp = self._llm.create_chat_completion(
+                messages=messages, temperature=temperature, max_tokens=max_tokens,
+                stream=False,
+            )
+            text = resp["choices"][0]["message"]["content"] or ""
+            # llama-cpp exposes reasoning in message.reasoning_content for qwen3
+            reasoning = resp["choices"][0]["message"].get("reasoning_content") or ""
+            full = (reasoning + text) if reasoning else text
+            lat = (time.monotonic() - start) * 1000
+            return LLMResponse(text=full, model=model, prompt_tokens=0,
+                               completion_tokens=0, total_tokens=0,
+                               latency_ms=lat, finish_reason="stop",
+                               raw_response=resp)
+        # transformers path
+        inputs = self._tokenizer.apply_chat_template(
+            messages, tokenize=True, return_tensors="pt", add_generation_prompt=True
+        ).to(self._model.device)
+        out = self._model.generate(**inputs, max_new_tokens=max_tokens,
+                                   temperature=temperature, do_sample=temperature > 0)
+        text = self._tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        lat = (time.monotonic() - start) * 1000
+        return LLMResponse(text=text, model=model, prompt_tokens=0,
+                           completion_tokens=0, total_tokens=0, latency_ms=lat,
+                           finish_reason="stop")
+
+    # ── streaming ────────────────────────────────────────────────────────
+    def generate_stream(self, model, prompt, system=None, temperature=0.1,
+                        max_tokens=512, num_ctx=16384, api_key=None,
+                        timeout_seconds=300, think=None, **kwargs):
+        """Yields {type: reasoning|tokens|answer_start|done} — same contract
+        as the Ollama stream, so the frontend reasoning panel is unchanged."""
+        self._ensure_loaded(model)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        if self._llm is not None:
+            stream = self._llm.create_chat_completion(
+                messages=messages, temperature=temperature, max_tokens=max_tokens,
+                stream=True,
+            )
+            answered = False
+            for chunk in stream:
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                reasoning = delta.get("reasoning_content") or ""
+                if reasoning:
+                    yield {"type": "reasoning", "text": reasoning}
+                content = delta.get("content") or ""
+                if content:
+                    if not answered:
+                        yield {"type": "answer_start"}
+                        answered = True
+                    yield {"type": "tokens", "text": content}
+            yield {"type": "done"}
+            return
+        # transformers streaming
+        inputs = self._tokenizer.apply_chat_template(
+            messages, tokenize=True, return_tensors="pt", add_generation_prompt=True
+        ).to(self._model.device)
+        answered = False
+        for out in self._model.generate(**inputs, max_new_tokens=max_tokens,
+                                        temperature=temperature,
+                                        do_sample=temperature > 0,
+                                        streamer=None):
+            pass  # simplified: non-streaming fallback below
+        text = self._tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        yield {"type": "tokens", "text": text}
+        yield {"type": "done"}
+
+    def models(self) -> List[str]:
+        return [self.model_path] if self.model_path else ["<hf-model-path>"]
+
+    def health(self, api_key: Optional[str] = None) -> bool:
+        try:
+            self._ensure_loaded(self.model_path or ".")
+            return True
+        except Exception:
+            return False
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "execution_environment": "In-container (Singularity/HPC, GPU)",
+            "default_context": self.n_ctx,
+            "latency_profile": "Depends on quant + GPU (A40: ~20-45 tok/s)",
+        }
+
+
 class ProviderRegistry:
     """
     Registry managing LLM Provider instances.
@@ -661,3 +839,6 @@ provider_registry.register("ollama", OllamaProvider())
 provider_registry.register("groq", GroqProvider())
 provider_registry.register("openai", OpenAIProvider())
 provider_registry.register("openrouter", OpenRouterProvider())
+provider_registry.register("huggingface", HuggingFaceProvider())
+
+

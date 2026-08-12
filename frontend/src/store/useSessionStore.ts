@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { ChatMessage, Session } from "@/types";
 
 interface SessionState {
@@ -27,7 +28,9 @@ function sessionTitle(firstMessage?: string): string {
   return t.length > 48 ? `${t.slice(0, 48)}…` : t;
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
+export const useSessionStore = create<SessionState>()(
+  persist(
+    (set) => ({
   sessions: [],
   activeSessionId: null,
   searchQuery: "",
@@ -92,4 +95,29 @@ export const useSessionStore = create<SessionState>((set) => ({
     })),
 
   setSearchQuery: (q) => set({ searchQuery: q }),
-}));
+    }),
+    {
+      name: "incois-sessions",
+      // App startup: DO NOT resume the previous chat. Create a fresh empty
+      // session and make it active (old sessions stay in History). Previous
+      // sessions are never auto-loaded.
+      onRehydrateStorage: () => (_state, _error) => {
+        // CRITICAL: zustand v5 merges the persisted state AFTER this callback,
+        // so any setState here is overwritten back to the old active session.
+        // Defer with setTimeout(0) so the fresh session is created AFTER the
+        // merge — old chats stay in History but the active session is empty.
+        setTimeout(() => {
+          const id = makeId();
+          const now = Date.now();
+          useSessionStore.setState((s) => ({
+            sessions: [
+              { id, title: "New session", pinned: false, createdAt: now, updatedAt: now, messages: [] },
+              ...s.sessions,
+            ],
+            activeSessionId: id,
+          }));
+        }, 0);
+      },
+    }
+  )
+);

@@ -21,6 +21,22 @@ export function useChatStream() {
   const abortRef = useRef<AbortController | null>(null);
   const [running, setRunning] = useState(false);
 
+  // In-place edit sync: after an AI edit / verify rewrite, update the active
+  // session's last assistant message so the sidebar matches the canvas.
+  const syncDraftToSession = useCallback((text: string) => {
+    // update the BOUND message (the one the canvas mirrors), not a guessed
+    // "last assistant" — keeps canvas and sidebar exactly in sync.
+    const draft = useDraftStore.getState();
+    const sessions = useSessionStore.getState();
+    const sid = draft.activeSessionId;
+    const mid = draft.activeMessageId;
+    if (sid && mid) {
+      const active = sessions.sessions.find((s) => s.id === sid);
+      const msg = active?.messages.find((m) => m.id === mid);
+      if (msg && msg.content !== text) sessions.updateMessage(sid, mid, { content: text });
+    }
+  }, []);
+
   const stop = useCallback(() => {
     abortRef.current?.abort();
     draftStore.getState().cancelStream();
@@ -61,6 +77,7 @@ export function useChatStream() {
         createdAt: Date.now(),
       };
       sessions.addMessage(sessionId, assistantMsg);
+      useDraftStore.getState().bindMessage(sessionId, assistantId);
 
       const pipeline = usePipelineStore.getState();
       pipeline.start();
@@ -85,6 +102,7 @@ export function useChatStream() {
         mode: app.mode,
         retrievalMode: app.retrievalMode,
         draftStyle: app.draftStyle,
+        docTypes: app.sourceFilter,
         signal: abort.signal,
         handlers: {
           onStatus: (stage, message, done) => {
@@ -148,6 +166,7 @@ export function useChatStream() {
               // The judge rewrote the answer to remove unsupported claims —
               // replace the draft with the corrected version.
               draft.applyEdit(text);
+              syncDraftToSession(text);
             } else if (text && text !== draft.content && draft.isStreaming) {
               // no rewrite — just commit the stream if it hasn't committed yet
               draft.commitStream();
@@ -199,7 +218,11 @@ export function useChatStream() {
               // and stage instead.
               const baselineContent = finalContent;
               const baselineSources = finalSources;
-              verifyAnswer(baselineContent, baselineSources)
+              verifyAnswer(
+                baselineContent,
+                baselineSources,
+                useAppStore.getState().mode === "deep" ? "full" : "light"
+              )
                 .then((res) => {
                   if (res.error) {
                     useToastStore.getState().push("error", `Verification failed: ${res.error}`);
@@ -227,6 +250,7 @@ export function useChatStream() {
                   }
                   if (res.text && res.text !== draft.content) {
                     draft.applyEdit(res.text);
+                    syncDraftToSession(res.text);
                     useToastStore.getState().push(
                       "success",
                       "✓ Answer verified & cleaned (unsupported claims removed)"

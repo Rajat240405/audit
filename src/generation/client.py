@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
+from src.generation.defaults import default_model_name
 
 
 @dataclass
@@ -50,7 +51,7 @@ class LLMClient:
     def __init__(
         self,
         provider: str = "ollama",
-        model: str = "qwen2.5:7b",
+        model: str | None = None,  # None -> default_model_name() (single source)
         base_url: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
@@ -79,7 +80,7 @@ class LLMClient:
             )
 
         self.provider = provider
-        self.model = model
+        self.model = model if model else default_model_name()
         self.temperature = temperature
         self.max_tokens = max_tokens
         if timeout_seconds is None:
@@ -140,56 +141,27 @@ class LLMClient:
         system: str | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """Generate using Ollama's REST API.
+        """Generate via Ollama — delegates to the registry's OllamaProvider.
 
-        Uses the `messages` format so Ollama applies the model's own chat
-        template (Qwen3's <|im_start|> format). A raw `prompt` string confuses
-        chat-templated models like the fine-tuned incois-qa — they refuse or
-        emit <think> blocks. `messages` fixes both.
+        R4: this used to be a SECOND full Ollama implementation (raw httpx +
+        /api/chat) that drifted from OllamaProvider. Now it is a thin
+        delegation so there is exactly ONE Ollama generate path.
         """
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        from src.generation.registry import provider_registry
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens,
-                "num_ctx": self.num_ctx,
-            },
-        }
-
-        start_time = time.monotonic()
-
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        latency_ms = (time.monotonic() - start_time) * 1000
-
-        # Estimate tokens (Ollama doesn't always return token counts)
-        full_prompt = f"{system}\n\n{prompt}" if system else prompt
-        prompt_tokens = self._estimate_tokens(full_prompt)
-        completion_tokens = self._estimate_tokens(data.get("message", {}).get("content", ""))
-        total_tokens = prompt_tokens + completion_tokens
-
-        return LLMResponse(
-            text=data.get("message", {}).get("content", "").strip(),
+        prov = provider_registry.get("ollama")
+        if prov is None:
+            raise ValueError("Ollama provider not registered")
+        return prov.generate(
             model=self.model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            latency_ms=latency_ms,
-            finish_reason=data.get("done_reason", "stop"),
-            raw_response=data,
+            prompt=prompt,
+            system=system,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            num_ctx=self.num_ctx,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+            **kwargs,
         )
 
     # ── OpenAI / Groq Compatible Implementation ───────────────────────────
@@ -290,6 +262,7 @@ class LLMClient:
                 num_ctx=self.num_ctx,
                 api_key=resolved_key,
                 timeout_seconds=self.timeout_seconds,
+                think=getattr(self, "think", None),
                 **kwargs
             )
 
@@ -328,7 +301,17 @@ class LLMClient:
         self._ensure_base_url()
         resolved_key = api_key or self.api_key
         if self.provider == "ollama":
-            yield from self._stream_ollama(prompt, system, **kwargs)
+            yield from self._stream_ollama(prompt, system, think=getattr(self, "think", None), **kwargs)
+        elif self.provider == "huggingface":
+            prov = provider_registry.get("huggingface")
+            if prov:
+                yield from prov.generate_stream(
+                    model=self.model, prompt=prompt, system=system,
+                    temperature=self.temperature, max_tokens=self.max_tokens,
+                    num_ctx=self.num_ctx, think=getattr(self, "think", None), **kwargs
+                )
+            else:
+                raise ValueError("huggingface provider not registered")
         elif self.provider in ("openai", "groq", "openrouter"):
             yield from self._stream_openai_compatible(
                 prompt, system, api_key=resolved_key, **kwargs
@@ -340,6 +323,7 @@ class LLMClient:
         self,
         prompt: str,
         system: str | None = None,
+        think: bool | None = None,
         **kwargs,
     ):
         """Stream from Ollama's /api/chat (messages + stream: true, NDJSON).
@@ -375,7 +359,9 @@ class LLMClient:
         # the thinking (the Model Activity panel shows it live). Ollama accepts
         # `think` at the TOP LEVEL of the request (not inside options) —
         # unknown option keys are silently ignored, so put it where it counts.
-        if "qwen3" in self.model.lower():
+        if think is not None:
+            payload["think"] = bool(think)  # Fast=False (instant), Deep=True
+        elif "qwen3" in self.model.lower():
             payload["think"] = True
 
         # Inline <think> blocks may span several NDJSON chunks; buffer content

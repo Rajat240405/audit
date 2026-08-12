@@ -44,6 +44,7 @@ from rich.console import Console
 from src.generation.client import LLMClient
 from src.retrieval.result import RetrievedResult
 from src.generation.registry import model_registry
+from src.generation.defaults import default_num_ctx
 
 console = Console()
 
@@ -298,6 +299,19 @@ def build_user_prompt(
             parts.append(f"Ministry: {result.metadata['ministry']}")
         if result.metadata.get("subject"):
             parts.append(f"Subject: {result.metadata['subject']}")
+        # Type-aware hint so the LLM knows what kind of source it is reading.
+        doc_type = (result.metadata.get("document_type") or "").lower()
+        hint = {
+            "technical_report": "Type: INCOIS Technical Report \u2014 scientific methodology, model results, data. Prioritize figures, dates, and quantitative claims.",
+            "annual_report": "Type: INCOIS Annual Report \u2014 year-in-review of activities. Cite the report year and section names where relevant.",
+            "research_publication": "Type: Research publication \u2014 academic paper. Prioritize findings, dates, and data.",
+            "general_report": "Type: INCOIS general report.",
+            "parliamentary_qa": "Type: Parliamentary Q&A \u2014 verbatim question-answer record.",
+            "audit_qa": "Type: Audit Q&A \u2014 verbatim question-answer record.",
+            "document": "Type: Audit document.",
+        }.get(doc_type)
+        if hint:
+            parts.append(hint)
         parts.append("")
 
         q_text = clean_parliament_text(result.question)
@@ -439,7 +453,7 @@ class AnswerGenerator:
         if family:
             effective_window = family.context_window
         else:
-            effective_window = getattr(self.llm_client, "num_ctx", 8192)
+            effective_window = getattr(self.llm_client, "num_ctx", default_num_ctx())
             if isinstance(effective_window, MagicMock):
                 effective_window = 128000
             elif not isinstance(effective_window, (int, float)):
@@ -639,7 +653,7 @@ class AnswerGenerator:
         if family:
             effective_window = family.context_window
         else:
-            effective_window = getattr(self.llm_client, "num_ctx", 8192)
+            effective_window = getattr(self.llm_client, "num_ctx", default_num_ctx())
             if not isinstance(effective_window, (int, float)):
                 effective_window = 8192
 
@@ -670,8 +684,15 @@ class AnswerGenerator:
             stream_prompt = user_prompt
             stream_context = context
             retried_413 = False
+            # Fast mode resilience: some Ollama/qwen3 builds IGNORE think:false
+            # and spend the whole token budget on reasoning, leaving content
+            # EMPTY. We detect that (0 visible tokens from a think=false run)
+            # and retry once with thinking ON so the user always gets an answer.
+            think_disabled = getattr(self.llm_client, "think", None) is False
+            empty_retried = False
             while True:
                 try:
+                    saw_token = False
                     for chunk in self.llm_client.generate_stream(
                         prompt=stream_prompt, system=self.system_prompt
                     ):
@@ -681,6 +702,7 @@ class AnswerGenerator:
                             ev_type = chunk.get("type", "tokens")
                             if ev_type == "tokens":
                                 text = chunk.get("text", "")
+                                saw_token = True
                                 full_text.append(text)
                                 yield {"type": "tokens", "text": text}
                             elif ev_type == "reasoning":
@@ -692,8 +714,17 @@ class AnswerGenerator:
                         else:
                             # legacy string chunk (shouldn't happen after the
                             # client event migration, but keep it safe)
+                            saw_token = True
                             full_text.append(chunk)
                             yield {"type": "tokens", "text": chunk}
+                    # think:false produced NO visible answer -> reasoning ate
+                    # the budget. Retry once with thinking enabled.
+                    if not saw_token and think_disabled and not empty_retried:
+                        empty_retried = True
+                        self.llm_client.think = True
+                        full_text.clear()
+                        print("[gen] think=false gave no answer — retrying with thinking ON")
+                        continue
                     break  # completed normally
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 413 and not retried_413:

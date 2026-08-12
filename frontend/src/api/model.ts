@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { ExecutionMode, ServerStatus } from "@/types";
+import type { ExecutionMode, ServerStatus, SourceItem } from "@/types";
 
 export interface ProviderInfo {
   name: string;
@@ -43,4 +43,71 @@ export async function fetchStatus(): Promise<ServerStatus> {
 export async function setExecutionMode(mode: ExecutionMode): Promise<void> {
   // Mode is passed per-request; kept for API symmetry.
   void mode;
+}
+
+export interface IngestStatus {
+  running: boolean;
+  pending: number;
+  last: {
+    at: string;
+    ok: number;
+    failed: number;
+    records: number;
+    message: string;
+  } | null;
+  inbox: string;
+}
+
+export async function fetchIngestStatus(): Promise<IngestStatus> {
+  return apiFetch<IngestStatus>("/api/ingest/status");
+}
+
+export async function triggerIngest(): Promise<{ status: string }> {
+  return apiFetch("/api/ingest", {
+    method: "POST",
+    body: JSON.stringify({ source: "inbox" }),
+  });
+}
+
+export async function uploadDocument(file: File): Promise<{ status: string; file: string; size: number }> {
+  const res = await fetch(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail ?? `Upload failed (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function saveKnowledge(payload: {
+  question: string;
+  answer: string;
+  sources?: SourceItem[];
+}): Promise<{ status: string; file: string }> {
+  return apiFetch("/api/save-knowledge", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function lookupKnowledge(q: string): Promise<{
+  found: boolean;
+  answer?: string;
+  sources?: SourceItem[];
+  question?: string;
+  matched?: string;
+}> {
+  return apiFetch(`/api/knowledge-lookup?q=${encodeURIComponent(q)}`);
+}
+
+export interface SourceCatalogue {
+  types: Array<{ type: string; count: number }>;
+  ministries: Array<{ ministry: string; count: number }>;
+}
+
+export async function fetchSources(): Promise<SourceCatalogue> {
+  return apiFetch<SourceCatalogue>("/api/sources");
 }

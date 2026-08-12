@@ -253,6 +253,62 @@ class HybridRAGPipeline:
             f"use_chunking={self.use_chunking}"
         )
 
+    def add_records(self, records: list) -> int:
+        """INCREMENTALLY add new records to an already-built index.
+
+        Only records whose question_id is NOT already in the doc_map are
+        embedded and added:
+          - FAISS: new doc embeddings via vector_store.add() (no full rebuild)
+          - long-doc chunks: new chunks embedded + added the same way
+          - BM25: rebuilt with docs + chunks (fast, text-only, ~ms)
+        Returns the number of records actually added.
+        """
+        existing = set(self._doc_map.keys())
+        new_recs = [r for r in records if r.question_id not in existing]
+        if not new_recs:
+            print("[add_records] nothing new to add")
+            return 0
+
+        print(f"[add_records] adding {len(new_recs):,} new record(s) (index already has {len(existing):,})")
+
+        # 1. Add docs to in-memory maps
+        for r in new_recs:
+            self._doc_map[r.question_id] = r
+        self._doc_texts = {doc_id: r.document_content for doc_id, r in self._doc_map.items()}
+
+        # 2. Embed ONLY the new docs
+        texts = [r.document_content for r in new_recs]
+        doc_ids = [r.question_id for r in new_recs]
+        embeddings = self.embedder.embed_batch(texts, batch_size=1, show_progress=False)
+        self.vector_store.add(doc_ids, embeddings)
+        print(f"[add_records] added {len(doc_ids)} embeddings to FAISS")
+
+        # 3. Long-doc chunks for the new long records
+        long_recs = [r for r in new_recs if len(r.answer_text or "") > self.long_doc_chars]
+        new_chunks: list = []
+        if long_recs:
+            for r in long_recs:
+                new_chunks.extend(self._split_long_doc(r))
+            self._long_chunk_map.update({c.chunk_id: c for c in new_chunks})
+            self._long_chunk_texts.update({c.chunk_id: c.chunk_text for c in new_chunks})
+            if new_chunks:
+                c_emb = self.embedder.embed_batch(
+                    [c.chunk_text for c in new_chunks], batch_size=1, show_progress=False
+                )
+                self.vector_store.add([c.chunk_id for c in new_chunks], c_emb)
+                print(f"[add_records] added {len(new_chunks)} long-doc chunks")
+
+        # 4. BM25: rebuild with ALL docs + chunks (text-only, fast)
+        bm25_docs = [
+            (r.question_id, r.question_text, r.answer_text)
+            for r in self._doc_map.values()
+        ]
+        bm25_docs += [(c.chunk_id, "", c.chunk_text) for c in self._long_chunk_map.values()]
+        self.bm25_index.build(bm25_docs)
+
+        print(f"[add_records] done — {len(new_recs)} added, index now has {len(self._doc_map):,} docs")
+        return len(new_recs)
+
     def _split_long_doc(self, r: QARecord) -> list[QAChunk]:
         """Split a long document's answer into ~500-char ANNEXURE chunks."""
         chunks = []
@@ -289,6 +345,7 @@ class HybridRAGPipeline:
         query: str,
         top_k: int = 5,
         on_stage: Optional[Callable[[str, dict], None]] = None,
+        doc_types: Optional[list[str]] = None,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
         Retrieve relevant results with standardized runtime logging (Phase 11).
@@ -342,6 +399,31 @@ class HybridRAGPipeline:
         print(f"RRF candidates : {len(fused_results)}")
         if on_stage:
             on_stage("rrf", {"count": len(fused_results)})
+
+        # ── Stage 4.5: Source-type filter (doc_types) ─────────────────────
+        # If the user asked for specific document types (parliament / INCOIS
+        # reports / MoES reports / combination), keep ONLY candidates whose
+        # record type is allowed. The reranker then scores only those, so the
+        # answer is guaranteed to come from the requested sources.
+        if doc_types:
+            allowed = set(doc_types)
+
+            def _type_of(candidate) -> str | None:
+                doc_id = candidate[0]
+                rec = self._doc_map.get(doc_id)
+                if rec is None and self._chunk_map:
+                    chunk = self._chunk_map.get(doc_id)
+                    if chunk is not None:
+                        rec = self._doc_map.get(chunk.parent_doc_id)
+                if rec is None or rec.metadata is None:
+                    return None
+                return (rec.metadata.document_type or "document").lower()
+
+            before = len(fused_results)
+            fused_results = [c for c in fused_results if (_type_of(c) or "") in allowed]
+            print(f"Source filter ({sorted(allowed)}): {before} -> {len(fused_results)} candidates")
+            if on_stage:
+                on_stage("filter", {"count": len(fused_results)})
 
         # ── Stage 5: Cross-encoder reranking ───────────────────────────────
         if self.use_reranker and fused_results:
@@ -422,6 +504,7 @@ class HybridRAGPipeline:
                             record.metadata.question_type.value
                             if record.metadata.question_type else None
                         ),
+                        "document_type": record.metadata.document_type,
                     },
                     dense_score=dense_score,
                     bm25_score=bm25_score,
@@ -481,6 +564,7 @@ class HybridRAGPipeline:
                             record.metadata.question_type.value
                             if record.metadata.question_type else None
                         ),
+                        "document_type": record.metadata.document_type,
                     },
                     dense_score=dense_score,
                     bm25_score=bm25_score,

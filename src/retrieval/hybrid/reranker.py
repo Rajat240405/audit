@@ -37,8 +37,28 @@ from __future__ import annotations
 import torch
 import numpy as np
 from sentence_transformers import CrossEncoder
+import os
+from pathlib import Path
 
 from src.retrieval.result import RetrievedResult
+
+
+def resolve_rerank_model() -> str:
+    """Pick the cross-encoder reranker to use.
+
+    Priority:
+      1. GRAPHRAG_RERANK_MODEL env var
+      2. A local ``models/bge-reranker-v2-m3`` folder (offline HPC — this is
+         the multilingual BGE reranker, better than MS-MARCO for our corpus)
+      3. Default ``cross-encoder/ms-marco-MiniLM-L-12-v2``
+    """
+    env = os.environ.get("GRAPHRAG_RERANK_MODEL")
+    if env:
+        return env
+    local = Path(__file__).resolve().parents[3] / "models" / "bge-reranker-v2-m3"
+    if local.exists():
+        return str(local)
+    return "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
 
 class CrossEncoderReranker:
@@ -63,7 +83,7 @@ class CrossEncoderReranker:
 
     def __init__(
         self,
-        model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
+        model_name: str | None = None,
         device: str | None = None,
         max_length: int = 512,
     ) -> None:
@@ -82,6 +102,8 @@ class CrossEncoderReranker:
             Maximum token length for the cross-encoder.
             Default 512 handles most Q&A pairs.
         """
+        if model_name is None:
+            model_name = resolve_rerank_model()
         self.model_name = model_name
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_length = max_length

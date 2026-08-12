@@ -94,7 +94,19 @@ data/downloads/
 data/finetune/
 data/finetuned/
 data/finetuned-test/
+data/extracted/
+data/inbox/
+data/incois_reports/
+data/moes_reports/
+data/scanned_ocr/
+data/test_drop/
+data/user-knowledge/
 src/scripts/data/
+
+# Large generated files in data/
+data/*.jsonl
+data/*.csv
+data/*.log
 
 # Keep the data folder structure
 !data/.gitkeep
@@ -110,14 +122,18 @@ indexes/
 !storage/.gitkeep
 
 # ==========================
-# Temporary debug files
+# Evaluation results
 # ==========================
-generation_prompt_debug.txt
+evaluation_results/
 
 # ==========================
-# PDFs for testing
+# Temporary / test artifacts
 # ==========================
+generation_prompt_debug.txt
+smoke_test.md
 test.pdf
+test_up.txt
+test_upload.*
 
 # ==========================
 # Build artifacts

@@ -13,6 +13,7 @@ export interface ChatStreamOptions {
   mode: ExecutionMode;
   retrievalMode: RetrievalMode;
   draftStyle?: DraftStyle | string;
+  docTypes?: string[];
   topK?: number;
   signal?: AbortSignal;
   handlers: StreamHandlers;
@@ -27,6 +28,7 @@ export function streamChat(opts: ChatStreamOptions): void {
       mode: opts.mode,
       retrieval_mode: opts.retrievalMode,
       draft_style: opts.draftStyle && opts.draftStyle !== "default" ? opts.draftStyle : undefined,
+      doc_types: opts.docTypes && opts.docTypes.length ? opts.docTypes : undefined,
       top_k: opts.topK ?? 5,
     },
     opts.handlers,
@@ -47,7 +49,8 @@ export interface EditStreamOptions {
  *  claims removed. */
 export async function verifyAnswer(
   answer: string,
-  sources: SourceItem[]
+  sources: SourceItem[],
+  depth?: "light" | "full"
 ): Promise<{
   text: string;
   grounding: Array<{ text: string; found: boolean; source?: string; note?: string }>;
@@ -57,7 +60,7 @@ export async function verifyAnswer(
 }> {
   return apiFetch("/api/verify", {
     method: "POST",
-    body: JSON.stringify({ answer, sources }),
+    body: JSON.stringify({ answer, sources, depth }),
   });
 }
 

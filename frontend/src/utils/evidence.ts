@@ -25,26 +25,11 @@ const ACRONYM_STOPWORDS = new Set([
   "THE", "AND", "FOR", "NOT", "ARE", "WAS", "HAS", "ITS", "YOU", "OUR",
 ]);
 
-// Equivalent surface forms of the same entity (parity with the backend
-// _ALIAS_GROUPS) so "48 DWRs" matches a document that says
-// "48 Doppler Weather Radars", and a table listing "AWS 675" matches "675 AWS".
-const ENTITY_GROUPS: string[][] = [
-  ["dwr", "doppler weather radar", "doppler weather radars"],
-  ["aws", "automatic weather station", "automatic weather stations"],
-  ["arg", "automatic rain gauge", "automatic rain gauges"],
-  ["adcp", "acoustic doppler current profiler", "acoustic doppler current profilers"],
-  ["gnss", "global navigation satellite system", "global navigation satellite systems"],
-  ["incois", "indian national centre for ocean information services"],
-  ["imd", "india meteorological department", "indian meteorological department"],
-  ["isro", "indian space research organisation"],
-  ["niot", "national institute of ocean technology"],
-  ["cmlre", "centre for marine living resources and ecology", "center for marine living resources and ecology"],
-  ["csir nio", "national institute of oceanography"],
-  ["grse", "garden reach shipbuilders", "garden reach shipbuilders and engineers"],
-  ["cwc", "central water commission"],
-  ["ndma", "national disaster management authority"],
-  ["mission mausam", "mission mausam scheme"],
-];
+// Equivalent surface forms of the same entity — SINGLE SOURCE of truth:
+// frontend/src/utils/grounding_aliases.json (loaded by backend too). Editing
+// the JSON is the ONLY way to change aliases; never fork this list here.
+import groundingAliases from "./grounding_aliases.json";
+const ENTITY_GROUPS: string[][] = groundingAliases.groups;
 
 function normalizeText(text: string): string {
   return text

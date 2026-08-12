@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import { streamEdit } from "@/api/chat";
 import { useAppStore } from "@/store/useAppStore";
 import { useDraftStore } from "@/store/useDraftStore";
+import { useSessionStore } from "@/store/useSessionStore";
 import { useToastStore } from "@/store/useToastStore";
 import { useEditStore } from "@/store/useEditStore";
 
@@ -62,7 +63,17 @@ export function useEditDraft() {
   const accept = useCallback(() => {
     const p = useEditStore.getState().pendingEdit;
     if (p) {
-      useDraftStore.getState().applyEdit(p.revised, `AI edit: ${p.label}`);
+      useDraftStore.getState().applyEdit(p.revised);
+      // In-place: update the ACTIVE session's last assistant message so the
+      // sidebar transcript shows the edited answer too (no new version).
+      const sessions = useSessionStore.getState();
+      const active = sessions.sessions.find((s) => s.id === sessions.activeSessionId);
+      if (active) {
+        const lastAssist = [...active.messages].reverse().find((m) => m.role === "assistant");
+        if (lastAssist) {
+          sessions.updateMessage(active.id, lastAssist.id, { content: p.revised });
+        }
+      }
       useToastStore.getState().push("success", `✓ Accepted "${p.label}"`);
       useEditStore.getState().accept();
     }

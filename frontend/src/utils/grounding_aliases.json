@@ -1,0 +1,23 @@
+{
+  "_comment": "SINGLE SOURCE OF TRUTH for grounding alias groups. Loaded by BOTH the backend (server.py _ALIAS_GROUPS) and the frontend (evidence.ts ENTITY_GROUPS). NEVER edit the two hardcoded copies — edit this file only.",
+  "groups": [
+    ["isro", "indian space research organisation"],
+    ["niot", "national institute of ocean technology"],
+    ["incois", "indian national centre for ocean information services"],
+    ["imd", "india meteorological department", "indian meteorological department"],
+    ["dwr", "doppler weather radar", "doppler weather radars"],
+    ["cmlre", "centre for marine living resources and ecology", "center for marine living resources and ecology"],
+    ["aws", "automatic weather station", "automatic weather stations"],
+    ["arg", "automatic rain gauge", "automatic rain gauges"],
+    ["adcp", "acoustic doppler current profiler", "acoustic doppler current profilers"],
+    ["gnss", "global navigation satellite system", "global navigation satellite systems"],
+    ["csir nio", "national institute of oceanography"],
+    ["grse", "garden reach shipbuilders", "garden reach shipbuilders and engineers"],
+    ["cwc", "central water commission"],
+    ["ndma", "national disaster management authority"],
+    ["matsya 6000", "matsya 6000 meters", "matsya"],
+    ["mission mausam", "mission mausam scheme"],
+    ["icmam", "integrated coastal and marine area management"],
+    ["iczm", "integrated coastal zone management"]
+  ]
+}

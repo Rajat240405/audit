@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
+import { useSessionStore } from "@/store/useSessionStore";
 import { useAppStore } from "@/store/useAppStore";
 import { DraftCanvas } from "@/components/workspace/DraftCanvas";
 import { NotesEditor } from "@/components/workspace/NotesEditor";
@@ -92,7 +93,26 @@ export function Workspace() {
 
       <div className="min-h-0 flex-1">
         {tab === "draft" && <DraftCanvas />}
-        {tab === "history" && <HistoryPanel onRestored={() => setTab("draft")} />}
+        {tab === "history" && (
+          <HistoryPanel
+            onOpen={() => {
+              // opening a session: load its LAST assistant answer onto the
+              // canvas, then jump to the draft tab
+              const sessions = useSessionStore.getState();
+              const active = sessions.sessions.find((s) => s.id === sessions.activeSessionId);
+              const last = active
+                ? [...active.messages].reverse().find((m) => m.role === "assistant")
+                : undefined;
+              if (last) {
+                useDraftStore.getState().setDraft(last.content || "", last.sources ?? []);
+                useDraftStore.getState().bindMessage(active?.id ?? null, last.id ?? null);
+              } else {
+                useDraftStore.getState().reset();
+              }
+              setTab("draft");
+            }}
+          />
+        )}
         {tab === "sources" && (
           <div className="h-full">
             <EvidencePanel />

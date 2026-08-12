@@ -24,9 +24,28 @@ import numpy as np
 import numpy.typing as npt
 from sentence_transformers import SentenceTransformer
 import torch
+import os
+from pathlib import Path
 
 # Global model singletons to prevent redundant reloading
 _MODEL_CACHE: Dict[tuple[str, str], SentenceTransformer] = {}
+
+
+def resolve_embed_model() -> str:
+    """Pick the embedding model to use.
+
+    Priority:
+      1. GRAPHRAG_EMBED_MODEL env var (e.g. /path/to/models/bge-m3)
+      2. A local ``models/bge-m3`` folder next to the repo (offline HPC)
+      3. Default ``BAAI/bge-m3`` (downloads on first use)
+    """
+    env = os.environ.get("GRAPHRAG_EMBED_MODEL")
+    if env:
+        return env
+    local = Path(__file__).resolve().parents[3] / "models" / "bge-m3"
+    if local.exists():
+        return str(local)
+    return "BAAI/bge-m3"
 
 
 class Embedder:
@@ -37,7 +56,7 @@ class Embedder:
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-m3",
+        model_name: str | None = None,
         device: str | None = None,
         normalize: bool = True,
     ) -> None:
@@ -52,6 +71,8 @@ class Embedder:
         normalize : bool
             If True, L2-normalize embeddings to unit length.
         """
+        if model_name is None:
+            model_name = resolve_embed_model()
         self.model_name = model_name
         if device is not None:
             self.device = device or "cpu"

@@ -125,7 +125,7 @@ def get_pipeline(
     if effective_filter:
         original_count = len(records)
         records = filter_records_by_ministry(records, effective_filter)
-        console.print(f"[cyan]Ministry filter applied ({effective_filter}): {original_count:,} → {len(records):,} records[/cyan]")
+        console.print(f"[cyan]Ministry filter applied ({effective_filter}): {original_count:,} -> {len(records):,} records[/cyan]")
 
     console.print(f"[green]Loaded {len(records):,} records.[/green]")
 
@@ -173,6 +173,8 @@ def build(data_file: str, index_dir: str, rebuild: bool, ministry_filter: str | 
 @click.option("--show-prompt", is_flag=True, help="Show the full LLM prompt")
 @click.option("--show-trace", is_flag=True, help="Show retrieval trace")
 @click.option("--llm-model", type=str, default="qwen3:8b", help="LLM model name")
+@click.option("--mode", type=click.Choice(["fast", "deep"]), default="fast",
+              help="Fast = thinking off (instant), Deep = thinking on + full verify")
 def query(
     question: str,
     top_k: int,
@@ -181,6 +183,7 @@ def query(
     show_prompt: bool,
     show_trace: bool,
     llm_model: str,
+    mode: str,
 ) -> None:
     """
     Query the Hybrid RAG system with a question.
@@ -244,6 +247,8 @@ def query(
 
     # Check if LLM is available
     llm_client = LLMClient(model=llm_model)
+    # mode-aware thinking: fast=off (instant), deep=on (reasoning)
+    llm_client.think = (mode == "deep")
     if not llm_client.check_health():
         console.print("\n[yellow]⚠ LLM not available.[/yellow]")
         console.print("  Start Ollama:  ollama serve")
@@ -309,7 +314,7 @@ def interactive(data_file: str, top_k: int) -> None:
             continue
 
         results, timings = pipeline.retrieve(question, top_k=top_k)
-        console.print(f"[dim]→ Retrieved {len(results)} results in {timings.total_ms:.0f}ms[/dim]")
+        console.print(f"[dim]-> Retrieved {len(results)} results in {timings.total_ms:.0f}ms[/dim]")
 
         if results:
             top = results[0]

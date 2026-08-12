@@ -8,6 +8,9 @@ interface AppState {
   mode: ExecutionMode;
   retrievalMode: RetrievalMode;
   draftStyle: DraftStyle;
+  /** Source-type filter for retrieval: [] = all, else list of document_types
+   *  e.g. ["parliamentary_qa"], ["annual_report","technical_report"], ... */
+  sourceFilter: string[];
   gpu: string;
   backendOnline: boolean | null; // null = unknown
   // header / global flags
@@ -20,6 +23,7 @@ interface AppState {
   setMode: (m: ExecutionMode) => void;
   setRetrievalMode: (m: RetrievalMode) => void;
   setDraftStyle: (s: DraftStyle) => void;
+  setSourceFilter: (f: string[]) => void;
   setGpu: (g: string) => void;
   setBackendOnline: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
@@ -33,6 +37,7 @@ export const useAppStore = create<AppState>((set) => ({
   mode: "fast",
   retrievalMode: "hybrid",
   draftStyle: "default",
+  sourceFilter: [],
   gpu: "CPU",
   backendOnline: null,
   settingsOpen: false,
@@ -44,6 +49,7 @@ export const useAppStore = create<AppState>((set) => ({
   setMode: (m) => set({ mode: m }),
   setRetrievalMode: (m) => set({ retrievalMode: m }),
   setDraftStyle: (s) => set({ draftStyle: s }),
+  setSourceFilter: (f) => set({ sourceFilter: f }),
   setGpu: (g) => set({ gpu: g }),
   setBackendOnline: (v) => set({ backendOnline: v }),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
