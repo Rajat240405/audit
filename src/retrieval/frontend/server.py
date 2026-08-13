@@ -359,23 +359,27 @@ def extract_informative_summary(answer_text: str, subject_text: str) -> str:
 # REST Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SPA_RESERVED_PREFIXES = ("api", "health", "assets")
+
+
+def _serve_spa_index() -> HTMLResponse:
+    """Vite index.html (or legacy template). Used for / and client-route refresh."""
+    dist = PROJECT_ROOT / "frontend" / "dist"
+    dist_index = dist / "index.html"
+    if dist_index.exists():
+        return HTMLResponse(dist_index.read_text(encoding="utf-8"))
+    html_path = Path(__file__).parent / "index.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="index.html template not found")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
     """Serve the React workstation (production build) if present, else the
     legacy single-file HTML client. Lets `npm run build` output be served by
     the FastAPI backend at the same origin (no CORS, no separate host)."""
-    # Production: serve the Vite-built React app from frontend/dist
-    dist = PROJECT_ROOT / "frontend" / "dist"
-    dist_index = dist / "index.html"
-    if dist_index.exists():
-        return HTMLResponse(dist_index.read_text(encoding="utf-8"))
-
-    # Fallback: legacy monolithic index.html
-    html_path = Path(__file__).parent / "index.html"
-    if not html_path.exists():
-        raise HTTPException(status_code=404, detail="index.html template not found")
-    with open(html_path, encoding="utf-8") as f:
-        return f.read()
+    return _serve_spa_index()
 
 
 @app.get("/assets/{path:path}")
@@ -2221,6 +2225,19 @@ def export_document(payload: dict):
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{title}.md"'},
     )
+
+
+@app.get("/{path:path}", response_class=HTMLResponse)
+async def spa_history_fallback(path: str):
+    """SPA history fallback: hard refresh on /workspace, /settings, etc.
+
+    Must not swallow /api, /health, or /assets (those have their own routes;
+    unknown paths under those prefixes stay 404).
+    """
+    first = (path.split("/", 1)[0] or "").lower()
+    if first in _SPA_RESERVED_PREFIXES:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _serve_spa_index()
 
 
 def start_server(port: int = 8000) -> None:

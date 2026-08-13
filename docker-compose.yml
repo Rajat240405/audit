@@ -1,0 +1,41 @@
+# Local Windows test: application container only.
+# Ollama stays on the Windows host. The app reaches it via
+#   http://host.docker.internal:11434/v1
+# (existing OpenAI-compatible client — no Ollama baked into the image).
+#
+# Same image on HPC: override VLLM_BASE_URL / VLLM_MODEL / APP_DEFAULT_PROVIDER
+# to point at an external vLLM process. Do not add a vLLM service here.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: incois-audit-app:local
+    container_name: incois-audit-app
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      APP_DATA_DIR: /data
+      APP_INDEX_DIR: /storage/hybrid_rag
+      APP_MODEL_DIR: /models
+      APP_MODE: serve
+      # OpenAI-compatible path to host Ollama (not native /api/chat).
+      # Later: VLLM_BASE_URL=http://<vllm-host>:8001  VLLM_MODEL=Qwen3.6-27B
+      APP_DEFAULT_PROVIDER: vllm
+      VLLM_BASE_URL: http://host.docker.internal:11434/v1
+      VLLM_MODEL: qwen3:8b
+      # Docker-only catalogue (adds host Ollama qwen3:8b under provider vllm).
+      # HPC / native runs leave this unset and use config/models.yaml.
+      MODEL_CATALOG: /app/config/models.docker.yaml
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: /models/hf-cache
+    volumes:
+      - ./data:/data
+      - ./storage/hybrid_rag:/storage/hybrid_rag
+      - ./models:/models
+    working_dir: /app
+    # Single replica. Do not scale this service.
+    restart: unless-stopped

@@ -1,0 +1,43 @@
+# Keep the application image small and free of host data / secrets.
+.git
+.gitignore
+.venv
+venv
+env
+ENV
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/__pycache__
+**/*.pyc
+**/.coverage
+htmlcov
+.cache
+.huggingface
+hf_cache
+
+# Host runtime data — mount at run time, do not bake in.
+data
+storage
+models
+*.log
+generation_prompt_debug.txt
+.env
+.env.*
+!.env.example
+
+# Frontend sources are copied explicitly; skip node_modules / prior builds.
+frontend/node_modules
+frontend/dist
+
+# Docs / tests / notebooks not needed at runtime
+tests
+benchmarks
+*.md
+!README.md
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db

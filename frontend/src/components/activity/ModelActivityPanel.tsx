@@ -177,7 +177,7 @@ export function ModelActivityPanel() {
             ) : phase === "thinking" ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                Model is reasoning… (qwen3 thinks before answering; this can take a bit)
+                {reasoningWaitMessage(model)}
               </>
             ) : phase === "generating" || phase === "done" ? (
               "No reasoning streamed — model produced the answer directly."

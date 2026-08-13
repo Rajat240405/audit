@@ -55,8 +55,8 @@ class ModelFamily:
         """
         Adjust execution parameters based on Fast/Deep profiles.
         Identical across all models (independent of thinking capabilities):
-        - Fast Profile: temperature = 0.0, max_tokens = 512, top-k docs = 3, max characters = 1000.
-        - Deep Profile: temperature = 0.2, max_tokens = 2048, top-k docs = 5, max characters = 3000.
+        - Fast Profile: temperature = 0.0, max_tokens = 2048, top-k docs = 3, max characters = 1000.
+        - Deep Profile: temperature = 0.2, max_tokens = 4096, top-k docs = 5, max characters = 3000.
         This provides a symmetric speed vs quality boundary across all endpoints.
         """
         mode = mode.lower().strip()
@@ -72,7 +72,7 @@ class ModelFamily:
         else:
             return {
                 "temperature": 0.0,
-                "max_tokens": 512,
+                "max_tokens": 2048,
                 "max_context_docs": 3,
                 "max_doc_chars": 1000,
                 "thinking": False,    # Fast = instant answer (reasoning off)
