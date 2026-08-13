@@ -42,7 +42,9 @@ def resolve_embed_model() -> str:
     env = os.environ.get("GRAPHRAG_EMBED_MODEL")
     if env:
         return env
-    local = Path(__file__).resolve().parents[3] / "models" / "bge-m3"
+    from src.utils.app_paths import model_dir
+
+    local = model_dir() / "bge-m3"
     if local.exists():
         return str(local)
     return "BAAI/bge-m3"

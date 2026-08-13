@@ -69,7 +69,7 @@ class HybridRAGPipeline:
         bm25_index: BM25Index | None = None,
         reranker: CrossEncoderReranker | None = None,
         dense_top_k: int = 50,
-        fusion_top_k: int = 20,
+        fusion_top_k: int = 50,
         rrf_k: int = 60,
         use_reranker: bool = True,
         use_chunking: bool = False,  # Default to Document-based for backwards compatibility
@@ -413,6 +413,10 @@ class HybridRAGPipeline:
                 chunk = self._chunk_map.get(doc_id)
                 if chunk is not None:
                     rec = self._doc_map.get(chunk.parent_doc_id)
+            if rec is None and self._long_chunk_map:
+                chunk = self._long_chunk_map.get(doc_id)
+                if chunk is not None:
+                    rec = self._doc_map.get(chunk.parent_doc_id)
             return rec
 
         def _type_of(candidate) -> str | None:
@@ -471,7 +475,10 @@ class HybridRAGPipeline:
         # ── Stage 5: Cross-encoder reranking ───────────────────────────────
         if self.use_reranker and fused_results:
             t_rerank = time.perf_counter()
-            active_texts = self._chunk_texts if self.use_chunking else self._doc_texts
+            active_texts = dict(self._doc_texts)
+            if self.use_chunking:
+                active_texts.update(self._chunk_texts)
+            active_texts.update(self._long_chunk_texts)
             
             reranked_results = self.reranker.rerank(
                 query=query,
@@ -556,47 +563,49 @@ class HybridRAGPipeline:
                 ))
         else:
             print(f"Parent aggregation : {len(final_results)}")
-            # Standard document-level construction.
-            # GLM #5b: resolve long-doc chunks back to their parent doc so the
-            # LLM gets the WHOLE document (not just the matching section), and
-            # include the matched section text so the key figure isn't lost.
-            chunk_answers: dict[str, str] = {}   # parent_id -> matched chunk text
-            for doc_id, _score in final_results:
+            # Chunk hits keep parent doc_id for attribution, but evidence is
+            # ONLY the matched chunks (never the 400k parent body).
+            grouped: dict[str, dict] = {}
+            for doc_id, score in final_results:
                 chunk = self._long_chunk_map.get(doc_id)
                 if chunk is not None:
-                    chunk_answers.setdefault(chunk.parent_doc_id, chunk.chunk_text)
-            for rank, (doc_id, score) in enumerate(final_results):
-                record = self._doc_map.get(doc_id)
-                if record is None:
-                    # it's a long-doc chunk -> resolve to parent
-                    chunk = self._long_chunk_map.get(doc_id)
-                    if chunk is None:
-                        continue
-                    record = self._doc_map.get(chunk.parent_doc_id)
+                    pid = chunk.parent_doc_id
+                    record = self._doc_map.get(pid)
                     if record is None:
                         continue
-                    doc_id = chunk.parent_doc_id
-                    score = score  # keep chunk's retrieval score for ranking
-                    chunk_answers.setdefault(doc_id, chunk.chunk_text)
+                    g = grouped.setdefault(pid, {"record": record, "score": score, "chunks": []})
+                    if chunk.chunk_text not in g["chunks"]:
+                        g["chunks"].append(chunk.chunk_text)
+                    g["score"] = max(g["score"], score)
+                    continue
+                record = self._doc_map.get(doc_id)
+                if record is None:
+                    continue
+                g = grouped.setdefault(doc_id, {"record": record, "score": score, "chunks": []})
+                g["score"] = max(g["score"], score)
 
-                dense_score = next((s for d_id, s in dense_results if d_id == doc_id), None)
-                bm25_score = next((s for d_id, s in bm25_results if d_id == doc_id), None)
-                rrf_score = next((s for d_id, s in fused_results if d_id == doc_id), None)
+            for pid, g in grouped.items():
+                record = g["record"]
+                long_doc = len(record.answer_text or "") > self.long_doc_chars
+                if g["chunks"]:
+                    evidence = "\n\n".join(g["chunks"])
+                elif long_doc:
+                    from src.generation.generator import extract_relevant_evidence
 
-                # GLM #5b: if a long-doc chunk matched, prepend that section to
-                # the full answer so the buried figure is present for the LLM.
-                matched_section = chunk_answers.get(doc_id)
-                full_answer = record.answer_text
-                if matched_section and matched_section not in full_answer:
-                    full_answer = (
-                        f"[MATCHED SECTION OF THIS ANSWER]\n{matched_section}\n\n"
-                        f"[FULL ANSWER]\n{full_answer}"
+                    evidence = extract_relevant_evidence(
+                        record.answer_text or "", query, max_chars=2000
                     )
+                else:
+                    evidence = record.answer_text
+
+                dense_score = next((s for d_id, s in dense_results if d_id == pid), None)
+                bm25_score = next((s for d_id, s in bm25_results if d_id == pid), None)
+                rrf_score = next((s for d_id, s in fused_results if d_id == pid), None)
 
                 retrieved.append(RetrievedResult(
-                    doc_id=doc_id,
+                    doc_id=pid,
                     question=record.question_text,
-                    answer=full_answer,
+                    answer=evidence,
                     score=score,
                     retrieval_method="rrf_fusion",
                     metadata={
@@ -612,7 +621,7 @@ class HybridRAGPipeline:
                     dense_score=dense_score,
                     bm25_score=bm25_score,
                     rrf_score=rrf_score,
-                    rerank_score=score if self.use_reranker else None,
+                    rerank_score=g["score"] if self.use_reranker else None,
                 ))
 
         timings.total_ms = (time.perf_counter() - total_start) * 1000
@@ -629,29 +638,35 @@ class HybridRAGPipeline:
         self.bm25_index.save(path / "bm25_index")
 
         # Save metadata properties
-        meta = {
-            "use_chunking": self.use_chunking,
-            "embedding_dim": self._embedding_dim,
-        }
-        with open(path / "pipeline_metadata.json", "w") as f:
-            json.dump(meta, f)
-
-        # Save doc_map (portable JSON)
+        from src.utils.atomic_io import dump_json_atomic, write_bytes_atomic
         import orjson
-        doc_map_data = {
-            doc_id: record.model_dump(mode="json")
-            for doc_id, record in self._doc_map.items()
-        }
-        with open(path / "doc_map.json", "wb") as f:
-            f.write(orjson.dumps(doc_map_data))
 
-        # Save chunk map
-        chunk_map_data = {
-            chunk_id: chunk.model_dump(mode="json")
-            for chunk_id, chunk in self._chunk_map.items()
-        }
-        with open(path / "chunk_map.json", "wb") as f:
-            f.write(orjson.dumps(chunk_map_data))
+        dump_json_atomic(
+            path / "pipeline_metadata.json",
+            {"use_chunking": self.use_chunking, "embedding_dim": self._embedding_dim},
+        )
+        write_bytes_atomic(
+            path / "doc_map.json",
+            orjson.dumps({
+                doc_id: record.model_dump(mode="json")
+                for doc_id, record in self._doc_map.items()
+            }),
+        )
+        write_bytes_atomic(
+            path / "chunk_map.json",
+            orjson.dumps({
+                chunk_id: chunk.model_dump(mode="json")
+                for chunk_id, chunk in self._chunk_map.items()
+            }),
+        )
+        write_bytes_atomic(
+            path / "long_chunk_map.json",
+            orjson.dumps({
+                chunk_id: chunk.model_dump(mode="json")
+                for chunk_id, chunk in self._long_chunk_map.items()
+            }),
+        )
+        self._write_build_meta(path)
 
         print(f"✓ Saved Hybrid RAG pipeline (use_chunking={self.use_chunking}) to {path}")
 
@@ -695,7 +710,76 @@ class HybridRAGPipeline:
             }
             self._chunk_texts = {chunk_id: c.chunk_text for chunk_id, c in self._chunk_map.items()}
 
+        # P1.3 — restore long-doc chunks (missing file = older index, empty map)
+        self._long_chunk_map = {}
+        self._long_chunk_texts = {}
+        if (path / "long_chunk_map.json").exists():
+            with open(path / "long_chunk_map.json", "rb") as f:
+                long_data = orjson.loads(f.read())
+            self._long_chunk_map = {
+                chunk_id: QAChunk.model_validate(data)
+                for chunk_id, data in long_data.items()
+            }
+            self._long_chunk_texts = {
+                chunk_id: c.chunk_text for chunk_id, c in self._long_chunk_map.items()
+            }
+
+        self._warn_if_build_meta_mismatch(path)
+
         print(f"✓ Loaded Hybrid RAG pipeline (use_chunking={self.use_chunking}) from {path}")
+
+    def _write_build_meta(self, path: Path) -> None:
+        """Fingerprint this index so HPC can reject embed-model / dim mismatch."""
+        import hashlib
+        from datetime import datetime, timezone
+
+        hasher = hashlib.sha256()
+        for doc_id in sorted(self._doc_map.keys()):
+            rec = self._doc_map[doc_id]
+            hasher.update(doc_id.encode("utf-8", errors="replace"))
+            hasher.update(b"\0")
+            hasher.update((rec.question_text or "").encode("utf-8", errors="replace"))
+            hasher.update(b"\0")
+            hasher.update((rec.answer_text or "")[:512].encode("utf-8", errors="replace"))
+            hasher.update(b"\n")
+
+        meta = {
+            "embed_model": getattr(self.embedder, "model_name", None),
+            "embed_dim": self._embedding_dim,
+            "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "row_count": len(self._doc_map),
+            "long_chunk_count": len(self._long_chunk_map),
+            "chunk_count": len(self._chunk_map),
+            "use_chunking": self.use_chunking,
+            "fusion_top_k": self.fusion_top_k,
+            "rows_sha256": hasher.hexdigest(),
+        }
+        from src.utils.atomic_io import dump_json_atomic
+
+        dump_json_atomic(path / "build_meta.json", meta, indent=2)
+
+    def _warn_if_build_meta_mismatch(self, path: Path) -> None:
+        meta_path = path / "build_meta.json"
+        if not meta_path.exists():
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        live_dim = getattr(self.embedder, "embedding_dim", self._embedding_dim)
+        saved_dim = meta.get("embed_dim")
+        if saved_dim is not None and live_dim is not None and int(saved_dim) != int(live_dim):
+            print(
+                f"[build_meta] WARNING: index embed_dim={saved_dim} "
+                f"but live embedder dim={live_dim}. Rebuild the index."
+            )
+        saved_model = meta.get("embed_model")
+        live_model = getattr(self.embedder, "model_name", None)
+        if saved_model and live_model and str(saved_model) != str(live_model):
+            print(
+                f"[build_meta] WARNING: index built with {saved_model!r} "
+                f"but live embedder is {live_model!r}."
+            )
 
     def __len__(self) -> int:
         """Return the number of parent indexed documents."""

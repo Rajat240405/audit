@@ -55,7 +55,9 @@ def resolve_rerank_model() -> str:
     env = os.environ.get("GRAPHRAG_RERANK_MODEL")
     if env:
         return env
-    local = Path(__file__).resolve().parents[3] / "models" / "bge-reranker-v2-m3"
+    from src.utils.app_paths import model_dir
+
+    local = model_dir() / "bge-reranker-v2-m3"
     if local.exists():
         return str(local)
     return "cross-encoder/ms-marco-MiniLM-L-12-v2"

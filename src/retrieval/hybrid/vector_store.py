@@ -29,6 +29,7 @@ Design Decisions
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import faiss
@@ -188,11 +189,16 @@ class FAISSVectorStore:
             raise RuntimeError("Cannot save empty index.")
 
         path = Path(path)
-        # Save FAISS index
-        faiss.write_index(self._index, str(path.with_suffix(".index")))
-        # Save doc_id mapping
-        with open(path.with_suffix(".ids"), "w", encoding="utf-8") as f:
-            json.dump(self._doc_ids, f)
+        from src.utils.atomic_io import write_text_atomic
+
+        index_dest = path.with_suffix(".index")
+        tmp_index = index_dest.with_name(index_dest.name + ".tmp")
+        faiss.write_index(self._index, str(tmp_index))
+        with open(tmp_index, "r+b") as fh:
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_index, index_dest)
+        write_text_atomic(path.with_suffix(".ids"), json.dumps(self._doc_ids))
 
     def load(self, path: str | Path) -> None:
         """

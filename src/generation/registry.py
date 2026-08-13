@@ -314,10 +314,12 @@ class OllamaProvider(BaseProvider):
         # whenever Ollama is offline)
         return ["qwen3:8b", "qwen2.5:7b", "qwen2.5:3b", "llama3.2:3b", "gemma2:9b"]
 
-    def health(self, api_key: Optional[str] = None) -> bool:
+    def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
+        """Same signature as OpenAICompatibleProvider.health (LLMClient always passes base_url)."""
+        url = (base_url or self.base_url).rstrip("/")
         try:
             with httpx.Client(timeout=5) as client:
-                response = client.get(f"{self.base_url}/api/tags")
+                response = client.get(f"{url}/api/tags")
                 return response.status_code == 200
         except Exception:
             return False
@@ -464,7 +466,7 @@ class HuggingFaceProvider(BaseProvider):
     def models(self) -> List[str]:
         return [self.model_path] if self.model_path else ["<hf-model-path>"]
 
-    def health(self, api_key: Optional[str] = None) -> bool:
+    def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
         try:
             self._ensure_loaded(self.model_path or ".")
             return True
@@ -520,6 +522,15 @@ class OpenAICompatibleProvider(BaseProvider):
             self.base_url = (os.environ.get("VLLM_BASE_URL") or "http://localhost:8001").rstrip("/")
         return self.base_url
 
+    @staticmethod
+    def chat_completions_url(base: str) -> str:
+        from src.generation.openai_url import chat_completions_url as _join
+
+        return _join(base)
+
+    def _completions_url(self, base_url: str | None = None) -> str:
+        return self.chat_completions_url(self._url(base_url))
+
     def _think_model(self, model: str, think: bool | None, think_mode: str = "none") -> str:
         """Apply the think/nothink signal ONLY for servers that support the
         model-name suffix convention (vLLM). Safe default: never mangle."""
@@ -561,7 +572,7 @@ class OpenAICompatibleProvider(BaseProvider):
         start = time.monotonic()
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
-                resp = client.post(f"{self._url(base_url)}/v1/chat/completions", json=body)
+                resp = client.post(self._completions_url(base_url), json=body)
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as e:  # noqa: BLE001 - surface to caller as LLM error
@@ -598,7 +609,7 @@ class OpenAICompatibleProvider(BaseProvider):
         body = self._payload(model_name, messages, temperature, max_tokens,
                              num_ctx, stream=True, think=think, think_mode=think_mode)
         with httpx.Client(timeout=timeout_seconds) as client:
-            with client.stream("POST", f"{self._url(base_url)}/v1/chat/completions", json=body) as resp:
+            with client.stream("POST", self._completions_url(base_url), json=body) as resp:
                 resp.raise_for_status()
                 answered = False
                 for line in resp.iter_lines():
@@ -635,7 +646,9 @@ class OpenAICompatibleProvider(BaseProvider):
           3. GET /models            (some servers mount models at root)
         Never reports unhealthy just because /health is missing."""
         url = self._url(base_url)
-        probes = (f"{url}/health", f"{url}/v1/models", f"{url}/models")
+        v1 = url if url.endswith("/v1") else f"{url}/v1"
+        host = url[:-3] if url.endswith("/v1") else url
+        probes = (f"{host}/health", f"{v1}/models", f"{host}/models")
         try:
             with httpx.Client(timeout=5) as client:
                 for probe in probes:

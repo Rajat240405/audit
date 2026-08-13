@@ -204,6 +204,7 @@ class LLMClient:
                 timeout_seconds=self.timeout_seconds,
                 think=getattr(self, "think", None),
                 think_mode=self._family_think_mode(),
+                base_url=self.base_url,
                 **kwargs
             )
 
@@ -248,7 +249,7 @@ class LLMClient:
                     model=self.model, prompt=prompt, system=system,
                     temperature=self.temperature, max_tokens=self.max_tokens,
                     num_ctx=self.num_ctx, think=getattr(self, "think", None),
-                    base_url=self.base_url if self._base_url_explicit else None,
+                    base_url=self.base_url,
                     think_mode=self._family_think_mode(),
                     **kwargs
                 )

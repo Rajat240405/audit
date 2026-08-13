@@ -2,6 +2,8 @@
 // All browser code talks to relative /api URLs (Vite dev server proxies to
 // the backend; production builds are served by FastAPI itself).
 
+import { once } from "@/utils/once";
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -59,12 +61,9 @@ export function consumeSSE(
   // event AND closes the stream — naive handlers ran onDone for both, so
   // Deep mode launched the post-verify request twice (wasted LLM, duplicate
   // toasts/races). Whichever fires first wins; the rest no-op.
-  let completed = false;
-  const finish = () => {
-    if (completed) return;
-    completed = true;
-    finish();
-  };
+  const finish = once(() => {
+    handlers.onDone?.();
+  });
   fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },

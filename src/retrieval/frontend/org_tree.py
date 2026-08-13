@@ -143,6 +143,74 @@ def derive_category(meta: Optional[dict]) -> str:
     return _DT_CATEGORY.get(dt, "misc")
 
 
+def _record_meta_blob(rec) -> dict:
+    """Normalize a QARecord or doc_map JSON dict into derivation input."""
+    if rec is None:
+        return {}
+    if isinstance(rec, dict):
+        meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+        blob = dict(meta)
+        blob["question_text"] = rec.get("question_text") or ""
+        blob["answer_text"] = rec.get("answer_text") or ""
+        return blob
+    meta = getattr(rec, "metadata", None)
+    blob = meta.model_dump() if meta is not None and hasattr(meta, "model_dump") else {}
+    blob["question_text"] = getattr(rec, "question_text", "") or ""
+    blob["answer_text"] = getattr(rec, "answer_text", "") or ""
+    return blob
+
+
+def build_sources_catalogue(records) -> dict:
+    """Facet tree/types/categories from the *searchable* record set (doc_map)."""
+    from collections import Counter
+
+    types: Counter = Counter()
+    categories: Counter = Counter()
+    orgs: Counter = Counter()
+    for rec in records:
+        blob = _record_meta_blob(rec)
+        types[blob.get("document_type") or "document"] += 1
+        categories[derive_category(blob)] += 1
+        orgs[derive_org(blob)] += 1
+
+    tree: dict = {}
+    known: set[str] = set()
+    for mslug, m in ORG_TREE.items():
+        org_list = [
+            {
+                "slug": o["slug"],
+                "name": o["name"],
+                "count": orgs.get(o["slug"], 0),
+                "categories": o["categories"],
+            }
+            for o in m["orgs"]
+        ]
+        known.update(o["slug"] for o in m["orgs"])
+        tree[mslug] = {
+            "name": m["name"],
+            "count": sum(orgs.get(o["slug"], 0) for o in m["orgs"]),
+            "orgs": org_list,
+        }
+    extra = [
+        {"slug": s, "name": s, "count": c, "categories": []}
+        for s, c in orgs.items()
+        if s not in known
+    ]
+    if extra:
+        tree["__other__"] = {
+            "name": "Other sources",
+            "count": sum(e["count"] for e in extra),
+            "orgs": extra,
+        }
+    return {
+        "tree": tree,
+        "types": [{"type": t, "count": c} for t, c in types.most_common()],
+        "categories": [{"category": c, "count": n} for c, n in categories.most_common()],
+        "total": sum(orgs.values()),
+        "source": "index",
+    }
+
+
 def resolve_orgs(ministry: Optional[str] = None, orgs: Optional[list[str]] = None) -> set[str]:
     """
     Tree-rule expansion: ministry -> all its orgs; explicit orgs are unioned.

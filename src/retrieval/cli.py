@@ -22,6 +22,7 @@ from src.data.loader import DataLoader
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
+from src.utils.app_paths import data_dir, index_dir as default_index_dir
 from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
 
 console = Console()
@@ -59,7 +60,7 @@ def _index_is_built(index_path: Path) -> bool:
 
 def get_pipeline(
     data_file: str | None = None,
-    index_dir: str = "storage/hybrid_rag",
+    index_dir: str | None = None,
     force_rebuild: bool = False,
     ministry_filter: str | None = None,
     all_ministries: bool = False,
@@ -78,7 +79,7 @@ def get_pipeline(
         If False (used by ``build``), build the index from scratch when it is
         missing or empty.
     """
-    index_path = Path(index_dir)
+    index_path = Path(index_dir) if index_dir else default_index_dir()
     data_path = Path(data_file) if data_file else None
 
     # Find latest data file if no explicit path is given.
@@ -87,7 +88,7 @@ def get_pipeline(
     # legacy enriched/ dir is gitignored and may not exist on fresh clones.
     if not data_path:
         for subdir in ("enriched", "processed"):
-            candidates = sorted(Path("data", subdir).glob("*.jsonl"), reverse=True)
+            candidates = sorted((data_dir() / subdir).glob("*.jsonl"), reverse=True)
             if candidates:
                 data_path = candidates[0]
                 break
@@ -148,7 +149,7 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--data", "data_file", type=str, default=None, help="Path to enriched Q&A JSONL")
-@click.option("--output", "index_dir", type=str, default="storage/hybrid_rag", help="Index output dir")
+@click.option("--output", "index_dir", type=str, default=None, help="Index output dir (default: APP_INDEX_DIR or storage/hybrid_rag)")
 @click.option("--rebuild", is_flag=True, help="Force rebuild even if index exists")
 @click.option("--ministry-filter", type=str, default=None, help="Explicit ministry filter")
 @click.option("--all-ministries", is_flag=True, default=False, help="Index ALL ministries (override MoES default)")

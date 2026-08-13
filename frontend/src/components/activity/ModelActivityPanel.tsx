@@ -11,6 +11,7 @@ import { useActivityStore } from "@/store/useActivityStore";
 import { useDocViewerStore } from "@/store/useDocViewerStore";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { cn } from "@/utils/cn";
+import { reasoningWaitMessage } from "@/utils/reasoningLabel";
 
 const STEPS = [
   { key: "retrieving", label: "Retrieving" },

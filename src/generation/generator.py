@@ -53,10 +53,10 @@ console = Console()
 
 SYSTEM_PROMPT = """You are an expert parliamentary research assistant for Indian government policy, schemes, and administrative matters. Answer the question using ONLY the provided Question & Answer context.
 
-ANSWER STYLE (match the official parliamentary register):
-1. Write in the third-person, passive, official tone used in parliamentary replies (e.g. "The Government has...", "The Ministry provides...", "IMD operates..."). Never use first-person ("I", "we", "my").
-2. If the question has multiple parts (a), (b), (c)..., structure your answer with matching (a), (b), (c) sub-sections.
-3. Be concise and factual — the median official answer is ~700-800 characters. Do not pad or repeat.
+ANSWER STYLE:
+1. If a TONE block is present later in this system message, it is authoritative for register, layout, and verbosity (including how long or short to write). Follow that TONE. Do not apply a fixed character budget.
+2. If no TONE block is present: write in the third person, official and factual (e.g. "The Government has...", "The Ministry provides..."). Never use first-person ("I", "we", "my"). Give a complete answer without padding or repetition — do not target a character count.
+3. If the question has multiple parts (a), (b), (c)... and the TONE does not specify another layout, structure the answer with matching (a), (b), (c) sub-sections.
 4. If a part of the question is not addressed in the context, state "Does not arise." or "The provided documents do not address this." — do not invent an answer for it.
 5. Synthesize across ALL provided documents when multiple are relevant; do not just copy one document verbatim. Quote or paraphrase the key passages.
 
@@ -169,28 +169,9 @@ def compact_documents_with_llm(
 
         q_text = clean_parliament_text(result.question)
         a_text = clean_parliament_text(result.answer)
+        # NEVER send a 400k parent to the LLM to "compress" it. Bound first.
         if len(a_text) > max_doc_chars:
-            try:
-                compact_prompt = (
-                    "Condense the following parliamentary answer into a concise "
-                    "summary that preserves EVERY proper noun (organization, "
-                    "programme, acronym, institute, city, ministry), EVERY number "
-                    "(dates, budgets, percentages, measurements), and EVERY "
-                    "[Source] tag. Keep the official tone. Do not add new facts.\n\n"
-                    f"ANSWER TEXT:\n{a_text}"
-                )
-                resp = llm_client.generate(
-                    prompt=compact_prompt,
-                    system="You are a parliamentary evidence condenser. Preserve all names, figures, and dates verbatim.",
-                )
-                compact = resp.text.strip()
-                if compact and len(compact) < len(a_text):
-                    # GLM #3: never slice mid-figure — cut at a sentence boundary
-                    a_text = truncate_at_sentence(compact, max_doc_chars)
-                else:
-                    a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
-            except Exception:
-                a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
+            a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
 
         parts.append(f"QUESTION: {q_text}")
         parts.append(f"ANSWER: {a_text}")
@@ -461,27 +442,20 @@ class AnswerGenerator:
 
         budget_threshold = int(operational_window * self.context_budget_ratio)
 
-        # ── 2. Assemble Uncompressed Prompt First ──
-        uncompressed_prompt = build_user_prompt(question, context, max_doc_chars=999999)
-        uncompressed_total_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{uncompressed_prompt}"
-        uncompressed_tokens = len(uncompressed_total_text) // 4
-
-        # ── 3. Adaptive Decision Matrix ──
+        # HARD per-doc cap BEFORE any LLM call (never assemble 400k+ parents).
+        user_prompt = build_user_prompt(question, context, max_doc_chars=self.max_doc_chars)
+        total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+        final_tokens = len(total_prompt_text) // 4
         compression_applied = False
-        reason = "Prompt fits within budget"
-
-        if self.compression_enabled and uncompressed_tokens > budget_threshold:
+        reason = "Per-doc hard cap applied before LLM"
+        if self.compression_enabled and final_tokens > budget_threshold:
             compression_applied = True
-            reason = "Prompt exceeded threshold"
+            reason = "Prompt exceeded window budget — extra extract"
             user_prompt = compact_documents_with_llm(
-                question, context, self.max_doc_chars, llm_client=self.llm_client
+                question, context, self.max_doc_chars, llm_client=None
             )
             total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
             final_tokens = len(total_prompt_text) // 4
-        else:
-            user_prompt = uncompressed_prompt
-            total_prompt_text = uncompressed_total_text
-            final_tokens = uncompressed_tokens
 
         # ── 4. Simulate Exact Serialized Outbound Payload Size (Question 2) ──
         temp_val = getattr(self.llm_client, "temperature", 0.2)
@@ -525,10 +499,13 @@ class AnswerGenerator:
         console.print(f"Compression Applied     : {'YES' if compression_applied else 'NO'}")
         console.print(f"Reason                  : {reason}\n")
 
-        # Save exact prompt sent to LLM for debug
+        # Optional debug dump — under APP_DATA_DIR (never process CWD).
         try:
-            with open("generation_prompt_debug.txt", "w", encoding="utf-8") as f:
-                f.write(total_prompt_text)
+            from src.utils.app_paths import data_dir, prompt_debug_path
+
+            data_dir().mkdir(parents=True, exist_ok=True)
+            dest = prompt_debug_path()
+            dest.write_text(total_prompt_text, encoding="utf-8")
         except Exception as e:
             console.print(f"[yellow]Warning: Could not save prompt to debug file: {e}[/yellow]")
 
@@ -643,17 +620,17 @@ class AnswerGenerator:
         operational_window = effective_window
 
         budget_threshold = int(operational_window * self.context_budget_ratio)
-        uncompressed_prompt = build_user_prompt(question, context, max_doc_chars=999999)
-        uncompressed_tokens = len(
-            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{uncompressed_prompt}"
-        ) // 4
-
-        if self.compression_enabled and uncompressed_tokens > budget_threshold:
+        user_prompt = build_user_prompt(question, context, max_doc_chars=self.max_doc_chars)
+        prompt_chars = len(self.system_prompt or "") + len(user_prompt)
+        print(
+            f"[context] docs={len(context)} chars={prompt_chars} "
+            f"tokens~{prompt_chars // 4} ids={[r.doc_id for r in context]} "
+            f"per={[ (r.doc_id, len(r.answer or '')) for r in context ]}"
+        )
+        if self.compression_enabled and (prompt_chars // 4) > budget_threshold:
             user_prompt = compact_documents_with_llm(
-                question, context, self.max_doc_chars, llm_client=self.llm_client
+                question, context, self.max_doc_chars, llm_client=None
             )
-        else:
-            user_prompt = uncompressed_prompt
 
         start_time = time.monotonic()
         full_text = []

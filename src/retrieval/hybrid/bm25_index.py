@@ -234,17 +234,18 @@ class BM25Index:
             raise RuntimeError("Cannot save empty index.")
 
         path = Path(path)
-        # Save BM25 object
-        with open(path.with_suffix(".pkl"), "wb") as f:
-            pickle.dump(self._index, f)
-        # Save metadata
-        with open(path.with_suffix(".json"), "w", encoding="utf-8") as f:
-            json.dump({
+        from src.utils.atomic_io import write_bytes_atomic, write_text_atomic
+
+        write_bytes_atomic(path.with_suffix(".pkl"), pickle.dumps(self._index))
+        write_text_atomic(
+            path.with_suffix(".json"),
+            json.dumps({
                 "doc_ids": self._doc_ids,
                 "doc_texts": self._doc_texts,
                 "k1": self.k1,
                 "b": self.b,
-            }, f)
+            }),
+        )
 
     def load(self, path: str | Path) -> None:
         """

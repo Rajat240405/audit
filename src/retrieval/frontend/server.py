@@ -31,22 +31,26 @@ from src.retrieval.graph.retriever import GraphRetriever
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
 from src.generation.registry import model_registry
+from src.utils.app_paths import (
+    corpus_path,
+    data_dir,
+    ensure_data_dirs,
+    graph_dir as resolve_graph_dir,
+    inbox_dir,
+    index_dir as resolve_index_dir,
+    project_root,
+    user_knowledge_dir,
+)
 
 app = FastAPI(
     title="Parliamentary & Audit Assistant Multi-Provider API",
     description="Provider-agnostic API backing the Interactive Chat Frontend for Phase 10."
 )
 
-# Project root — ALL data/index paths resolve from here, never from the
-# process CWD (the server may be started from any directory; a relative
-# "data/inbox" silently pointed at the wrong folder and uploads vanished).
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-# Ensure the inbox (and corpus dir) exist at startup so uploads always land
-# in a visible, known location regardless of how/where the server is started.
-(PROJECT_ROOT / "data" / "inbox").mkdir(parents=True, exist_ok=True)
-(PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
-(PROJECT_ROOT / "data" / "user-knowledge").mkdir(parents=True, exist_ok=True)
+# Project root + optional APP_DATA_DIR / APP_INDEX_DIR / APP_MODEL_DIR (P0.3).
+# Unset env keeps Windows/dev behavior (paths under the repo). Never use CWD.
+PROJECT_ROOT = project_root()
+ensure_data_dirs()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # In-Memory Active Configuration State (Thread-safe single-session storage)
@@ -123,7 +127,7 @@ class _LazyPipeline:
     @staticmethod
     def _build():
         p = HybridRAGPipeline()
-        index_dir = Path("storage/hybrid_rag")
+        index_dir = resolve_index_dir()
         if index_dir.exists():
             p.load(index_dir)
             chunks_count = (
@@ -142,8 +146,8 @@ class _LazyPipeline:
         return getattr(self._get(), name)
 
 
-index_dir = Path("storage/hybrid_rag")
-graph_dir = Path("storage/graphrag")
+index_dir = resolve_index_dir()
+graph_dir = resolve_graph_dir()
 
 # Lazy: server binds port immediately; model+index load on first query.
 pipeline = _LazyPipeline()
@@ -361,7 +365,7 @@ async def get_index():
     legacy single-file HTML client. Lets `npm run build` output be served by
     the FastAPI backend at the same origin (no CORS, no separate host)."""
     # Production: serve the Vite-built React app from frontend/dist
-    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    dist = PROJECT_ROOT / "frontend" / "dist"
     dist_index = dist / "index.html"
     if dist_index.exists():
         return HTMLResponse(dist_index.read_text(encoding="utf-8"))
@@ -377,7 +381,7 @@ async def get_index():
 @app.get("/assets/{path:path}")
 async def get_assets(path: str):
     """Serve built frontend assets (JS/CSS) from frontend/dist/assets."""
-    dist = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    dist = PROJECT_ROOT / "frontend" / "dist"
     asset = dist / "assets" / path
     if not asset.exists():
         raise HTTPException(status_code=404, detail="asset not found")
@@ -691,6 +695,10 @@ async def chat_endpoint(request: ChatRequest):
                 rerank_score=float(r.rerank_score) if r.rerank_score is not None else None,
             ))
 
+        gen_cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
+        if len(sources) > gen_cap:
+            sources = sources[:gen_cap]
+
         t_gen_start = time.perf_counter()
         
         api_key = _active_api_key()
@@ -972,7 +980,7 @@ _TOKEN_ALIASES = {
 # to change aliases; this list is loaded from it so backend and frontend can
 # never drift again (was: two hardcoded copies, frontend missing 7 terms).
 _ALIAS_GROUPS: list[list[str]] = json.loads(
-    (Path(__file__).resolve().parents[3] / "frontend" / "src" / "utils"
+    (PROJECT_ROOT / "frontend" / "src" / "utils"
      / "grounding_aliases.json").read_text(encoding="utf-8")
 )["groups"]
 
@@ -1342,47 +1350,57 @@ def chat_stream(request: ChatStreamRequest):
 
         style_hint = ""
         original_system_prompt = generator.system_prompt
-        # Tone templates — "default" sends NO hint so the LLM answers in its
-        # own natural register. The others are soft style guides (reference,
-        # not hard rules) grounded in the real parliamentary/ministry style.
-        if request.draft_style and request.draft_style != "default":
-            tone_templates = {
-                "professional": (
-                    "\n\nTONE: PROFESSIONAL — write in a clear, formal, "
-                    "business-register style. Be precise, objective and "
-                    "confident. Use short structured paragraphs or labelled "
-                    "points. Avoid slang, hedging and first-person asides. "
-                    "Lead with the answer, then supporting detail."
-                ),
-                "parliamentary": (
-                    "\n\nTONE: PARLIAMENTARY — mirror the style of a Lok Sabha "
-                    "ministry reply. Write in the third person: \"The Government "
-                    "has...\", \"As per available information...\", \"It may be "
-                    "stated that...\". Mirror the question's clauses as "
-                    "(a), (b), (c) sub-answers. Preserve figures, names and "
-                    "[Source N] citations verbatim. Stay factual and official; "
-                    "no opinions, no recommendations."
-                ),
-                "concise": (
-                    "\n\nTONE: CONCISE — be brief and direct. Use short bullet "
-                    "points or 1-2 sentence paragraphs. Give only the key facts "
-                    "and figures; drop elaboration, context and repetition. "
-                    "Keep every [Source N] citation."
-                ),
-                "detailed": (
-                    "\n\nTONE: DETAILED — give a comprehensive answer. Cover "
-                    "every aspect of the question with sub-sections or numbered "
-                    "points, include supporting context, figures, dates and "
-                    "institutional roles, and cite all relevant [Source N] "
-                    "references. Depth over brevity, but stay grounded in the "
-                    "sources."
-                ),
-            }
-            style_hint = tone_templates.get(
-                request.draft_style,
-                f"\n\nTONE: Compose the answer in a {request.draft_style} register.",
-            )
-            generator.system_prompt = (generator.system_prompt or "").rstrip() + style_hint
+        # Tone is authoritative for register + verbosity. Frontend omits
+        # draft_style for "Default Tone"; treat that as "default". Grounding
+        # / citation rules stay in SYSTEM_PROMPT and are never replaced.
+        style_key = (request.draft_style or "default").strip().lower()
+        tone_templates = {
+            "default": (
+                "\n\nTONE: DEFAULT — write a complete, factual answer. "
+                "Match length to what the question and sources require. "
+                "Do not pad, and do not compress to a character quota. "
+                "Prefer third-person official wording unless the sources "
+                "read more naturally otherwise. Keep every [Source N] citation."
+            ),
+            "professional": (
+                "\n\nTONE: PROFESSIONAL — write in a clear, formal, "
+                "business-register style. Be precise, objective and "
+                "confident. Use short structured paragraphs or labelled "
+                "points. Avoid slang, hedging and first-person asides. "
+                "Lead with the answer, then supporting detail. "
+                "Length follows this register, not a character quota."
+            ),
+            "parliamentary": (
+                "\n\nTONE: PARLIAMENTARY — mirror the style of a Lok Sabha "
+                "ministry reply. Write in the third person: \"The Government "
+                "has...\", \"As per available information...\", \"It may be "
+                "stated that...\". Mirror the question's clauses as "
+                "(a), (b), (c) sub-answers. Preserve figures, names and "
+                "[Source N] citations verbatim. Stay factual and official; "
+                "no opinions, no recommendations. Length may match a full "
+                "ministry reply; do not cap at a character quota."
+            ),
+            "concise": (
+                "\n\nTONE: CONCISE — be brief and direct. Use short bullet "
+                "points or 1-2 sentence paragraphs. Give only the key facts "
+                "and figures; drop elaboration, context and repetition. "
+                "Keep every [Source N] citation."
+            ),
+            "detailed": (
+                "\n\nTONE: DETAILED — give a comprehensive answer. Cover "
+                "every aspect of the question with sub-sections or numbered "
+                "points, include supporting context, figures, dates and "
+                "institutional roles, and cite all relevant [Source N] "
+                "references. Depth over brevity. Ignore any preference for "
+                "short answers; stay grounded in the sources."
+            ),
+        }
+        style_hint = tone_templates.get(
+            style_key,
+            f"\n\nTONE: Compose the answer in a {style_key} register. "
+            "This TONE controls length and wording style.",
+        )
+        generator.system_prompt = (generator.system_prompt or "").rstrip() + style_hint
 
         t_ret_start = time.perf_counter()
         sources: list[dict] = []
@@ -1426,6 +1444,18 @@ def chat_stream(request: ChatStreamRequest):
                     })
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
+
+            # Fast/Deep generation context is max_context_docs (3 / 5), not
+            # retrieval top_k (still 5 for rerank). Emit only what the LLM gets
+            # so "What the model received" matches generate_stream's slice.
+            if not is_graph:
+                gen_cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
+                if len(sources) > gen_cap:
+                    print(
+                        f"[context] retrieved={len(sources)} "
+                        f"generation_context={gen_cap} (max_context_docs)"
+                    )
+                    sources = sources[:gen_cap]
 
             yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
 
@@ -1666,10 +1696,19 @@ def ai_edit(payload: dict):
             f"CURRENT DRAFT:\n{document}\n\n"
             f"Return the revised draft in full, markdown formatted."
         )
+        prev_think = getattr(llm_client, "think", None)
         try:
-            yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": False})
-            # Use the dedicated small model for fast edits.
-            for chunk in edit_llm_client.generate_stream(prompt=prompt, system=system):
+            # Same provider/model/base_url as chat (ACTIVE_CONFIG / llm_client).
+            # Thinking off: edits are rewrites, not Deep-mode reasoning.
+            llm_client.think = False
+            print(
+                f"[edit] provider={llm_client.provider} model={llm_client.model} "
+                f"base_url={getattr(llm_client, 'base_url', '')} think=OFF"
+            )
+            yield _sse({"type": "status", "stage": "edit",
+                        "message": f"Editing with {llm_client.provider}/{llm_client.model}…",
+                        "done": False})
+            for chunk in llm_client.generate_stream(prompt=prompt, system=system):
                 # Structured events (post client-stream migration): forward
                 # only the visible tokens to the edit panel.
                 if isinstance(chunk, dict):
@@ -1684,6 +1723,8 @@ def ai_edit(payload: dict):
         except Exception as e:  # noqa: BLE001
             yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
             yield _sse({"type": "done"})
+        finally:
+            llm_client.think = prev_think
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1753,86 +1794,40 @@ def status():
 # actually present (new ministry/org appears automatically, no hardcoded list).
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SOURCES_CACHE: dict = {"data": None, "mtime": None}
+_SOURCES_CACHE: dict = {"data": None, "key": None}
+
+
+def _indexed_records():
+    """Yield records from the *searchable* index, not the raw JSONL corpus."""
+    inst = getattr(pipeline, "_instance", None)
+    if inst is not None and getattr(inst, "_doc_map", None):
+        return list(inst._doc_map.values())
+    doc_map_path = resolve_index_dir() / "doc_map.json"
+    if not doc_map_path.exists():
+        return []
+    import orjson
+
+    data = orjson.loads(doc_map_path.read_bytes())
+    return list(data.values()) if isinstance(data, dict) else []
 
 
 @app.get("/api/sources")
 def sources_catalogue():
-    """Distinct orgs (ministry tree), doc categories + types present in the corpus."""
-    from src.retrieval.frontend.org_tree import ORG_TREE, derive_category, derive_org
+    """Facets from the active searchable index (doc_map), not the raw corpus."""
+    from src.retrieval.frontend.org_tree import build_sources_catalogue
 
-    corpus = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
-    if not corpus.exists():
-        return {"tree": {}, "types": [], "categories": [], "total": 0}
-    mtime = corpus.stat().st_mtime
-    if _SOURCES_CACHE["mtime"] == mtime and _SOURCES_CACHE["data"] is not None:
+    records = _indexed_records()
+    inst = getattr(pipeline, "_instance", None)
+    doc_map_path = resolve_index_dir() / "doc_map.json"
+    key = (
+        id(inst) if inst is not None else 0,
+        len(records),
+        doc_map_path.stat().st_mtime if doc_map_path.exists() else 0,
+    )
+    if _SOURCES_CACHE["key"] == key and _SOURCES_CACHE["data"] is not None:
         return _SOURCES_CACHE["data"]
-
-    from collections import Counter
-
-    types = Counter()
-    categories = Counter()
-    orgs = Counter()
-    for line in open(corpus, encoding="utf-8"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:  # noqa: BLE001
-            continue
-        meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
-        # Derive org/category from metadata + content text (question_text /
-        # answer_text carry "Document: INCOIS ..." for report rows whose
-        # metadata subject may be absent) — keeps counts in sync with the
-        # retrieval-time filter, which uses the same derivation.
-        meta_full = dict(meta)
-        meta_full["question_text"] = rec.get("question_text") or ""
-        meta_full["answer_text"] = rec.get("answer_text") or ""
-        types[meta.get("document_type") or "document"] += 1
-        categories[derive_category(meta_full)] += 1
-        orgs[derive_org(meta_full)] += 1
-
-    # Tree with live counts (tree rule: ministry count = sum of its orgs).
-    tree: dict = {}
-    known: set[str] = set()
-    for mslug, m in ORG_TREE.items():
-        org_list = [
-            {
-                "slug": o["slug"],
-                "name": o["name"],
-                "count": orgs.get(o["slug"], 0),
-                "categories": o["categories"],
-            }
-            for o in m["orgs"]
-        ]
-        known.update(o["slug"] for o in m["orgs"])
-        tree[mslug] = {
-            "name": m["name"],
-            "count": sum(orgs.get(o["slug"], 0) for o in m["orgs"]),
-            "orgs": org_list,
-        }
-
-    # Safety: orgs discovered in the corpus but not yet in the tree.
-    extra = [
-        {"slug": s, "name": s, "count": c, "categories": []}
-        for s, c in orgs.items()
-        if s not in known
-    ]
-    if extra:
-        tree["__other__"] = {
-            "name": "Other sources",
-            "count": sum(e["count"] for e in extra),
-            "orgs": extra,
-        }
-
-    data = {
-        "tree": tree,
-        "types": [{"type": t, "count": c} for t, c in types.most_common()],
-        "categories": [{"category": c, "count": n} for c, n in categories.most_common()],
-        "total": sum(orgs.values()),
-    }
-    _SOURCES_CACHE.update({"data": data, "mtime": mtime})
+    data = build_sources_catalogue(records)
+    _SOURCES_CACHE.update({"data": data, "key": key})
     return data
 
 
@@ -1845,7 +1840,19 @@ def sources_catalogue():
 # user-curated answer always wins — no RAG, no hallucination). No embeddings
 # needed for this lookup.
 
-USER_KNOWLEDGE_DIR = PROJECT_ROOT / "data" / "user-knowledge"
+USER_KNOWLEDGE_DIR = user_knowledge_dir()
+
+
+def knowledge_fuzzy_threshold() -> float:
+    """Documented default 0.85. Override: KNOWLEDGE_FUZZY_THRESHOLD."""
+    raw = (os.environ.get("KNOWLEDGE_FUZZY_THRESHOLD") or "0.85").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        return 0.85
+    if val < 0.0 or val > 1.0:
+        return 0.85
+    return val
 
 
 def _normalize_q(text: str) -> str:
@@ -1890,25 +1897,49 @@ def knowledge_lookup(q: str):
         if e["_q_norm"] == qn:
             return {"found": True, "answer": e.get("answer", ""),
                     "sources": e.get("sources", []), "question": e.get("question", q),
-                    "matched": "exact"}
+                    "matched": "exact", "saved_by": e.get("saved_by")}
     # fuzzy fallback (similar wording, e.g. "Doppler Radars" vs
-    # "Doppler Weather Radars" ~0.91; threshold 0.75)
+    # "Doppler Weather Radars" ~0.91). Default 0.85 — override with
+    # KNOWLEDGE_FUZZY_THRESHOLD (must stay in 0..1).
     import difflib
 
+    threshold = knowledge_fuzzy_threshold()
     best, best_ratio = None, 0.0
     for e in entries:
         r = difflib.SequenceMatcher(None, qn, e["_q_norm"]).ratio()
         if r > best_ratio:
             best, best_ratio = e, r
-    if best and best_ratio >= 0.75:
+    if best and best_ratio >= threshold:
         return {"found": True, "answer": best.get("answer", ""),
                 "sources": best.get("sources", []), "question": best.get("question", q),
-                "matched": "fuzzy", "score": round(best_ratio, 3)}
+                "matched": "fuzzy", "score": round(best_ratio, 3),
+                "saved_by": best.get("saved_by")}
     return {"found": False}
 
 
+def _resolve_saved_by(request: Request | None, payload: dict | None = None) -> str:
+    """Local identity for saved_by (no SSO). Priority: payload, X-User, APP_USER, OS user."""
+    if payload:
+        raw = (payload.get("saved_by") or "").strip()
+        if raw:
+            return raw[:128]
+    if request is not None:
+        hdr = (request.headers.get("X-User") or request.headers.get("X-Forwarded-User") or "").strip()
+        if hdr:
+            return hdr[:128]
+    env = (os.environ.get("APP_USER") or os.environ.get("USERNAME") or os.environ.get("USER") or "").strip()
+    if env:
+        return env[:128]
+    try:
+        import getpass
+
+        return (getpass.getuser() or "local-user")[:128]
+    except Exception:
+        return "local-user"
+
+
 @app.post("/api/save-knowledge")
-def save_knowledge(payload: dict):
+def save_knowledge(payload: dict, request: Request):
     """Save a curated Q&A into user-knowledge/<slug>.json. Overwrites if the
     same question was saved before (so re-saving an edited answer updates it)."""
     question = (payload.get("question") or "").strip()
@@ -1917,6 +1948,7 @@ def save_knowledge(payload: dict):
         raise HTTPException(status_code=400, detail="question and answer required")
     import re as _re
 
+    USER_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     slug = _re.sub(r"[^a-z0-9]+", "_", question.lower())[:60] or "knowledge"
     dest = USER_KNOWLEDGE_DIR / f"{slug}.json"
     # Trim sources to citation identity ONLY (doc_id/subject/ministry/type) —
@@ -1932,11 +1964,17 @@ def save_knowledge(payload: dict):
         }
     trimmed_sources = [_trim(s) for s in (payload.get("sources") or []) if isinstance(s, dict)]
     # update existing file (don't create duplicates for same question)
-    entry = {"question": question, "answer": answer,
-             "sources": trimmed_sources, "saved_at": datetime.now().isoformat(timespec="seconds")}
+    saved_by = _resolve_saved_by(request, payload)
+    entry = {
+        "question": question,
+        "answer": answer,
+        "sources": trimmed_sources,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "saved_by": saved_by,
+    }
     dest.write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"[save-knowledge] {dest.name} ({len(trimmed_sources)} sources trimmed)")
-    return {"status": "saved", "file": dest.name}
+    print(f"[save-knowledge] {dest.name} by {saved_by} ({len(trimmed_sources)} sources trimmed)")
+    return {"status": "saved", "file": dest.name, "saved_by": saved_by}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1952,7 +1990,7 @@ _INGEST_STATE: dict = {
 @app.get("/api/ingest/status")
 def ingest_status():
     """How many files are waiting in the inbox + whether ingest is running."""
-    inbox = PROJECT_ROOT / "data" / "inbox"
+    inbox = inbox_dir()
     pending = 0
     if inbox.exists():
         pending = sum(1 for p in inbox.iterdir() if p.is_file())
@@ -1976,15 +2014,15 @@ def _run_inbox_ingest() -> None:
         from src.scripts.ingest_folder import ingest_folder as _ingest_folder
         import src.scripts.ingest_folder as _ingest_folder_mod
 
-        # pin the converter to PROJECT_ROOT paths (it defaults to cwd-relative)
-        _ingest_folder_mod.CORPUS = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
-        _ingest_folder_mod.LOG = PROJECT_ROOT / "data" / "sync.log"
-        _ingest_folder_mod.INDEX_DIR = str(PROJECT_ROOT / "storage" / "hybrid_rag")
+        # pin the converter to APP_* / project-root paths (never CWD)
+        _ingest_folder_mod.CORPUS = corpus_path()
+        _ingest_folder_mod.LOG = data_dir() / "sync.log"
+        _ingest_folder_mod.INDEX_DIR = str(resolve_index_dir())
         _ingest_folder_mod.CORPUS.parent.mkdir(parents=True, exist_ok=True)
 
-        inbox_dir = PROJECT_ROOT / "data" / "inbox"
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-        conv = _ingest_folder(str(inbox_dir), move_processed=True)
+        inbox = inbox_dir()
+        inbox.mkdir(parents=True, exist_ok=True)
+        conv = _ingest_folder(str(inbox), move_processed=True)
         print(f"[ingest] conversion: {conv}")
         ok = conv.get("files", 0)
         added_count = conv.get("added", 0)
@@ -1996,8 +2034,8 @@ def _run_inbox_ingest() -> None:
             from src.retrieval.hybrid.pipeline import HybridRAGPipeline
             import os as _os2
 
-            corpus = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
-            idx_dir = PROJECT_ROOT / "storage" / "hybrid_rag"
+            corpus = corpus_path()
+            idx_dir = resolve_index_dir()
             _ingest_embedded = 0  # how many new vectors went into the index
             if corpus.exists():
                 records = DataLoader.load_jsonl(corpus)
@@ -2020,6 +2058,7 @@ def _run_inbox_ingest() -> None:
                     _ingest_embedded = len(records)
                     print(f"[ingest] full build with {len(records):,} records")
                 pipeline.swap(new_pipe)
+                _SOURCES_CACHE.update({"data": None, "key": None})
                 print(f"[ingest] embeddings done: {_ingest_embedded} new vector(s) in live index")
         except Exception as e:  # noqa: BLE001
             print(f"[ingest] index rebuild failed: {e}")
@@ -2107,7 +2146,7 @@ async def upload_document(request: Request):
             detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
         )
 
-    inbox = PROJECT_ROOT / "data" / "inbox"
+    inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     dest = inbox / name
     dest.write_bytes(body)
@@ -2118,7 +2157,7 @@ async def upload_document(request: Request):
 @app.get("/api/graph/build-status")
 def graph_build_status():
     """Live Graph build progress read from the checkpoint file (if any)."""
-    cp = Path("storage/graphrag/checkpoint.json")
+    cp = resolve_graph_dir() / "checkpoint.json"
     if not cp.exists():
         return {"running": False, "documents_processed": 0, "failed": 0,
                 "last_updated": None, "checkpoint_exists": False}
@@ -2185,8 +2224,13 @@ def export_document(payload: dict):
 
 
 def start_server(port: int = 8000) -> None:
-    """Run the FastAPI application on host 0.0.0.0."""
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    """Run the FastAPI application on host 0.0.0.0.
+
+    Smoke-test / first container deployment is **single-worker only**.
+    ACTIVE_CONFIG, llm_client, and generator are in-process globals — do not
+    pass workers>1 (or --workers) until that architecture is redesigned.
+    """
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
 
 
 if __name__ == "__main__":

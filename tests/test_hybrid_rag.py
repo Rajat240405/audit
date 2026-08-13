@@ -87,7 +87,9 @@ class TestEmbedder:
         embedder = Embedder()
         embedding = embedder.embed("What is malaria?")
         assert isinstance(embedding, np.ndarray)
-        assert embedding.shape == (384,)  # all-MiniLM-L6-v2 dimension
+        dim = embedder.embedding_dim
+        assert dim > 0
+        assert embedding.shape == (dim,)
         assert embedding.dtype == np.float32
 
     def test_embed_is_normalized(self):
@@ -106,7 +108,7 @@ class TestEmbedder:
             "Skill development programmes",
         ]
         embeddings = embedder.embed_batch(texts, show_progress=False)
-        assert embeddings.shape == (3, 384)
+        assert embeddings.shape == (3, embedder.embedding_dim)
         assert embeddings.dtype == np.float32
 
     def test_batch_embedding_normalized(self):

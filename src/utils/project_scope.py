@@ -16,6 +16,10 @@ import yaml
 def load_project_scope(config_path: str = "config/ingestion.yaml") -> dict:
     """Load project_scope section from ingestion config."""
     cfg_path = Path(config_path)
+    if not cfg_path.is_absolute() and not cfg_path.exists():
+        from src.utils.app_paths import project_root
+
+        cfg_path = project_root() / config_path
     if not cfg_path.exists():
         return {}
 

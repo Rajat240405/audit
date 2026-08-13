@@ -46,22 +46,23 @@ from src.scripts.convert_sirs_knowledge import (
 )
 from src.scripts.detect_doc_type import detect_doc_type, readable_type
 
-# Project-root-relative paths (never CWD) — same convention as the server's
-# PROJECT_ROOT, so ingest works from any working directory (CLI or in-process).
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CORPUS = _PROJECT_ROOT / "data" / "corpus_reports.jsonl"
-LOG = _PROJECT_ROOT / "data" / "sync.log"
-INDEX_DIR = str(_PROJECT_ROOT / "storage" / "hybrid_rag")
+# Project-root / APP_* paths (never CWD). Same convention as the server.
+from src.utils.app_paths import data_dir, index_dir, project_root
+
+_PROJECT_ROOT = project_root()
+CORPUS = data_dir() / "corpus_reports.jsonl"
+LOG = data_dir() / "sync.log"
+INDEX_DIR = str(index_dir())
 
 KNOWN_FOLDERS = [
-    _PROJECT_ROOT / "data" / "inbox",
-    _PROJECT_ROOT / "data" / "annual_reports",
-    _PROJECT_ROOT / "data" / "incois_reports" / "AnnualReports",
-    _PROJECT_ROOT / "data" / "incois_reports" / "Others",
-    _PROJECT_ROOT / "data" / "incois_reports" / "TechnicalReports",
-    _PROJECT_ROOT / "data" / "incois_reports" / "ResearchPublications",
-    _PROJECT_ROOT / "data" / "moes_reports" / "knowledge",
-    _PROJECT_ROOT / "data" / "scanned_ocr",
+    data_dir() / "inbox",
+    data_dir() / "annual_reports",
+    data_dir() / "incois_reports" / "AnnualReports",
+    data_dir() / "incois_reports" / "Others",
+    data_dir() / "incois_reports" / "TechnicalReports",
+    data_dir() / "incois_reports" / "ResearchPublications",
+    data_dir() / "moes_reports" / "knowledge",
+    data_dir() / "scanned_ocr",
 ]
 
 
@@ -209,13 +210,15 @@ def ingest_folder(folder: str, move_processed: bool = False) -> dict:
             log(f"  ERROR {f.name}: {e}")
 
     if out:
-        CORPUS.parent.mkdir(parents=True, exist_ok=True)
-        with CORPUS.open("a", encoding="utf-8") as fh:
-            for rec in out:
-                if hasattr(rec, "model_dump_json"):
-                    fh.write(rec.model_dump_json() + "\n")
-                else:
-                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        from src.utils.atomic_io import append_jsonl_atomic
+
+        lines = []
+        for rec in out:
+            if hasattr(rec, "model_dump_json"):
+                lines.append(rec.model_dump_json())
+            else:
+                lines.append(json.dumps(rec, ensure_ascii=False))
+        append_jsonl_atomic(CORPUS, lines)
         log(f"[ingest_folder] appended {len(out)} record(s) -> {CORPUS}")
 
     return {"files": len(files), "added": len(out), "failed": fail, "types": types_used}
@@ -317,7 +320,7 @@ def main() -> None:
 
     total_added = 0
     for folder in folders:
-        move = args.move_processed or ("inbox" in str(folder).lower())
+        move = args.move_processed or ("inbox" in folder)
         res = ingest_folder(folder, move_processed=move)
         total_added += res["added"]
 
