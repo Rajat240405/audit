@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Moon, Sun, Brain, Settings as SettingsIcon } from "lucide-react";
-import { fetchModels, fetchSources, setProvider, type SourceCatalogue } from "@/api/model";
+import { fetchModels, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
+import { SourceFilter } from "./SourceFilter";
 import { useThemeStore } from "@/store/useThemeStore";
 import { useActivityStore } from "@/store/useActivityStore";
 import { Button } from "@/components/ui/button";
@@ -71,8 +71,7 @@ export function Header() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ollama">Ollama</SelectItem>
-            <SelectItem value="groq">Groq</SelectItem>
-            <SelectItem value="openrouter">OpenRouter</SelectItem>
+            <SelectItem value="vllm">vLLM</SelectItem>
           </SelectContent>
         </Select>
 
@@ -170,96 +169,6 @@ export function Header() {
         <ThemeToggle />
       </div>
     </header>
-  );
-}
-
-const SOURCE_PRESETS: Array<{ label: string; types: string[] }> = [
-  { label: "Sansad", types: ["parliamentary_qa"] },
-  {
-    label: "INCOIS Reports",
-    types: ["annual_report", "general_report", "technical_report", "research_publication"],
-  },
-  { label: "MoES Reports", types: ["document"] },
-];
-
-/** Source-type filter — DYNAMIC (fetches the types actually in the corpus) and
- *  multi-select (combinations: Sansad + reports, etc.).
- *  [] = All. Each preset/type toggles in/out; the union is sent to retrieval. */
-function SourceFilter() {
-  const sourceFilter = useAppStore((s) => s.sourceFilter);
-  const setSourceFilter = useAppStore((s) => s.setSourceFilter);
-  const [catalogue, setCatalogue] = useState<SourceCatalogue | null>(null);
-
-  useEffect(() => {
-    fetchSources()
-      .then(setCatalogue)
-      .catch(() => setCatalogue(null));
-  }, []);
-
-  // toggle a SET of types in/out of the filter (union semantics)
-  const toggleTypes = (types: string[]) => {
-    const cur = new Set(sourceFilter);
-    const allIn = types.every((t) => cur.has(t));
-    if (allIn) {
-      types.forEach((t) => cur.delete(t));
-    } else {
-      types.forEach((t) => cur.add(t));
-    }
-    setSourceFilter([...cur]);
-  };
-
-  const groupActive = (types: string[]) => types.every((t) => sourceFilter.includes(t));
-  const anyActive = sourceFilter.length > 0;
-
-  // dynamic discovered types (from corpus) minus those already in presets
-  const presetTypes = new Set(SOURCE_PRESETS.flatMap((p) => p.types));
-  const dynamicTypes =
-    catalogue?.types.filter((t) => !presetTypes.has(t.type)) ?? [];
-
-  return (
-    <div className="flex items-center gap-1 rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold">
-      <span className="pl-1.5 pr-0.5 text-muted">Source:</span>
-      <button
-        onClick={() => setSourceFilter([])}
-        className={cn(
-          "rounded-full px-2 py-1 transition-colors",
-          !anyActive ? "bg-accent text-white" : "text-muted hover:text-foreground"
-        )}
-        title="All document types"
-      >
-        All
-      </button>
-      {SOURCE_PRESETS.map((p) => (
-        <button
-          key={p.label}
-          onClick={() => toggleTypes(p.types)}
-          className={cn(
-            "rounded-full px-2 py-1 transition-colors",
-            groupActive(p.types)
-              ? "bg-accent text-white"
-              : "text-muted hover:text-foreground"
-          )}
-          title={`Toggle ${p.label} documents`}
-        >
-          {p.label}
-        </button>
-      ))}
-      {dynamicTypes.map((t) => (
-        <button
-          key={t.type}
-          onClick={() => toggleTypes([t.type])}
-          className={cn(
-            "rounded-full px-2 py-1 transition-colors",
-            sourceFilter.includes(t.type)
-              ? "bg-accent text-white"
-              : "text-muted hover:text-foreground"
-          )}
-          title={`${t.type} (${t.count} docs)`}
-        >
-          {t.type.replace(/_/g, " ")}
-        </button>
-      ))}
-    </div>
   );
 }
 

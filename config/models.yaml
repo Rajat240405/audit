@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL CATALOG — the "plugin" system for models.
+# Add a NEW model = add one entry below. No code change needed.
+# The registry (src/generation/registry.py) loads this file at startup and
+# registers every family. The active model per provider is chosen by env:
+#
+#   Provider   | Active model env          | Default
+#   -----------+---------------------------+---------------------------
+#   ollama     | (dynamic — Ollama /api/tags lists real tags)
+#   vllm       | VLLM_MODEL                | first entry under vllm
+#   huggingface| GRAPHRAG_MODEL_PATH       | first entry
+#
+# Entry fields (see src/generation/registry.py ModelFamily):
+#   id, display_name, provider, model_name, context_window,
+#   thinking_capable, recommended_execution_mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+providers:
+  # ── Local dev (PC) — Ollama ───────────────────────────────────────────────
+  ollama:
+    families:
+      - { id: qwen3,          display_name: "Qwen 3",                 model_name: "qwen3:8b",        context_window: 32768,  thinking_capable: true,  recommended_execution_mode: GPU }
+      - { id: qwen2.5,        display_name: "Qwen 2.5",               model_name: "qwen2.5:7b",      context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
+      - { id: llama3.2,       display_name: "Llama 3.2",              model_name: "llama3.2:3b",     context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
+      - { id: gemma2,         display_name: "Gemma 2",                model_name: "gemma2:9b",       context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
+      - { id: qwen2.5_1.5b,   display_name: "Qwen 2.5 (1.5B)",        model_name: "qwen2.5:1.5b",    context_window: 8192,   thinking_capable: false, recommended_execution_mode: CPU }
+
+  # ── HPC (A40) — vLLM server. OpenAI-compatible, multi-user batching.
+  #    ACTIVE model = Qwen3.6-27B (think/nothink per mode).
+  #    To switch: set VLLM_MODEL to another model_name here (e.g. the A3B MoE
+  #    below) — no code change. Both are "installed" in the catalog.
+  #    think_mode: "suffix" = vLLM /think /nothink model-name convention.
+  vllm:
+    families:
+      - id: qwen3.6_27b
+        display_name: "Qwen 3.6 27B"
+        model_name: "Qwen3.6-27B"
+        context_window: 65536          # capped so KV cache fits A40 alongside batch
+        thinking_capable: true
+        think_mode: suffix
+        recommended_execution_mode: GPU
+      - id: qwen3.6_30b_a3b
+        display_name: "Qwen 3.6 30B-A3B (MoE)"
+        model_name: "Qwen3.6-30B-A3B"  # fast standard-mode alternative; 3B active
+        context_window: 131072
+        thinking_capable: true
+        think_mode: suffix
+        recommended_execution_mode: GPU
+
+  # ── Any other OpenAI-compatible server (Ollama /v1, llama.cpp, LM Studio,
+  #    TGI…) — same adapter (provider "vllm" / alias "openai_compatible").
+  #    think_mode: "none" = model name is NEVER mangled with /think /nothink;
+  #    the server uses its own default thinking behaviour.
+  openai_compatible:
+    families:
+      - id: ollama_v1_qwen3
+        display_name: "Ollama /v1 (Qwen 3)"
+        model_name: "qwen3:8b"
+        context_window: 32768
+        thinking_capable: true
+        think_mode: none
+        recommended_execution_mode: GPU
+
+  # ── HPC fallback — run a quantized model IN-PROCESS (no vLLM server).
+  #    Slower, single-user; useful for smoke tests before vLLM is up.
+  huggingface:
+    families:
+      - id: qwen3.5_35b_a3b
+        display_name: "Qwen 3.5 35B-A3B (MoE)"
+        model_name: "Qwen/Qwen3.5-35B-A3B-GGUF"
+        context_window: 131072
+        thinking_capable: true
+        recommended_execution_mode: GPU

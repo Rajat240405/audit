@@ -19,7 +19,7 @@ Usage:
         --corpus "data/processed/*.jsonl" \
         --out-dir data/finetune \
         --max-train 1500 \
-        [--with-distill --groq-api-key $GROQ_API_KEY --with-refusals]
+        [--with-refusals]
 
 Outputs (in out-dir):
     train.jsonl   (Alpaca: {"instruction", "input", "output"})
@@ -34,7 +34,6 @@ import glob
 import json
 import random
 import re
-import sys
 from pathlib import Path
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -145,97 +144,6 @@ def build_faithful(recs: list[dict], max_items: int) -> list[dict]:
     return out
 
 
-# ── dataset B: distilled synthesis pairs (Groq teacher + grounding gate) ─
-
-def _grounding_gate(answer: str, docs: list[dict]) -> bool:
-    """Minimal grounding gate: every figure + acronym in the answer must
-    appear (normalized) in one of the docs. Strict version of the server
-    check so we only keep clean teacher outputs."""
-    import re as _re
-    figures = _re.findall(r"\b\d+(?:[.,]\d+)?\s?(?:%|mm|km|crore|lakh|MW|GW|₹|rs\.?)?\b", answer.lower())
-    acronyms = _re.findall(r"\b[A-Z]{2,8}\b", answer)
-    hay = " ".join(f"{d.get('question','')} {d.get('answer','')}" for d in docs).lower()
-    # normalize hay (strip punctuation)
-    import re as _re2
-    hay_norm = _re2.sub(r"[^a-z0-9]+", " ", hay)
-    for f in figures:
-        fn = _re2.sub(r"[^a-z0-9]+", " ", f).strip()
-        if fn and fn not in hay_norm:
-            return False
-    for a in acronyms:
-        if a in {"THE", "AND", "FOR", "NOT", "ARE", "WAS", "HAS", "GOVT", "INDIA"}:
-            continue
-        if len(a) < 3:
-            continue
-        if a.lower() not in hay_norm:
-            return False
-    return True
-
-
-def build_distilled(
-    recs: list[dict],
-    max_items: int,
-    groq_api_key: str,
-    top_k: int = 4,
-) -> list[dict]:
-    """(question + top-k related docs) -> teacher answer, gated by grounding."""
-    try:
-        from src.generation.client import LLMClient
-    except ImportError:
-        print("[distill] src.generation.client not importable; skipping distill")
-        return []
-
-    client = LLMClient(provider="groq", model="qwen/qwen3.6-27b", api_key=groq_api_key)
-    # prepare per-subject buckets for retrieval-simulation
-    buckets: dict[str, list[dict]] = {}
-    for r in recs:
-        subj = ((r.get("metadata") or {}).get("subject") or "general").strip()
-        buckets.setdefault(subj, []).append(r)
-
-    out = []
-    for subj, group in buckets.items():
-        for base in group:
-            q = clean_question(base.get("question_text") or "")
-            if not q:
-                continue
-            # pick top-k from the same subject as the "retrieved" docs
-            docs = [
-                {
-                    "doc_id": r.get("question_id", ""),
-                    "subject": (r.get("metadata") or {}).get("subject", ""),
-                    "question": clean_question(r.get("question_text") or ""),
-                    "answer": strip_answer_boilerplate(r.get("answer_text") or ""),
-                }
-                for r in random.sample(group, min(top_k, len(group)))
-            ]
-            prompt = build_user_prompt_for_train(q, docs)
-            try:
-                resp = client.generate(
-                    prompt=prompt,
-                    system=(
-                        "You are a parliamentary research assistant. Synthesize an "
-                        "answer from the retrieved context ONLY. Copy names/figures "
-                        "verbatim. Cite [Source N]. Never invent facts."
-                    ),
-                )
-                ans = resp.text.strip()
-                if ans and _grounding_gate(ans, docs):
-                    out.append({
-                        "instruction": (
-                            "You are a parliamentary research assistant. Synthesize "
-                            "an answer from the retrieved context ONLY. Copy names "
-                            "and figures exactly; never invent facts. Cite [Source N]."
-                        ),
-                        "input": prompt,
-                        "output": ans,
-                    })
-            except Exception as e:  # noqa: BLE001
-                print(f"[distill] skip ({type(e).__name__}): {str(e)[:80]}")
-            if len(out) >= max_items:
-                return out
-    return out
-
-
 # ── dataset C: honest refusals ───────────────────────────────────────────
 
 _REFUSAL = (
@@ -282,10 +190,7 @@ def main() -> None:
     ap.add_argument("--out-dir", default="data/finetune")
     ap.add_argument("--max-train", type=int, default=1500)
     ap.add_argument("--val-ratio", type=float, default=0.1)
-    ap.add_argument("--with-distill", action="store_true")
-    ap.add_argument("--groq-api-key", default=None)
     ap.add_argument("--with-refusals", action="store_true")
-    ap.add_argument("--distill-count", type=int, default=400)
     ap.add_argument("--refusal-count", type=int, default=150)
     args = ap.parse_args()
 
@@ -302,16 +207,6 @@ def main() -> None:
     faithful = build_faithful(recs_shuffled, args.max_train)
     all_items.extend(faithful)
     print(f"faithful pairs: {len(faithful)}")
-
-    # B: distilled (optional)
-    if args.with_distill:
-        key = args.groq_api_key or ""
-        if not key:
-            print("[warn] --with-distill requires --groq-api-key; skipping")
-        else:
-            dist = build_distilled(recs, args.distill_count, key)
-            all_items.extend(dist)
-            print(f"distilled pairs: {len(dist)}")
 
     # C: refusals (optional)
     if args.with_refusals:
@@ -335,7 +230,6 @@ def main() -> None:
         json.dump({
             "train": len(train), "val": len(val),
             "faithful": len(faithful),
-            "distilled": len(all_items) - len(faithful) - (len(refusals) if args.with_refusals else 0),
             "sample": all_items[0] if all_items else None,
         }, f, ensure_ascii=False, indent=2)
 

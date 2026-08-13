@@ -3,8 +3,7 @@ Entity and relationship extraction via a configurable LLM provider.
 
 The LLM backend is selected by ``GRAPHRAG_LLM_PROVIDER``:
   - ``ollama``            local Ollama (default)
-  - ``groq``              Groq cloud (multi-key failover via GROQ_API_KEYS)
-  - ``openai_compatible`` any OpenAI-compatible endpoint (future)
+  - ``ollama``           local Ollama (default)
 
 Design goals (per the production spec):
 - Deterministic metadata entities (ministry, document) are added without the LLM.

@@ -14,6 +14,8 @@ export interface ChatStreamOptions {
   retrievalMode: RetrievalMode;
   draftStyle?: DraftStyle | string;
   docTypes?: string[];
+  orgs?: string[];
+  docCategories?: string[];
   topK?: number;
   signal?: AbortSignal;
   handlers: StreamHandlers;
@@ -29,6 +31,8 @@ export function streamChat(opts: ChatStreamOptions): void {
       retrieval_mode: opts.retrievalMode,
       draft_style: opts.draftStyle && opts.draftStyle !== "default" ? opts.draftStyle : undefined,
       doc_types: opts.docTypes && opts.docTypes.length ? opts.docTypes : undefined,
+      orgs: opts.orgs && opts.orgs.length ? opts.orgs : undefined,
+      doc_categories: opts.docCategories && opts.docCategories.length ? opts.docCategories : undefined,
       top_k: opts.topK ?? 5,
     },
     opts.handlers,

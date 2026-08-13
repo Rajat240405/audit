@@ -46,19 +46,22 @@ from src.scripts.convert_sirs_knowledge import (
 )
 from src.scripts.detect_doc_type import detect_doc_type, readable_type
 
-CORPUS = Path("data/corpus_reports.jsonl")
-LOG = Path("data/sync.log")
-INDEX_DIR = "storage/hybrid_rag"
+# Project-root-relative paths (never CWD) — same convention as the server's
+# PROJECT_ROOT, so ingest works from any working directory (CLI or in-process).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CORPUS = _PROJECT_ROOT / "data" / "corpus_reports.jsonl"
+LOG = _PROJECT_ROOT / "data" / "sync.log"
+INDEX_DIR = str(_PROJECT_ROOT / "storage" / "hybrid_rag")
 
 KNOWN_FOLDERS = [
-    "data/inbox",
-    "data/annual_reports",
-    "data/incois_reports/AnnualReports",
-    "data/incois_reports/Others",
-    "data/incois_reports/TechnicalReports",
-    "data/incois_reports/ResearchPublications",
-    "data/moes_reports/knowledge",
-    "data/scanned_ocr",
+    _PROJECT_ROOT / "data" / "inbox",
+    _PROJECT_ROOT / "data" / "annual_reports",
+    _PROJECT_ROOT / "data" / "incois_reports" / "AnnualReports",
+    _PROJECT_ROOT / "data" / "incois_reports" / "Others",
+    _PROJECT_ROOT / "data" / "incois_reports" / "TechnicalReports",
+    _PROJECT_ROOT / "data" / "incois_reports" / "ResearchPublications",
+    _PROJECT_ROOT / "data" / "moes_reports" / "knowledge",
+    _PROJECT_ROOT / "data" / "scanned_ocr",
 ]
 
 
@@ -176,7 +179,17 @@ def ingest_folder(folder: str, move_processed: bool = False) -> dict:
 
     ok = fail = 0
     types_used: dict[str, int] = {}
+    # Crawl (crawl_incois_reports) writes a .txt next to each .pdf — skip the
+    # .txt when its .pdf sibling exists so each report is ingested exactly
+    # once (from the PDF, which keeps full fidelity).
+    def _stem(f: Path) -> str:
+        name = f.name
+        return name.rsplit(".", 1)[0] if "." in name else name
+    pdf_stems = {_stem(f) for f in files if f.suffix.lower() == ".pdf"}
     for f in files:
+        if f.suffix.lower() == ".txt" and _stem(f) in pdf_stems:
+            log(f"  skip {f.name} (duplicate of its .pdf)")
+            continue
         try:
             before = len(out)
             n = convert_one_detected(f, out, seen, move_processed)
@@ -227,16 +240,17 @@ def incremental_update() -> None:
 
     env = dict(_os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    code = (
+        "from src.retrieval.hybrid.pipeline import HybridRAGPipeline; "
+        "from src.data.loader import DataLoader; "
+        f"p = HybridRAGPipeline(); p.load({str(INDEX_DIR)!r}); "
+        f"recs = DataLoader.load_jsonl({str(CORPUS)!r}); "
+        "n = p.add_records(recs); "
+        f"if n: p.save({str(INDEX_DIR)!r}); "
+        "print(f'INCR_ADDED={n}')"
+    )
     r = subprocess.run(
-        [sys.executable, "-c",
-         "from src.retrieval.hybrid.pipeline import HybridRAGPipeline; "
-         "from src.data.loader import DataLoader; "
-         "import json; "
-         "p = HybridRAGPipeline(); p.load('storage/hybrid_rag'); "
-         "recs = DataLoader.load_jsonl('data/corpus_reports.jsonl'); "
-         "n = p.add_records(recs); "
-         "if n: p.save('storage/hybrid_rag'); "
-         "print(f'INCR_ADDED={n}')"],
+        [sys.executable, "-c", code],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=env, timeout=3600,
     )
@@ -267,7 +281,8 @@ def rebuild_index() -> None:
     env["PYTHONIOENCODING"] = "utf-8"
     r = subprocess.run(
         [sys.executable, "-m", "src.retrieval.cli", "build",
-         "--data", str(CORPUS), "--rebuild"],
+         "--data", str(CORPUS), "--rebuild",
+         "--output", str(INDEX_DIR)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=env, timeout=3600,
     )
@@ -302,7 +317,7 @@ def main() -> None:
 
     total_added = 0
     for folder in folders:
-        move = args.move_processed or ("inbox" in folder)
+        move = args.move_processed or ("inbox" in str(folder).lower())
         res = ingest_folder(folder, move_processed=move)
         total_added += res["added"]
 

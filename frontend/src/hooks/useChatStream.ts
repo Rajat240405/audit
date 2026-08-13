@@ -7,6 +7,7 @@ import { useSessionStore } from "@/store/useSessionStore";
 import { useToastStore } from "@/store/useToastStore";
 import { useActivityStore } from "@/store/useActivityStore";
 import { graphStages, hybridStages } from "@/utils/formatters";
+import { expandOrgFilter } from "@/lib/sourceFilter";
 import type { ChatMessage, SourceItem } from "@/types";
 
 /**
@@ -102,7 +103,9 @@ export function useChatStream() {
         mode: app.mode,
         retrievalMode: app.retrievalMode,
         draftStyle: app.draftStyle,
-        docTypes: app.sourceFilter,
+        // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)
+        orgs: expandOrgFilter(app.sourceFilter.ministry, app.sourceFilter.orgs),
+        docCategories: app.sourceFilter.docCategories,
         signal: abort.signal,
         handlers: {
           onStatus: (stage, message, done) => {

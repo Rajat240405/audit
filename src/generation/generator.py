@@ -36,7 +36,6 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 from unittest.mock import MagicMock  # For safe type checking on mocks
 import httpx
 from rich.console import Console
@@ -442,11 +441,10 @@ class AnswerGenerator:
         # ── 1. Determine active provider, model, and effective context window (Question 1) ──
         provider = getattr(self.llm_client, "provider", "ollama")
         if isinstance(provider, MagicMock):
-            provider = "groq"
-            
+            provider = "ollama"
         model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
         if isinstance(model_name, MagicMock):
-            model_name = "llama-3.3-70b-versatile"
+            model_name = "qwen2.5:7b"
 
         # Dynamically resolve from registry
         family = model_registry.get(model_name)
@@ -459,11 +457,7 @@ class AnswerGenerator:
             elif not isinstance(effective_window, (int, float)):
                 effective_window = 8192
 
-        # Safe operational context cap for cloud APIs to prevent payload sizes exceeding rate limits
-        if provider == "groq" and effective_window > 16384:
-            operational_window = 16384
-        else:
-            operational_window = effective_window
+        operational_window = effective_window
 
         budget_threshold = int(operational_window * self.context_budget_ratio)
 
@@ -497,27 +491,16 @@ class AnswerGenerator:
         temp_val = 0.2 if isinstance(temp_val, MagicMock) else temp_val
         tokens_val = 2048 if isinstance(tokens_val, MagicMock) else tokens_val
 
-        if provider == "groq":
-            simulated_payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+        simulated_payload = {
+            "model": model_name,
+            "prompt": total_prompt_text,
+            "stream": False,
+            "options": {
                 "temperature": temp_val,
-                "max_tokens": tokens_val,
-            }
-        else:
-            simulated_payload = {
-                "model": model_name,
-                "prompt": total_prompt_text,
-                "stream": False,
-                "options": {
-                    "temperature": temp_val,
-                    "num_predict": tokens_val,
-                    "num_ctx": effective_window,
-                },
-            }
+                "num_predict": tokens_val,
+                "num_ctx": effective_window,
+            },
+        }
         
         try:
             # Custom default serializer to safely handle mock attributes during pytest collection
@@ -644,10 +627,10 @@ class AnswerGenerator:
 
         provider = getattr(self.llm_client, "provider", "ollama")
         if isinstance(provider, MagicMock):
-            provider = "groq"
+            provider = "ollama"
         model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
         if isinstance(model_name, MagicMock):
-            model_name = "llama-3.3-70b-versatile"
+            model_name = "qwen2.5:7b"
 
         family = model_registry.get(model_name)
         if family:
@@ -657,10 +640,7 @@ class AnswerGenerator:
             if not isinstance(effective_window, (int, float)):
                 effective_window = 8192
 
-        if provider == "groq" and effective_window > 16384:
-            operational_window = 16384
-        else:
-            operational_window = effective_window
+        operational_window = effective_window
 
         budget_threshold = int(operational_window * self.context_budget_ratio)
         uncompressed_prompt = build_user_prompt(question, context, max_doc_chars=999999)

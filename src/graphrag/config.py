@@ -79,7 +79,7 @@ class GraphRAGConfig:
         default_factory=lambda: int(_env("GRAPHRAG_OLLAMA_TIMEOUT", "300"))
     )
 
-    # ── LLM provider selection (ollama | groq | openai_compatible) ─────
+    # ── LLM provider selection (ollama only — local) ────────────────────
     llm_provider: str = field(
         default_factory=lambda: _env("GRAPHRAG_LLM_PROVIDER", "ollama")
     )
@@ -97,55 +97,6 @@ class GraphRAGConfig:
         default_factory=lambda: int(_env("GRAPHRAG_LLM_ATTEMPTS_PER_KEY", "3"))
     )
 
-    # ── Groq (cloud; multi-key + multi-model failover) ──────────────────
-    groq_api_keys: list[str] = field(
-        default_factory=lambda: [
-            k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()
-        ]
-    )
-    groq_model: str = field(
-        default_factory=lambda: _env("GRAPHRAG_GROQ_MODEL", "llama-3.3-70b-versatile")
-    )
-    groq_models: list[str] = field(
-        default_factory=lambda: [
-            m.strip()
-            for m in _env(
-                "GRAPHRAG_GROQ_MODELS",
-                _env("GRAPHRAG_GROQ_MODEL", "llama-3.3-70b-versatile"),
-            ).split(",")
-            if m.strip()
-        ]
-    )
-    groq_base_url: str = field(
-        default_factory=lambda: _env(
-            "GRAPHRAG_GROQ_BASE_URL", "https://api.groq.com/openai/v1"
-        )
-    )
-
-    # ── OpenAI-compatible (future; same code path as Groq) ──────────────
-    openai_api_keys: list[str] = field(
-        default_factory=lambda: [
-            k.strip() for k in os.environ.get("OPENAI_API_KEYS", "").split(",") if k.strip()
-        ]
-    )
-    openai_model: str = field(
-        default_factory=lambda: _env("GRAPHRAG_OPENAI_MODEL", "gpt-4o-mini")
-    )
-    openai_models: list[str] = field(
-        default_factory=lambda: [
-            m.strip()
-            for m in _env(
-                "GRAPHRAG_OPENAI_MODELS",
-                _env("GRAPHRAG_OPENAI_MODEL", "gpt-4o-mini"),
-            ).split(",")
-            if m.strip()
-        ]
-    )
-    openai_base_url: str = field(
-        default_factory=lambda: _env(
-            "GRAPHRAG_OPENAI_BASE_URL", "https://api.openai.com/v1"
-        )
-    )
     extract_max_attempts: int = field(
         default_factory=lambda: int(_env("GRAPHRAG_EXTRACT_ATTEMPTS", "3"))
     )

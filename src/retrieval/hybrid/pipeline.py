@@ -346,6 +346,8 @@ class HybridRAGPipeline:
         top_k: int = 5,
         on_stage: Optional[Callable[[str, dict], None]] = None,
         doc_types: Optional[list[str]] = None,
+        orgs: Optional[list[str]] = None,
+        doc_categories: Optional[list[str]] = None,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
         Retrieve relevant results with standardized runtime logging (Phase 11).
@@ -400,28 +402,69 @@ class HybridRAGPipeline:
         if on_stage:
             on_stage("rrf", {"count": len(fused_results)})
 
-        # ── Stage 4.5: Source-type filter (doc_types) ─────────────────────
-        # If the user asked for specific document types (parliament / INCOIS
-        # reports / MoES reports / combination), keep ONLY candidates whose
-        # record type is allowed. The reranker then scores only those, so the
-        # answer is guaranteed to come from the requested sources.
+        # ── Stage 4.5: Metadata filters (doc_types / orgs / categories) ──
+        # Optional, applied post-RRF pre-rerank. Union WITHIN an axis, AND
+        # across axes. The reranker scores only the survivors, so the answer
+        # is guaranteed to come from the requested sources.
+        def _record_of(candidate):
+            doc_id = candidate[0]
+            rec = self._doc_map.get(doc_id)
+            if rec is None and self._chunk_map:
+                chunk = self._chunk_map.get(doc_id)
+                if chunk is not None:
+                    rec = self._doc_map.get(chunk.parent_doc_id)
+            return rec
+
+        def _type_of(candidate) -> str | None:
+            rec = _record_of(candidate)
+            if rec is None or rec.metadata is None:
+                return None
+            return (rec.metadata.document_type or "document").lower()
+
+        def _org_of(candidate) -> str | None:
+            rec = _record_of(candidate)
+            if rec is None or rec.metadata is None:
+                return None
+            from src.retrieval.frontend.org_tree import derive_org
+            return derive_org({
+                "document_type": rec.metadata.document_type,
+                "subject": rec.metadata.subject,
+                "source_url": rec.metadata.source_url,
+                "session": rec.metadata.session,
+                "question_number": rec.metadata.question_number,
+                "member": rec.metadata.member,
+                "question_text": rec.question_text,
+                "answer_text": rec.answer_text,
+            })
+
+        def _category_of(candidate) -> str | None:
+            rec = _record_of(candidate)
+            if rec is None or rec.metadata is None:
+                return None
+            from src.retrieval.frontend.org_tree import derive_category
+            return derive_category({"document_type": rec.metadata.document_type})
+
         if doc_types:
             allowed = set(doc_types)
-
-            def _type_of(candidate) -> str | None:
-                doc_id = candidate[0]
-                rec = self._doc_map.get(doc_id)
-                if rec is None and self._chunk_map:
-                    chunk = self._chunk_map.get(doc_id)
-                    if chunk is not None:
-                        rec = self._doc_map.get(chunk.parent_doc_id)
-                if rec is None or rec.metadata is None:
-                    return None
-                return (rec.metadata.document_type or "document").lower()
-
             before = len(fused_results)
             fused_results = [c for c in fused_results if (_type_of(c) or "") in allowed]
             print(f"Source filter ({sorted(allowed)}): {before} -> {len(fused_results)} candidates")
+            if on_stage:
+                on_stage("filter", {"count": len(fused_results)})
+
+        if orgs:
+            allowed = set(orgs)
+            before = len(fused_results)
+            fused_results = [c for c in fused_results if (_org_of(c) or "") in allowed]
+            print(f"Org filter ({sorted(allowed)}): {before} -> {len(fused_results)} candidates")
+            if on_stage:
+                on_stage("filter", {"count": len(fused_results)})
+
+        if doc_categories:
+            allowed = set(doc_categories)
+            before = len(fused_results)
+            fused_results = [c for c in fused_results if (_category_of(c) or "") in allowed]
+            print(f"Category filter ({sorted(allowed)}): {before} -> {len(fused_results)} candidates")
             if on_stage:
                 on_stage("filter", {"count": len(fused_results)})
 

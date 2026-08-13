@@ -7,10 +7,12 @@ Refactored to apply symmetric quality-optimized boundaries for all models.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -29,11 +31,25 @@ class ModelFamily:
     """
     id: str
     display_name: str
-    provider: str  # "ollama", "groq", "openai"
+    provider: str  # "ollama" | "huggingface"
     model_name: str  # Single concrete model name on the provider
     context_window: int
     thinking_capable: bool
     recommended_execution_mode: str = "GPU"
+    # How this provider's model signals think/nothink per request:
+    #   "suffix"  -> append /think or /nothink to the model name (vLLM qwen3.5+)
+    #   "key"     -> top-level request flag (Ollama `think`)
+    #   "none"    -> provider decides (default)
+    think_mode: str = "none"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ModelFamily":
+        """Build from a catalog entry (config/models.yaml). Unknown keys ignored."""
+        allowed = {
+            "id", "display_name", "provider", "model_name", "context_window",
+            "thinking_capable", "recommended_execution_mode", "think_mode",
+        }
+        return cls(**{k: v for k, v in d.items() if k in allowed})
 
     def get_execution_params(self, mode: str) -> Dict[str, Any]:
         """
@@ -97,135 +113,73 @@ class ModelRegistry:
         return list(self._families.values())
 
 
-# Create global pre-populated Model Registry
+# ─────────────────────────────────────────────────────────────────────────────
+# Model catalog loader — the "plugin" system.
+# config/models.yaml is the single source of truth for model families.
+# Add a model there (any provider) -> it appears in the UI/API with no code
+# change. Missing/unreadable catalog falls back to DEFAULT_CATALOG below so
+# the app never dies on a config typo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_CATALOG: dict = {
+    "providers": {
+        "ollama": {"families": [
+            {"id": "qwen3", "display_name": "Qwen 3", "model_name": "qwen3:8b",
+             "context_window": 32768, "thinking_capable": True, "recommended_execution_mode": "GPU"},
+            {"id": "qwen2.5", "display_name": "Qwen 2.5", "model_name": "qwen2.5:7b",
+             "context_window": 8192, "thinking_capable": False, "recommended_execution_mode": "GPU"},
+            {"id": "qwen2.5_1.5b", "display_name": "Qwen 2.5 (1.5B)", "model_name": "qwen2.5:1.5b",
+             "context_window": 8192, "thinking_capable": False, "recommended_execution_mode": "CPU"},
+        ]},
+        "huggingface": {"families": [
+            {"id": "qwen3.5_35b_a3b", "display_name": "Qwen 3.5 35B-A3B (MoE)",
+             "model_name": "Qwen/Qwen3.5-35B-A3B-GGUF", "context_window": 131072,
+             "thinking_capable": True, "recommended_execution_mode": "GPU"},
+        ]},
+    }
+}
+
+_MODEL_CATALOG_PATH = os.environ.get(
+    "MODEL_CATALOG", str(Path(__file__).resolve().parents[2] / "config" / "models.yaml")
+)
+
+
+def load_model_catalog(path: Optional[str] = None) -> dict:
+    """Load the model catalog file. Falls back to DEFAULT_CATALOG on any error."""
+    p = Path(path or _MODEL_CATALOG_PATH)
+    if not p.exists():
+        print(f"[models] catalog not found ({p}) — using built-in defaults")
+        return DEFAULT_CATALOG
+    try:
+        import yaml  # local import — optional dep
+        with p.open(encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        if not isinstance(data.get("providers"), dict):
+            raise ValueError("catalog missing 'providers'")
+        return data
+    except Exception as e:  # noqa: BLE001
+        print(f"[models] catalog load failed ({e}) — using built-in defaults")
+        return DEFAULT_CATALOG
+
+
+def populate_model_registry(reg: ModelRegistry, catalog: Optional[dict] = None) -> int:
+    """Register every family in the catalog into the registry. Returns count."""
+    data = catalog or load_model_catalog()
+    count = 0
+    for provider, cfg in (data.get("providers") or {}).items():
+        for entry in cfg.get("families") or []:
+            entry = dict(entry)
+            entry.setdefault("provider", provider)
+            entry.setdefault("recommended_execution_mode", "GPU")
+            entry.setdefault("think_mode", "suffix" if provider == "vllm" else "none")
+            reg.register(ModelFamily.from_dict(entry))
+            count += 1
+    return count
+
+
+# Create global pre-populated Model Registry (from the catalog file)
 model_registry = ModelRegistry()
-
-# Ollama Families (Fast/Deep are execution profiles over a single concrete model name)
-model_registry.register(ModelFamily(
-    id="qwen3",
-    display_name="Qwen 3",
-    provider="ollama",
-    model_name="qwen3:8b",
-    context_window=32768,
-    thinking_capable=True,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="qwen2.5",
-    display_name="Qwen 2.5",
-    provider="ollama",
-    model_name="qwen2.5:7b",
-    context_window=8192,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="llama3.2",
-    display_name="Llama 3.2",
-    provider="ollama",
-    model_name="llama3.2:3b",
-    context_window=8192,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="gemma2",
-    display_name="Gemma 2",
-    provider="ollama",
-    model_name="gemma2:9b",
-    context_window=8192,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="qwen2.5_1.5b",
-    display_name="Qwen 2.5 (1.5B)",
-    provider="ollama",
-    model_name="qwen2.5:1.5b",
-    context_window=8192,
-    thinking_capable=False,
-    recommended_execution_mode="CPU"
-))
-
-# Groq Families
-model_registry.register(ModelFamily(
-    id="llama3.3_70b",
-    display_name="Llama 3.3 70B",
-    provider="groq",
-    model_name="llama-3.3-70b-versatile",
-    context_window=128000,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="llama3.1_8b",
-    display_name="Llama 3.1 8B",
-    provider="groq",
-    model_name="llama-3.1-8b-instant",
-    context_window=128000,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="mixtral_8x7b",
-    display_name="Mixtral 8x7B",
-    provider="groq",
-    model_name="mixtral-8x7b-32768",
-    context_window=32768,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="gemma2_9b",
-    display_name="Gemma 2 9B",
-    provider="groq",
-    model_name="gemma2-9b-it",
-    context_window=8192,
-    thinking_capable=False,
-    recommended_execution_mode="GPU"
-))
-
-model_registry.register(ModelFamily(
-    id="deepseek_r1_70b",
-    display_name="DeepSeek R1 (70B)",
-    provider="groq",
-    model_name="deepseek-r1-distill-llama-70b",
-    context_window=128000,
-    thinking_capable=True,
-    recommended_execution_mode="GPU"
-))
-
-# HPC / in-container family — quantized MoE model run directly via
-# HuggingFaceProvider (no Ollama). A40 fits it with huge speed headroom
-# (3B active params).
-model_registry.register(ModelFamily(
-    id="qwen3.5_35b_a3b",
-    display_name="Qwen 3.5 35B-A3B (MoE)",
-    provider="huggingface",
-    model_name="Qwen/Qwen3.5-35B-A3B-GGUF",  # or unsloth path; override in container
-    context_window=131072,
-    thinking_capable=True,
-    recommended_execution_mode="GPU"
-))
-
-# OpenRouter Families (OpenAI-compatible aggregation of many models)
-model_registry.register(ModelFamily(
-    id="qwen3.6_27b",
-    display_name="Qwen 3.6 27B",
-    provider="openrouter",
-    model_name="qwen/qwen3.6-27b",
-    context_window=262144,
-    thinking_capable=True,
-    recommended_execution_mode="GPU"
-))
-
+populate_model_registry(model_registry)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider Interface and Implementations
@@ -376,299 +330,6 @@ class OllamaProvider(BaseProvider):
         }
 
 
-class GroqProvider(BaseProvider):
-    """
-    Provider implementation for Groq Cloud service.
-    """
-
-    def __init__(self, base_url: str = "https://api.groq.com/openai/v1") -> None:
-        self.base_url = base_url.rstrip("/")
-
-    def generate(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 512,
-        num_ctx: int = 128000,
-        api_key: Optional[str] = None,
-        timeout_seconds: int = 300,
-        **kwargs,
-    ) -> LLMResponse:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
-        resolved_key = api_key or os.environ.get("GROQ_API_KEY", "")
-        if not resolved_key:
-            raise ValueError("Groq API key not found. Please set the GROQ_API_KEY env or supply it.")
-
-        start_time = time.monotonic()
-
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {resolved_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        latency_ms = (time.monotonic() - start_time) * 1000
-
-        choice = data["choices"][0]
-        text = choice["message"]["content"]
-        usage = data.get("usage", {})
-
-        return LLMResponse(
-            text=text.strip(),
-            model=model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            latency_ms=latency_ms,
-            finish_reason=choice.get("finish_reason", "stop"),
-            raw_response=data,
-        )
-
-    def models(self) -> List[str]:
-        return [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it",
-            "deepseek-r1-distill-llama-70b"
-        ]
-
-    def health(self, api_key: Optional[str] = None) -> bool:
-        resolved_key = api_key or os.environ.get("GROQ_API_KEY", "")
-        if not resolved_key:
-            return False
-        try:
-            with httpx.Client(timeout=5) as client:
-                response = client.get(
-                    f"{self.base_url}/models",
-                    headers={"Authorization": f"Bearer {resolved_key}"},
-                )
-                return response.status_code == 200
-        except Exception:
-            return False
-
-    def capabilities(self) -> Dict[str, Any]:
-        return {
-            "execution_environment": "Cloud (LPU)",
-            "default_context": 128000,
-            "latency_profile": "Ultra-low token latency, network-dependent"
-        }
-
-
-class OpenAIProvider(BaseProvider):
-    """
-    Provider implementation for OpenAI Service.
-    """
-
-    def __init__(self, base_url: str = "https://api.openai.com/v1") -> None:
-        self.base_url = base_url.rstrip("/")
-
-    def generate(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 512,
-        num_ctx: int = 8192,
-        api_key: Optional[str] = None,
-        timeout_seconds: int = 300,
-        **kwargs,
-    ) -> LLMResponse:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
-        resolved_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        if not resolved_key:
-            raise ValueError("OpenAI API key not found. Please set the OPENAI_API_KEY env or supply it.")
-
-        start_time = time.monotonic()
-
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {resolved_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        latency_ms = (time.monotonic() - start_time) * 1000
-
-        choice = data["choices"][0]
-        text = choice["message"]["content"]
-        usage = data.get("usage", {})
-
-        return LLMResponse(
-            text=text.strip(),
-            model=model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            latency_ms=latency_ms,
-            finish_reason=choice.get("finish_reason", "stop"),
-            raw_response=data,
-        )
-
-    def models(self) -> List[str]:
-        return ["gpt-4o-mini", "gpt-4o"]
-
-    def health(self, api_key: Optional[str] = None) -> bool:
-        resolved_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        if not resolved_key:
-            return False
-        try:
-            with httpx.Client(timeout=5) as client:
-                response = client.get(
-                    f"{self.base_url}/models",
-                    headers={"Authorization": f"Bearer {resolved_key}"},
-                )
-                return response.status_code == 200
-        except Exception:
-            return False
-
-    def capabilities(self) -> Dict[str, Any]:
-        return {
-            "execution_environment": "Cloud (OpenAI)",
-            "default_context": 128000,
-            "latency_profile": "Standard API latency"
-        }
-
-
-class OpenRouterProvider(BaseProvider):
-    """
-    Provider implementation for OpenRouter (aggregates many open models under
-    one OpenAI-compatible API). Base URL https://openrouter.ai/api/v1.
-    Key resolution: explicit ``api_key`` arg, else ``OPENROUTER_API_KEY`` env.
-    """
-
-    def __init__(self, base_url: str = "https://openrouter.ai/api/v1") -> None:
-        self.base_url = base_url.rstrip("/")
-
-    def generate(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 512,
-        num_ctx: int = 262144,
-        api_key: Optional[str] = None,
-        timeout_seconds: int = 300,
-        **kwargs,
-    ) -> LLMResponse:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
-        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        if not resolved_key:
-            raise ValueError(
-                "OpenRouter API key not found. Set OPENROUTER_API_KEY env or supply it."
-            )
-
-        start_time = time.monotonic()
-
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {resolved_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        latency_ms = (time.monotonic() - start_time) * 1000
-
-        choice = data["choices"][0]
-        text = choice["message"]["content"]
-        usage = data.get("usage", {})
-
-        return LLMResponse(
-            text=text.strip(),
-            model=model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            latency_ms=latency_ms,
-            finish_reason=choice.get("finish_reason", "stop"),
-            raw_response=data,
-        )
-
-    def models(self) -> List[str]:
-        return [
-            "qwen/qwen3.6-27b",
-            "qwen/qwen3-32b",
-        ]
-
-    def health(self, api_key: Optional[str] = None) -> bool:
-        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        if not resolved_key:
-            return False
-        try:
-            with httpx.Client(timeout=5) as client:
-                response = client.get(
-                    f"{self.base_url}/models",
-                    headers={"Authorization": f"Bearer {resolved_key}"},
-                )
-                return response.status_code == 200
-        except Exception:
-            return False
-
-    def capabilities(self) -> Dict[str, Any]:
-        return {
-            "execution_environment": "Cloud (OpenRouter aggregation)",
-            "default_context": 262144,
-            "latency_profile": "Provider-dependent, network overhead"
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Provider Registry
-# ─────────────────────────────────────────────────────────────────────────────
-
 class HuggingFaceProvider(BaseProvider):
     """
     In-container / HPC provider: runs a quantized model DIRECTLY from a
@@ -723,7 +384,7 @@ class HuggingFaceProvider(BaseProvider):
     # ── non-streaming ────────────────────────────────────────────────────
     def generate(self, model, prompt, system=None, temperature=0.1,
                  max_tokens=512, num_ctx=16384, api_key=None,
-                 timeout_seconds=300, think=None, **kwargs) -> LLMResponse:
+                 timeout_seconds=300, think=None, base_url=None, **kwargs) -> LLMResponse:
         self._ensure_loaded(model)
         messages = []
         if system:
@@ -759,7 +420,7 @@ class HuggingFaceProvider(BaseProvider):
     # ── streaming ────────────────────────────────────────────────────────
     def generate_stream(self, model, prompt, system=None, temperature=0.1,
                         max_tokens=512, num_ctx=16384, api_key=None,
-                        timeout_seconds=300, think=None, **kwargs):
+                        timeout_seconds=300, think=None, base_url=None, **kwargs):
         """Yields {type: reasoning|tokens|answer_start|done} — same contract
         as the Ollama stream, so the frontend reasoning panel is unchanged."""
         self._ensure_loaded(model)
@@ -818,6 +479,184 @@ class HuggingFaceProvider(BaseProvider):
         }
 
 
+class OpenAICompatibleProvider(BaseProvider):
+    """Inference adapter for ANY OpenAI-compatible server (vLLM, Ollama /v1,
+    llama.cpp, LM Studio, TGI, LiteLLM…).
+
+    No API keys — this is for in-cluster / local servers only. Multi-user
+    batching is handled by the server itself (vLLM continuous batching), so
+    FastAPI can run several stateless workers pointing at one base URL.
+
+    Model-agnostic contract: chat completion + streaming with
+    ``reasoning_content`` handling (shared frontend reasoning panel). No
+    RAG/chat logic lives here — only the transport adapter differs.
+
+    Base URL resolution order: explicit constructor arg -> VLLM_BASE_URL env
+    -> http://localhost:8001. Windows dev can point VLLM_BASE_URL at Ollama's
+    OpenAI-compatible endpoint (http://localhost:11434/v1) to exercise this
+    exact code path locally.
+
+    Think/nothink is PROVIDER-AWARE via ``think_mode`` (from the model
+    catalog, config/models.yaml — per model/provider, not hardcoded):
+      - "suffix": append ``/think`` / ``/nothink`` to the model name + send
+        ``chat_template_kwargs.enable_thinking`` (vLLM qwen3.5+ convention).
+      - "none":   leave the model name untouched; the server uses its own
+        default thinking behaviour (Ollama /v1, llama.cpp, TGI, LM Studio…).
+      - ``None`` think (unspecified) -> never mangle the model name.
+    """
+
+    def __init__(self, base_url: str | None = None) -> None:
+        self._base_url_explicit = base_url is not None
+        self.base_url = (
+            (base_url or os.environ.get("VLLM_BASE_URL") or "http://localhost:8001")
+            .rstrip("/")
+        )
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    def _url(self, base_url: str | None = None) -> str:
+        if base_url:
+            return base_url.rstrip("/")
+        if not self._base_url_explicit:
+            self.base_url = (os.environ.get("VLLM_BASE_URL") or "http://localhost:8001").rstrip("/")
+        return self.base_url
+
+    def _think_model(self, model: str, think: bool | None, think_mode: str = "none") -> str:
+        """Apply the think/nothink signal ONLY for servers that support the
+        model-name suffix convention (vLLM). Safe default: never mangle."""
+        if think is None or think_mode != "suffix":
+            return model
+        return f"{model}/think" if think else f"{model}/nothink"
+
+    def _payload(
+        self, model: str, messages: list, temperature: float, max_tokens: int,
+        num_ctx: int, stream: bool, think: bool | None, think_mode: str = "none",
+    ) -> dict:
+        body: dict = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+        # chat_template_kwargs.enable_thinking is a vLLM qwen3.5+ mechanism.
+        # Only send it for suffix-mode (vLLM-style) servers; other servers may
+        # reject or ignore unknown top-level fields.
+        if think is not None and think_mode == "suffix":
+            body["chat_template_kwargs"] = {"enable_thinking": bool(think)}
+        return body
+
+    # ── non-streaming ────────────────────────────────────────────────────
+    def generate(self, model, prompt, system=None, temperature=0.1,
+                 max_tokens=512, num_ctx=16384, api_key=None,
+                 timeout_seconds=300, think=None, base_url=None,
+                 think_mode: str = "none", **kwargs) -> LLMResponse:
+        messages: list = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        model_name = self._think_model(model, think, think_mode)
+        body = self._payload(model_name, messages, temperature, max_tokens,
+                             num_ctx, stream=False, think=think, think_mode=think_mode)
+        start = time.monotonic()
+        try:
+            with httpx.Client(timeout=timeout_seconds) as client:
+                resp = client.post(f"{self._url(base_url)}/v1/chat/completions", json=body)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:  # noqa: BLE001 - surface to caller as LLM error
+            raise RuntimeError(f"OpenAI-compatible generate failed: {e}") from e
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        text = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or ""
+        full = (reasoning + text) if reasoning else text
+        usage = data.get("usage") or {}
+        lat = (time.monotonic() - start) * 1000
+        return LLMResponse(
+            text=full, model=model,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            total_tokens=int(usage.get("total_tokens", 0) or 0),
+            latency_ms=lat, finish_reason=choice.get("finish_reason", "stop"),
+            raw_response=data,
+        )
+
+    # ── streaming ────────────────────────────────────────────────────────
+    def generate_stream(self, model, prompt, system=None, temperature=0.1,
+                        max_tokens=512, num_ctx=16384, api_key=None,
+                        timeout_seconds=300, think=None, base_url=None,
+                        think_mode: str = "none", **kwargs):
+        """Yields {type: reasoning|tokens|answer_start|done} — same contract
+        as the Ollama/HF streams, so the frontend reasoning panel is shared."""
+        messages: list = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        model_name = self._think_model(model, think, think_mode)
+        body = self._payload(model_name, messages, temperature, max_tokens,
+                             num_ctx, stream=True, think=think, think_mode=think_mode)
+        with httpx.Client(timeout=timeout_seconds) as client:
+            with client.stream("POST", f"{self._url(base_url)}/v1/chat/completions", json=body) as resp:
+                resp.raise_for_status()
+                answered = False
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
+                    reasoning = delta.get("reasoning_content") or ""
+                    if reasoning:
+                        yield {"type": "reasoning", "text": reasoning}
+                    content = delta.get("content") or ""
+                    if content:
+                        if not answered:
+                            yield {"type": "answer_start"}
+                            answered = True
+                        yield {"type": "tokens", "text": content}
+        yield {"type": "done"}
+
+    def models(self) -> List[str]:
+        return [os.environ.get("VLLM_MODEL") or "Qwen3.6-27B"]
+
+    def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
+        """Readiness for any OpenAI-compatible server.
+
+        Tries, in order, and returns healthy if ANY succeeds:
+          1. GET /health            (vLLM, llama.cpp server)
+          2. GET /v1/models         (standard OpenAI-compatible models list)
+          3. GET /models            (some servers mount models at root)
+        Never reports unhealthy just because /health is missing."""
+        url = self._url(base_url)
+        probes = (f"{url}/health", f"{url}/v1/models", f"{url}/models")
+        try:
+            with httpx.Client(timeout=5) as client:
+                for probe in probes:
+                    try:
+                        r = client.get(probe)
+                        if r.status_code == 200:
+                            return True
+                    except Exception:  # noqa: BLE001 - try next probe
+                        continue
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "execution_environment": "Any OpenAI-compatible server (vLLM HPC / Ollama /v1 local)",
+            "default_context": 32768,
+            "latency_profile": "Server-dependent (vLLM A40 27B ~15-25 tok/s)",
+        }
+
+
 class ProviderRegistry:
     """
     Registry managing LLM Provider instances.
@@ -834,11 +673,13 @@ class ProviderRegistry:
 
 
 # Create global pre-populated Provider Registry
+# "vllm" is the app-level name (models.yaml / env). "openai_compatible" is an
+# explicit alias for the same adapter — any OpenAI-compatible server works.
 provider_registry = ProviderRegistry()
 provider_registry.register("ollama", OllamaProvider())
-provider_registry.register("groq", GroqProvider())
-provider_registry.register("openai", OpenAIProvider())
-provider_registry.register("openrouter", OpenRouterProvider())
 provider_registry.register("huggingface", HuggingFaceProvider())
+_openai_compat = OpenAICompatibleProvider()
+provider_registry.register("vllm", _openai_compat)
+provider_registry.register("openai_compatible", _openai_compat)
 
 

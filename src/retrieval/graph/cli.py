@@ -33,7 +33,7 @@ console = Console()
 _GRAPHRAG_DEFAULT_ENRICHED = "data/enriched/enriched_*.jsonl"
 
 # LLM backends selectable via --llm-provider (must match build_llm_provider in llm.py).
-_LLM_PROVIDERS = ["ollama", "groq", "openai_compatible"]
+_LLM_PROVIDERS = ["ollama"]
 
 
 @click.group()
@@ -77,7 +77,7 @@ def _load_config(
     "--llm-provider",
     type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
     default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+    help="LLM backend for extraction (ollama; default ollama)",
 )
 @click.option(
     "--llm-models",
@@ -143,7 +143,7 @@ def build(
     "--llm-provider",
     type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
     default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+    help="LLM backend for extraction (ollama; default ollama)",
 )
 @click.option(
     "--llm-models",
@@ -197,7 +197,7 @@ def rebuild(
     "--llm-provider",
     type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
     default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
+    help="LLM backend for extraction (ollama; default ollama)",
 )
 @click.option(
     "--llm-models",
@@ -286,7 +286,7 @@ def stats(checkpoint: str | None) -> None:
     "--llm-provider",
     type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
     default=None,
-    help="LLM backend for entity extraction (ollama | groq | openai_compatible; default ollama)",
+    help="LLM backend for entity extraction (ollama; default ollama)",
 )
 @click.option(
     "--llm-models",

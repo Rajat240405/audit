@@ -6,7 +6,7 @@ A single multi-line panel (driven by ``rich.live.Live``) showing:
     Document: 512 / 1352 (37.9%)
     ██████████░░░░░░░░░░░░░░░░░  37.9%
     Current ID : 17-12-2138
-    Provider   : groq
+    Provider   : ollama
     Model      : qwen3.6-27b
     API Key    : ...91CD
     Elapsed    : 2h 18m 05s

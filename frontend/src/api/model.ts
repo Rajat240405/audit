@@ -103,9 +103,24 @@ export async function lookupKnowledge(q: string): Promise<{
   return apiFetch(`/api/knowledge-lookup?q=${encodeURIComponent(q)}`);
 }
 
+export interface SourceOrg {
+  slug: string;
+  name: string;
+  count: number;
+  categories: string[];
+}
+
+export interface SourceMinistry {
+  name: string;
+  count: number;
+  orgs: SourceOrg[];
+}
+
 export interface SourceCatalogue {
+  tree: Record<string, SourceMinistry>;
   types: Array<{ type: string; count: number }>;
-  ministries: Array<{ ministry: string; count: number }>;
+  categories: Array<{ category: string; count: number }>;
+  total: number;
 }
 
 export async function fetchSources(): Promise<SourceCatalogue> {

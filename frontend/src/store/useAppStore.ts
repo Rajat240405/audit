@@ -8,9 +8,12 @@ interface AppState {
   mode: ExecutionMode;
   retrievalMode: RetrievalMode;
   draftStyle: DraftStyle;
-  /** Source-type filter for retrieval: [] = all, else list of document_types
-   *  e.g. ["parliamentary_qa"], ["annual_report","technical_report"], ... */
-  sourceFilter: string[];
+  /** Source filter (ministry-tree + doc categories) for retrieval.
+   *  - ministry: "all" | ministry slug | "sansad" (top-level special source)
+   *  - orgs:     selected org slugs under the ministry; [] = all orgs of it
+   *  - docCategories: selected doc categories; [] = all
+   *  Empty orgs+ministry="all" = no filter (retrieve everything). */
+  sourceFilter: SourceFilterState;
   gpu: string;
   backendOnline: boolean | null; // null = unknown
   // header / global flags
@@ -23,11 +26,18 @@ interface AppState {
   setMode: (m: ExecutionMode) => void;
   setRetrievalMode: (m: RetrievalMode) => void;
   setDraftStyle: (s: DraftStyle) => void;
-  setSourceFilter: (f: string[]) => void;
+  setSourceFilter: (f: SourceFilterState) => void;
   setGpu: (g: string) => void;
   setBackendOnline: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
   setBuildModalOpen: (v: boolean) => void;
+}
+
+/** Source filter selection (see AppState.sourceFilter). */
+export interface SourceFilterState {
+  ministry: string;
+  orgs: string[];
+  docCategories: string[];
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -37,7 +47,7 @@ export const useAppStore = create<AppState>((set) => ({
   mode: "fast",
   retrievalMode: "hybrid",
   draftStyle: "default",
-  sourceFilter: [],
+  sourceFilter: { ministry: "all", orgs: [], docCategories: [] },
   gpu: "CPU",
   backendOnline: null,
   settingsOpen: false,

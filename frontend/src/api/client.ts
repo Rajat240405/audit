@@ -55,6 +55,16 @@ export function consumeSSE(
   handlers: StreamHandlers,
   signal?: AbortSignal
 ): void {
+  // P1.2: exactly-once completion. The backend sends an explicit `done`
+  // event AND closes the stream — naive handlers ran onDone for both, so
+  // Deep mode launched the post-verify request twice (wasted LLM, duplicate
+  // toasts/races). Whichever fires first wins; the rest no-op.
+  let completed = false;
+  const finish = () => {
+    if (completed) return;
+    completed = true;
+    finish();
+  };
   fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -65,7 +75,7 @@ export function consumeSSE(
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
         handlers.onError?.(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-        handlers.onDone?.();
+        finish();
         return;
       }
       const reader = res.body.getReader();
@@ -132,7 +142,7 @@ export function consumeSSE(
             handlers.onError?.(String(ev.message ?? "Unknown error"));
             break;
           case "done":
-            handlers.onDone?.();
+            finish();
             break;
         }
       };
@@ -159,11 +169,11 @@ export function consumeSSE(
       }
       if (buffer.trim()) processLine(buffer);
       dispatchEvent(); // flush any trailing event (no final blank line)
-      handlers.onDone?.();
+      finish();
     })
     .catch((err) => {
       if ((err as Error).name === "AbortError") return;
       handlers.onError?.(err instanceof Error ? err.message : String(err));
-      handlers.onDone?.();
+      finish();
     });
 }

@@ -17,7 +17,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import List, Optional
 
 import httpx
 import uvicorn
@@ -30,7 +30,7 @@ from src.retrieval.graph.store import GraphStore
 from src.retrieval.graph.retriever import GraphRetriever
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
-from src.generation.registry import model_registry, provider_registry
+from src.generation.registry import model_registry
 
 app = FastAPI(
     title="Parliamentary & Audit Assistant Multi-Provider API",
@@ -54,25 +54,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 from src.generation.defaults import default_family_id, default_model_name, default_num_ctx
 
+# Provider default: env-driven so the SAME code runs on PC (ollama) and
+# HPC (vllm). APP_DEFAULT_PROVIDER wins; else VLLM_BASE_URL present -> vllm.
+_DEFAULT_PROVIDER = (
+    os.environ.get("APP_DEFAULT_PROVIDER", "").strip().lower()
+    or ("vllm" if os.environ.get("VLLM_BASE_URL") else "ollama")
+)
+
 ACTIVE_CONFIG = {
-    "provider": "ollama",
+    "provider": _DEFAULT_PROVIDER,
     # Default family/model resolve from src.generation.defaults (single source)
     "model_family": default_family_id(),
     "model": default_model_name(),
     "mode": "fast",            # "fast" or "deep"
     "retrieval_mode": "hybrid",# "hybrid" or "graph"
-    "groq_api_key": None,
-    "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY") or None,
 }
 
 
 def _active_api_key(provider: str | None = None) -> str | None:
-    """Return the in-memory API key for the active (or given) cloud provider."""
-    prov = (provider or ACTIVE_CONFIG.get("provider", "ollama")).lower()
-    if prov == "groq":
-        return ACTIVE_CONFIG.get("groq_api_key")
-    if prov == "openrouter":
-        return ACTIVE_CONFIG.get("openrouter_api_key")
+    """In-memory API key slot. Local providers (ollama/huggingface) need none."""
     return None
 
 
@@ -86,10 +86,7 @@ def _resolve_max_tokens(provider: str, mode: str, family) -> int:
     tokens are guaranteed left for the final answer (reasoning tokens are
     billed regardless, so truncating them just wastes the call).
     """
-    base = family.get_execution_params(mode).get("max_tokens", 512)
-    if provider.lower() == "openrouter" and getattr(family, "thinking_capable", False):
-        return max(base, 8192)
-    return base
+    return family.get_execution_params(mode).get("max_tokens", 512)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lazy pipeline loading
@@ -201,12 +198,6 @@ class ProviderSwitchRequest(BaseModel):
     api_key: Optional[str] = None
 
 
-class ChatRequest(BaseModel):
-    message: str
-    mode: str = "fast"            # Execution Mode: "fast" or "deep"
-    retrieval_mode: str = "hybrid" # Retrieval Mode: "hybrid" or "graph"
-
-
 class ChatStreamRequest(BaseModel):
     message: str
     mode: str = "fast"            # Execution Mode: "fast" or "deep"
@@ -214,7 +205,19 @@ class ChatStreamRequest(BaseModel):
     top_k: int = 5
     draft_style: Optional[str] = None  # e.g. formal / concise / executive
     doc_types: Optional[list[str]] = None  # source filter: parliament / annual_report / ...
+    orgs: Optional[list[str]] = None          # source filter: expanded org slugs (tree rule already applied)
+    doc_categories: Optional[list[str]] = None  # source filter: annual / monthly / budget / ...
 
+
+class ChatRequest(ChatStreamRequest):
+    """Non-streaming chat request — shares the streaming schema (P1.1).
+
+    The /api/chat endpoint reads top_k / doc_types / orgs / doc_categories;
+    previously ChatRequest lacked them and every non-streaming call raised
+    AttributeError. Frontend uses /api/chat/stream, which is why this stayed
+    hidden."""
+
+    pass
 
 class SourceItem(BaseModel):
     doc_id: str
@@ -386,8 +389,8 @@ async def get_assets(path: str):
 
 @app.get("/api/providers")
 async def get_providers():
-    """Get list of active provider backends."""
-    return ["ollama", "groq", "openrouter"]
+    """Get list of active provider backends (local + HPC vLLM)."""
+    return ["ollama", "vllm"]
 
 
 @app.get("/api/models")
@@ -398,7 +401,7 @@ async def get_models(provider: str):
     or dynamic family generation for un-registered local models (Objective 1).
     """
     prov = provider.lower().strip()
-    if prov in ("groq", "openrouter"):
+    if prov in ("vllm", "huggingface"):
         families = model_registry.list_by_provider(prov)
         return [
             {
@@ -412,7 +415,7 @@ async def get_models(provider: str):
             }
             for f in families
         ]
-    elif prov == "ollama":
+    if prov == "ollama":
         try:
             # Query local Ollama service dynamically
             with httpx.Client(timeout=3.0) as client:
@@ -509,7 +512,7 @@ async def switch_provider(request: ProviderSwitchRequest):
     Also registers the Groq API key in-memory for the current session.
     """
     prov = request.provider.lower().strip()
-    if prov not in ["ollama", "groq", "openrouter"]:
+    if prov not in ["ollama", "vllm"]:
         raise HTTPException(status_code=400, detail="Unknown provider")
 
     family_id = request.model
@@ -519,11 +522,6 @@ async def switch_provider(request: ProviderSwitchRequest):
 
     ACTIVE_CONFIG["provider"] = prov
     ACTIVE_CONFIG["model_family"] = family.id
-    # Store the API key in the provider-appropriate slot (or clear it)
-    if prov == "groq":
-        ACTIVE_CONFIG["groq_api_key"] = request.api_key
-    elif prov == "openrouter":
-        ACTIVE_CONFIG["openrouter_api_key"] = request.api_key
 
     # Resolve concrete model parameters based on execution mode profile
     exec_mode = ACTIVE_CONFIG["mode"]
@@ -673,7 +671,8 @@ async def chat_endpoint(request: ChatRequest):
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
         else:
             results, timings = pipeline.retrieve(
-                query, top_k=request.top_k, doc_types=request.doc_types
+                query, top_k=request.top_k, doc_types=request.doc_types,
+                orgs=request.orgs, doc_categories=request.doc_categories,
             )
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
 
@@ -709,16 +708,6 @@ async def chat_endpoint(request: ChatRequest):
                 comp_tok = gen_res.completion_tokens
                 total_tok = gen_res.total_tokens
                 is_fallback = False
-
-                # Extract exact network overhead for Groq (Objective 7)
-                if ACTIVE_CONFIG["provider"] == "groq" and gen_res.raw_response:
-                    usage = gen_res.raw_response.get("usage", {})
-                    total_time_sec = usage.get("total_time", 0.0)
-                    if total_time_sec > 0:
-                        model_processing_ms = total_time_sec * 1000
-                        network_latency_ms = max(0.0, gen_latency - model_processing_ms)
-                    else:
-                        network_latency_ms = gen_latency * 0.15  # Fallback 15% overhead estimate
             except Exception as e:  # noqa: BLE001 - generation must never 500 the endpoint
                 # An unhandled generation error (Ollama context-length exceeded,
                 # timeout, connection drop, non-413 HTTP error) currently
@@ -732,8 +721,7 @@ async def chat_endpoint(request: ChatRequest):
                 gen_latency = (time.perf_counter() - t_gen_start) * 1000
                 provider_label = {
                     "ollama": "Ollama (Local)",
-                    "groq": "Groq (Cloud)",
-                    "openrouter": "OpenRouter (Cloud)",
+                    "huggingface": "HuggingFace (In-container)",
                 }.get(ACTIVE_CONFIG["provider"], ACTIVE_CONFIG["provider"].title())
                 answer = (
                     f"**[System Notice: {provider_label} Generation Failed]**\n\n"
@@ -753,29 +741,16 @@ async def chat_endpoint(request: ChatRequest):
             gen_latency = (time.perf_counter() - t_gen_start) * 1000
             provider_label = {
                 "ollama": "Ollama (Local)",
-                "groq": "Groq (Cloud)",
-                "openrouter": "OpenRouter (Cloud)",
+                "huggingface": "HuggingFace (In-container)",
             }.get(ACTIVE_CONFIG["provider"], ACTIVE_CONFIG["provider"].title())
-            
-            if ACTIVE_CONFIG["provider"] in ("groq", "openrouter") and not api_key:
-                err_cause = (
-                    "Authentication Failed: "
-                    f"{provider_label} API Key was not supplied or saved."
-                )
-            elif ACTIVE_CONFIG["provider"] in ("groq", "openrouter"):
-                err_cause = (
-                    "Authentication Failed: The supplied "
-                    f"{provider_label} API Key is invalid or expired."
-                )
-            else:
-                err_cause = "Ollama Offline: The local service is currently offline or unreachable."
+            err_cause = "Ollama Offline: The local service is currently offline or unreachable."
 
             answer = (
                 f"**[System Notice: {provider_label} Generation Offline]**\n\n"
-                f"The active LLM service is currently offline or unauthorized.\n"
+                f"The active LLM service is currently offline or unreachable.\n"
                 f"* **Reason**: {err_cause}\n\n"
                 f"Because this query requires cognitive synthesis, explanation, or comparison, a complete "
-                f"response cannot be compiled. Please switch back to connected providers or start the local service."
+                f"response cannot be compiled. Please start the local service."
             )
             prompt_tok = 0
             comp_tok = len(answer) // 4
@@ -1436,6 +1411,8 @@ def chat_stream(request: ChatStreamRequest):
                 results, timings = pipeline.retrieve(
                     query, top_k=request.top_k, on_stage=_collect,
                     doc_types=request.doc_types,
+                    orgs=request.orgs,
+                    doc_categories=request.doc_categories,
                 )
                 for name, info in stage_events:
                     label = {
@@ -1711,6 +1688,45 @@ def ai_edit(payload: dict):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Health endpoints (P1.8) — proxy/launcher liveness + readiness.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/health/live")
+def health_live():
+    """Process is up (does not validate models/index)."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    """Readiness: index loaded + active LLM provider reachable.
+
+    In APP_MODE=serve the serving process must be able to answer queries —
+    if the index or LLM is missing, readiness fails so the orchestrator
+    won't route traffic here (or won't call it 'up')."""
+    ok_index = False
+    try:
+        p = pipeline._get()
+        ok_index = len(p._doc_map) > 0 if not p.use_chunking else len(p._chunk_map) > 0
+    except Exception:  # noqa: BLE001
+        ok_index = False
+    ok_llm = False
+    try:
+        ok_llm = llm_client.check_health(api_key=_active_api_key())
+    except Exception:  # noqa: BLE001
+        ok_llm = False
+    ready = ok_index and ok_llm
+    return {
+        "status": "ready" if ready else "not_ready",
+        "index_loaded": ok_index,
+        "llm_healthy": ok_llm,
+        "provider": ACTIVE_CONFIG.get("provider"),
+        "model": ACTIVE_CONFIG.get("model"),
+        "app_mode": os.environ.get("APP_MODE", "serve"),
+    }
+
+
 @app.get("/api/status")
 def status():
     """Workstation header status: provider, model, mode, GPU."""
@@ -1732,9 +1748,9 @@ def status():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dynamic source catalogue — distinct document_types + ministries in the
-# corpus, so the frontend source-filter renders whatever is actually present
-# (new folder/ministry appears automatically, no hardcoded list).
+# Dynamic source catalogue — ministry tree (orgs) + doc categories + types
+# present in the corpus, so the frontend source-filter renders whatever is
+# actually present (new ministry/org appears automatically, no hardcoded list).
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SOURCES_CACHE: dict = {"data": None, "mtime": None}
@@ -1742,10 +1758,12 @@ _SOURCES_CACHE: dict = {"data": None, "mtime": None}
 
 @app.get("/api/sources")
 def sources_catalogue():
-    """Distinct document types + ministries present in the corpus JSONL."""
+    """Distinct orgs (ministry tree), doc categories + types present in the corpus."""
+    from src.retrieval.frontend.org_tree import ORG_TREE, derive_category, derive_org
+
     corpus = PROJECT_ROOT / "data" / "corpus_reports.jsonl"
     if not corpus.exists():
-        return {"types": [], "ministries": []}
+        return {"tree": {}, "types": [], "categories": [], "total": 0}
     mtime = corpus.stat().st_mtime
     if _SOURCES_CACHE["mtime"] == mtime and _SOURCES_CACHE["data"] is not None:
         return _SOURCES_CACHE["data"]
@@ -1753,7 +1771,8 @@ def sources_catalogue():
     from collections import Counter
 
     types = Counter()
-    ministries = Counter()
+    categories = Counter()
+    orgs = Counter()
     for line in open(corpus, encoding="utf-8"):
         line = line.strip()
         if not line:
@@ -1763,15 +1782,55 @@ def sources_catalogue():
         except Exception:  # noqa: BLE001
             continue
         meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
-        t = meta.get("document_type") or "document"
-        types[t] += 1
-        m = meta.get("ministry")
-        if m:
-            ministries[str(m)] += 1
+        # Derive org/category from metadata + content text (question_text /
+        # answer_text carry "Document: INCOIS ..." for report rows whose
+        # metadata subject may be absent) — keeps counts in sync with the
+        # retrieval-time filter, which uses the same derivation.
+        meta_full = dict(meta)
+        meta_full["question_text"] = rec.get("question_text") or ""
+        meta_full["answer_text"] = rec.get("answer_text") or ""
+        types[meta.get("document_type") or "document"] += 1
+        categories[derive_category(meta_full)] += 1
+        orgs[derive_org(meta_full)] += 1
+
+    # Tree with live counts (tree rule: ministry count = sum of its orgs).
+    tree: dict = {}
+    known: set[str] = set()
+    for mslug, m in ORG_TREE.items():
+        org_list = [
+            {
+                "slug": o["slug"],
+                "name": o["name"],
+                "count": orgs.get(o["slug"], 0),
+                "categories": o["categories"],
+            }
+            for o in m["orgs"]
+        ]
+        known.update(o["slug"] for o in m["orgs"])
+        tree[mslug] = {
+            "name": m["name"],
+            "count": sum(orgs.get(o["slug"], 0) for o in m["orgs"]),
+            "orgs": org_list,
+        }
+
+    # Safety: orgs discovered in the corpus but not yet in the tree.
+    extra = [
+        {"slug": s, "name": s, "count": c, "categories": []}
+        for s, c in orgs.items()
+        if s not in known
+    ]
+    if extra:
+        tree["__other__"] = {
+            "name": "Other sources",
+            "count": sum(e["count"] for e in extra),
+            "orgs": extra,
+        }
 
     data = {
+        "tree": tree,
         "types": [{"type": t, "count": c} for t, c in types.most_common()],
-        "ministries": [{"ministry": m, "count": c} for m, c in ministries.most_common()],
+        "categories": [{"category": c, "count": n} for c, n in categories.most_common()],
+        "total": sum(orgs.values()),
     }
     _SOURCES_CACHE.update({"data": data, "mtime": mtime})
     return data
@@ -1987,9 +2046,21 @@ def _run_inbox_ingest() -> None:
         _INGEST_STATE["running"] = False
 
 
+def _serve_mode_blocked():
+    """In APP_MODE=serve the serving container must not mutate corpus/index."""
+    if os.environ.get("APP_MODE", "").strip().lower() == "serve":
+        raise HTTPException(
+            status_code=403,
+            detail="Read-only serve mode: ingestion is disabled. Run the ingest/build "
+                   "job container instead (APP_MODE=ingest).",
+        )
+    return None
+
+
 @app.post("/api/ingest")
 def ingest_trigger(payload: dict):
     """Trigger ingestion of new files in data/inbox (background thread)."""
+    _serve_mode_blocked()  # no-op unless APP_MODE=serve
     if _INGEST_STATE["running"]:
         return {"status": "busy"}
     _threading.Thread(target=_run_inbox_ingest, daemon=True).start()
@@ -2004,6 +2075,7 @@ async def upload_document(request: Request):
     Filename comes as a query param: POST /api/upload?filename=report.pdf
     Returns the saved file info; then call POST /api/ingest to process.
     """
+    _serve_mode_blocked()  # no-op unless APP_MODE=serve
     filename = request.query_params.get("filename", "").strip()
     if not filename:
         raise HTTPException(status_code=400, detail="filename query param required")
@@ -2112,7 +2184,7 @@ def export_document(payload: dict):
     )
 
 
-def start_server(port: int = 4000) -> None:
+def start_server(port: int = 8000) -> None:
     """Run the FastAPI application on host 0.0.0.0."""
     uvicorn.run(app, host="0.0.0.0", port=port)
 

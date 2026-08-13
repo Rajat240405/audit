@@ -17,9 +17,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from src.generation.defaults import default_model_name
@@ -42,11 +41,12 @@ class LLMResponse:
 class LLMClient:
     """
     Provider-agnostic LLM client for parliamentary grounded generation.
-    Supports Ollama (local), OpenAI, and Groq (cloud).
-    Delegates implementation to the ProviderRegistry in Phase 10.
+    Supports Ollama (local), HuggingFace (in-process HPC), and any
+    OpenAI-compatible server (vLLM HPC / Ollama /v1 — provider "vllm").
+    Delegates implementation to the ProviderRegistry.
     """
 
-    PROVIDERS = ["ollama", "openai", "groq", "litellm", "openrouter"]
+    PROVIDERS = ["ollama", "huggingface", "vllm", "openai_compatible"]
 
     def __init__(
         self,
@@ -62,9 +62,9 @@ class LLMClient:
         Parameters
         ----------
         provider : str
-            LLM provider: "ollama", "groq", "openai".
+            LLM provider: "ollama" (local), "huggingface" (in-process HPC), or "vllm" (HPC server).
         model : str
-            Model name. For Ollama: "qwen2.5:7b", etc. For Groq: "llama-3.3-70b-versatile", etc.
+            Model name. For Ollama: "qwen3:8b", "qwen2.5:7b", etc.
         timeout_seconds : int, optional
             Request timeout for generation, in seconds. Local models (e.g. Qwen 3 8B
             on CPU via Ollama) can take several minutes to generate a full answer, so
@@ -91,13 +91,37 @@ class LLMClient:
 
         # Remember whether the caller pinned a base_url. If not, we re-resolve
         # it from the current provider on every network call — so a runtime
-        # provider switch (ollama -> openrouter) never leaves a stale URL like
-        # http://localhost:11434 behind.
+        # provider switch never leaves a stale URL like http://localhost:11434
+        # behind.
         self._base_url_explicit = base_url is not None
         if base_url:
             self.base_url = base_url.rstrip("/")
         else:
             self.base_url = self._default_base_url(provider)
+
+    def _family_think_mode(self) -> str:
+        """think_mode for the active (provider, model) family from the catalog.
+
+        The model catalog (config/models.yaml) decides how this provider/model
+        signals think/nothink:
+          - vLLM families: "suffix"  -> /think /nothink model-name suffix
+          - Ollama / other servers: "none" -> model name untouched (server default)
+        Safe default when the family isn't found: "none" (never mangle a name)."""
+        try:
+            from src.generation.registry import model_registry
+        except Exception:  # noqa: BLE001
+            return "none"
+        # 1) exact provider+model match
+        for f in model_registry.list_all():
+            if f.provider == self.provider and (f.model_name == self.model or f.id == self.model):
+                return f.think_mode
+        # 2) fallback: match by model identity across any provider — covers
+        #    dev-parity where provider stays "vllm" but VLLM_BASE_URL points
+        #    at Ollama /v1 with an ollama model (qwen3:8b -> think_mode none).
+        for f in model_registry.list_all():
+            if f.model_name == self.model or f.id == self.model:
+                return f.think_mode
+        return "none"
 
     @staticmethod
     def _default_base_url(provider: str) -> str:
@@ -106,12 +130,8 @@ class LLMClient:
         p = provider.lower().strip()
         if p == "ollama":
             return "http://localhost:11434"
-        if p == "openai":
-            return "https://api.openai.com/v1"
-        if p == "groq":
-            return "https://api.groq.com/openai/v1"
-        if p == "openrouter":
-            return "https://openrouter.ai/api/v1"
+        if p == "vllm":
+            return (os.environ.get("VLLM_BASE_URL") or "http://localhost:8001").rstrip("/")
         return "http://localhost:8000"
 
     def _ensure_base_url(self, provider: str | None = None) -> None:
@@ -122,15 +142,6 @@ class LLMClient:
             self.base_url = self._default_base_url(provider or self.provider)
 
     def _effective_max_tokens(self) -> int:
-        """Raise a small max_tokens for reasoning-capable cloud models.
-
-        Qwen3.6 (OpenRouter) spends tokens on chain-of-thought BEFORE writing
-        the answer; a tight budget leaves content:null. Reasoning tokens are
-        billed either way, so truncating them just wastes the call — give the
-        model headroom to actually finish the answer.
-        """
-        if self.provider == "openrouter" and self.max_tokens < 8192:
-            return 8192
         return self.max_tokens
 
     # ── Ollama Implementation ────────────────────────────────────────────
@@ -164,77 +175,6 @@ class LLMClient:
             **kwargs,
         )
 
-    # ── OpenAI / Groq Compatible Implementation ───────────────────────────
-
-    def _generate_openai_compatible(
-        self,
-        prompt: str,
-        system: str | None = None,
-        api_key: str | None = None,
-        **kwargs,
-    ) -> LLMResponse:
-        """Generate using OpenAI-compatible Chat Completions endpoints (kept for backward-compatibility)."""
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self._effective_max_tokens(),
-        }
-
-        # Resolve API Key
-        resolved_key = api_key or self._get_api_key()
-
-        start_time = time.monotonic()
-
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {resolved_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        latency_ms = (time.monotonic() - start_time) * 1000
-
-        choice = data["choices"][0]
-        text = choice["message"]["content"]
-        usage = data.get("usage", {})
-
-        return LLMResponse(
-            text=text.strip(),
-            model=self.model,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            latency_ms=latency_ms,
-            finish_reason=choice.get("finish_reason", "stop"),
-            raw_response=data,
-        )
-
-    def _get_api_key(self) -> str:
-        """Get API key from environment (kept for backward-compatibility)."""
-        env_var = {
-            "openai": "OPENAI_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-        }.get(self.provider, "OPENAI_API_KEY")
-        key = os.environ.get(env_var, "")
-        if not key:
-            raise ValueError(
-                f"{self.provider.upper()} API key not found in environment. "
-                f"Set the {env_var} environment variable."
-            )
-        return key
-
     # ── Public Interface ─────────────────────────────────────────────────
 
     def generate(
@@ -263,6 +203,7 @@ class LLMClient:
                 api_key=resolved_key,
                 timeout_seconds=self.timeout_seconds,
                 think=getattr(self, "think", None),
+                think_mode=self._family_think_mode(),
                 **kwargs
             )
 
@@ -270,10 +211,7 @@ class LLMClient:
         # (base_url already re-resolved by _ensure_base_url() at the top).
         if self.provider == "ollama":
             return self._generate_ollama(prompt, system, **kwargs)
-        elif self.provider in ("openai", "groq", "openrouter"):
-            return self._generate_openai_compatible(prompt, system, api_key=resolved_key, **kwargs)
-        else:
-            raise ValueError(f"Provider {self.provider!r} not implemented yet.")
+        raise ValueError(f"Provider {self.provider!r} not implemented yet.")
 
     # ── Streaming (token-by-token) ───────────────────────────────────────
 
@@ -296,26 +234,26 @@ class LLMClient:
         Used by the frontend SSE endpoint so the workspace can show BOTH the
         model's thinking (Model Activity panel) and the answer live, instead
         of silently waiting while the model reasons. Ollama uses its NDJSON
-        stream; Groq/OpenAI-compatible use SSE ``chat/completions`` streaming.
+        stream.
         """
         self._ensure_base_url()
         resolved_key = api_key or self.api_key
         if self.provider == "ollama":
             yield from self._stream_ollama(prompt, system, think=getattr(self, "think", None), **kwargs)
-        elif self.provider == "huggingface":
-            prov = provider_registry.get("huggingface")
+        elif self.provider in ("huggingface", "vllm", "openai_compatible"):
+            from src.generation.registry import provider_registry
+            prov = provider_registry.get(self.provider)
             if prov:
                 yield from prov.generate_stream(
                     model=self.model, prompt=prompt, system=system,
                     temperature=self.temperature, max_tokens=self.max_tokens,
-                    num_ctx=self.num_ctx, think=getattr(self, "think", None), **kwargs
+                    num_ctx=self.num_ctx, think=getattr(self, "think", None),
+                    base_url=self.base_url if self._base_url_explicit else None,
+                    think_mode=self._family_think_mode(),
+                    **kwargs
                 )
             else:
-                raise ValueError("huggingface provider not registered")
-        elif self.provider in ("openai", "groq", "openrouter"):
-            yield from self._stream_openai_compatible(
-                prompt, system, api_key=resolved_key, **kwargs
-            )
+                raise ValueError(f"{self.provider} provider not registered")
         else:
             raise ValueError(f"Provider {self.provider!r} does not support streaming.")
 
@@ -436,72 +374,6 @@ class LLMClient:
                         yield {"type": "done"}
                         break
 
-    def _stream_openai_compatible(
-        self,
-        prompt: str,
-        system: str | None = None,
-        api_key: str | None = None,
-        **kwargs,
-    ):
-        """Stream from Groq / OpenRouter / OpenAI-compatible /chat/completions (SSE)."""
-        # Explicit arg > in-memory session key > env var
-        resolved_key = api_key or self.api_key
-        if not resolved_key:
-            resolved_key = self._get_api_key()
-        if not resolved_key:
-            raise ValueError(
-                f"{self.provider.upper()} API key not configured for streaming."
-            )
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self._effective_max_tokens(),
-            "stream": True,
-        }
-        headers = {"Authorization": f"Bearer {resolved_key}"}
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            with client.stream(
-                "POST", f"{self.base_url}/chat/completions",
-                json=payload, headers=headers,
-            ) as resp:
-                resp.raise_for_status()
-                answered = False
-                for line in resp.iter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_str = line[len("data:"):].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    # Some providers stream reasoning in delta.reasoning_content
-                    # (DeepSeek), delta.reasoning, or delta.thinking (Ollama /v1)
-                    reasoning = (
-                        delta.get("reasoning_content")
-                        or delta.get("reasoning")
-                        or delta.get("thinking")
-                        or ""
-                    )
-                    if reasoning:
-                        yield {"type": "reasoning", "text": reasoning}
-                    chunk = delta.get("content") or ""
-                    if chunk:
-                        if not answered:
-                            yield {"type": "answer_start"}
-                            answered = True
-                        yield {"type": "tokens", "text": chunk}
-
     def check_health(self, api_key: str | None = None) -> bool:
         """Check if the selected LLM service is reachable/authorized using Provider Registry."""
         self._ensure_base_url()
@@ -511,37 +383,15 @@ class LLMClient:
 
         prov_inst = provider_registry.get(self.provider)
         if prov_inst:
-            return prov_inst.health(api_key=resolved_key)
+            return prov_inst.health(
+                api_key=resolved_key,
+                base_url=self.base_url if self._base_url_explicit else None,
+            )
 
         try:
             with httpx.Client(timeout=5) as client:
                 if self.provider == "ollama":
                     response = client.get(f"{self.base_url}/api/tags")
-                    return response.status_code == 200
-                elif self.provider == "openai":
-                    resolved_key = resolved_key or os.environ.get("OPENAI_API_KEY", "")
-                    response = client.get(
-                        f"{self.base_url}/models",
-                        headers={"Authorization": f"Bearer {resolved_key}"},
-                    )
-                    return response.status_code == 200
-                elif self.provider == "groq":
-                    resolved_key = resolved_key or os.environ.get("GROQ_API_KEY", "")
-                    if not resolved_key:
-                        return False
-                    response = client.get(
-                        f"{self.base_url}/models",
-                        headers={"Authorization": f"Bearer {resolved_key}"},
-                    )
-                    return response.status_code == 200
-                elif self.provider == "openrouter":
-                    resolved_key = resolved_key or os.environ.get("OPENROUTER_API_KEY", "")
-                    if not resolved_key:
-                        return False
-                    response = client.get(
-                        f"{self.base_url}/models",
-                        headers={"Authorization": f"Bearer {resolved_key}"},
-                    )
                     return response.status_code == 200
             return False
         except Exception:
