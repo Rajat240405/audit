@@ -1,0 +1,3 @@
+FROM incois-audit-app:hpc
+
+COPY config/models.docker.yaml /app/config/models.docker.yaml

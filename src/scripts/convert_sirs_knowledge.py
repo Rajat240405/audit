@@ -47,6 +47,11 @@ def _clean(text: str | None) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
+# Module-level default ministry. Set via --ministry CLI arg; callers that
+# import individual converter functions inherit this automatically.
+_DEFAULT_MINISTRY = "EARTH SCIENCES"
+
+
 def _make_record(
     question_text: str,
     answer_text: str,
@@ -56,14 +61,14 @@ def _make_record(
     date: str | None = None,
     document_type: str = "parliamentary_qa",
     qa_id: str | None = None,
-    ministry: str = "EARTH SCIENCES",
+    ministry: str | None = None,
 ) -> QARecord | None:
     q = _clean(question_text)
     a = _clean(answer_text)
     if len(q) < 5 or len(a) < 5:
         return None
     meta = QARecordMetadata(
-        ministry=ministry,
+        ministry=ministry or _DEFAULT_MINISTRY,
         document_type=document_type,
         subject=subject or q[:120],
         date=date,
@@ -440,7 +445,14 @@ def main() -> None:
     ap.add_argument("--reports", default=None,
                     help="Other INCOIS report folder (general/tech/research/news PDFs)")
     ap.add_argument("--out", default="data/sirs_processed.jsonl")
+    ap.add_argument("--ministry", default="EARTH SCIENCES",
+                    help="Ministry name stamped on all converted records "
+                         "(default: EARTH SCIENCES)")
     args = ap.parse_args()
+
+    # Set the module-level default so all converter functions inherit it.
+    global _DEFAULT_MINISTRY
+    _DEFAULT_MINISTRY = args.ministry
 
     out: list[QARecord] = []
     seen: set[str] = set()

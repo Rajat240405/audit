@@ -46,6 +46,13 @@ providers:
         thinking_capable: true
         think_mode: suffix
         recommended_execution_mode: GPU
+      - id: qwen3.6_35b_a3b_fp8
+        display_name: "Qwen 3.6 35B-A3B FP8"
+        model_name: "Qwen3.6-35B-A3B-FP8"
+        context_window: 32768
+        thinking_capable: true
+        think_mode: template          # vLLM: chat_template_kwargs (no model name suffix)
+        recommended_execution_mode: GPU
 
   # ── Any other OpenAI-compatible server (Ollama /v1, llama.cpp, LM Studio,
   #    TGI…) — same adapter (provider "vllm" / alias "openai_compatible").

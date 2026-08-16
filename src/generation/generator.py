@@ -36,7 +36,6 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from unittest.mock import MagicMock  # For safe type checking on mocks
 import httpx
 from rich.console import Console
 
@@ -421,10 +420,10 @@ class AnswerGenerator:
 
         # ── 1. Determine active provider, model, and effective context window (Question 1) ──
         provider = getattr(self.llm_client, "provider", "ollama")
-        if isinstance(provider, MagicMock):
+        if not isinstance(provider, str):
             provider = "ollama"
         model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
-        if isinstance(model_name, MagicMock):
+        if not isinstance(model_name, str):
             model_name = "qwen2.5:7b"
 
         # Dynamically resolve from registry
@@ -433,9 +432,7 @@ class AnswerGenerator:
             effective_window = family.context_window
         else:
             effective_window = getattr(self.llm_client, "num_ctx", default_num_ctx())
-            if isinstance(effective_window, MagicMock):
-                effective_window = 128000
-            elif not isinstance(effective_window, (int, float)):
+            if not isinstance(effective_window, (int, float)):
                 effective_window = 8192
 
         operational_window = effective_window
@@ -603,10 +600,10 @@ class AnswerGenerator:
             return
 
         provider = getattr(self.llm_client, "provider", "ollama")
-        if isinstance(provider, MagicMock):
+        if not isinstance(provider, str):
             provider = "ollama"
         model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
-        if isinstance(model_name, MagicMock):
+        if not isinstance(model_name, str):
             model_name = "qwen2.5:7b"
 
         family = model_registry.get(model_name)

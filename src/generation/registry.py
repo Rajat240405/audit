@@ -37,9 +37,11 @@ class ModelFamily:
     thinking_capable: bool
     recommended_execution_mode: str = "GPU"
     # How this provider's model signals think/nothink per request:
-    #   "suffix"  -> append /think or /nothink to the model name (vLLM qwen3.5+)
-    #   "key"     -> top-level request flag (Ollama `think`)
-    #   "none"    -> provider decides (default)
+    #   "suffix"   -> append /think or /nothink to the model name (vLLM qwen3.5+)
+    #   "template" -> send chat_template_kwargs.enable_thinking (vLLM + Qwen3.6;
+    #                 model name untouched, thinking controlled per-request)
+    #   "key"      -> top-level request flag (Ollama `think`)
+    #   "none"     -> provider decides (default)
     think_mode: str = "none"
 
     @classmethod
@@ -55,15 +57,18 @@ class ModelFamily:
         """
         Adjust execution parameters based on Fast/Deep profiles.
         Identical across all models (independent of thinking capabilities):
-        - Fast Profile: temperature = 0.0, max_tokens = 2048, top-k docs = 3, max characters = 1000.
-        - Deep Profile: temperature = 0.2, max_tokens = 4096, top-k docs = 5, max characters = 3000.
-        This provides a symmetric speed vs quality boundary across all endpoints.
+        - Fast Profile: temperature = 0.0, max_tokens = 4096, top-k docs = 3, max characters = 1000.
+        - Deep Profile: temperature = 0.2, max_tokens = 12288, top-k docs = 5, max characters = 3000.
+
+        Deep mode uses 12288 max_tokens because thinking-capable models (Qwen3.6)
+        consume max_tokens for BOTH reasoning + answer. With 4096 the model would
+        reason for ~3500 tokens and produce a truncated or empty answer.
         """
         mode = mode.lower().strip()
         if mode == "deep":
             return {
                 "temperature": 0.2,
-                "max_tokens": 4096,   # headroom for thinking + answer
+                "max_tokens": 12288,  # reasoning (~4-8k) + answer (~4k)
                 "max_context_docs": 5,
                 "max_doc_chars": 3000,
                 "thinking": True,     # Deep = think + cross-verify
@@ -72,7 +77,7 @@ class ModelFamily:
         else:
             return {
                 "temperature": 0.0,
-                "max_tokens": 2048,
+                "max_tokens": 4096,   # no reasoning overhead in Standard
                 "max_context_docs": 3,
                 "max_doc_chars": 1000,
                 "thinking": False,    # Fast = instant answer (reasoning off)
@@ -549,10 +554,12 @@ class OpenAICompatibleProvider(BaseProvider):
             "max_tokens": max_tokens,
             "stream": stream,
         }
-        # chat_template_kwargs.enable_thinking is a vLLM qwen3.5+ mechanism.
-        # Only send it for suffix-mode (vLLM-style) servers; other servers may
-        # reject or ignore unknown top-level fields.
-        if think is not None and think_mode == "suffix":
+        # chat_template_kwargs.enable_thinking is a vLLM qwen3+ mechanism.
+        # Send it for:
+        #   "suffix"   — vLLM model-name suffix convention (/think /nothink)
+        #   "template" — vLLM Qwen3.6 (model name untouched, thinking per-request)
+        # Do NOT send for "none" — the server decides (Ollama, llama.cpp, etc.)
+        if think is not None and think_mode in ("suffix", "template"):
             body["chat_template_kwargs"] = {"enable_thinking": bool(think)}
         return body
 

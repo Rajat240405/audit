@@ -34,10 +34,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-INBOX = Path("data/inbox")
+from src.utils.app_paths import inbox_dir, corpus_path, data_dir
+
+INBOX = inbox_dir()
 PROCESSED = INBOX / "processed"
-CORPUS = Path("data/corpus_reports.jsonl")
-LOG = Path("data/sync.log")
+CORPUS = corpus_path()
+LOG = data_dir() / "sync.log"
 
 
 def log(msg: str) -> None:
