@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,9 +29,14 @@ from pydantic import BaseModel
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 from src.retrieval.graph.store import GraphStore
 from src.retrieval.graph.retriever import GraphRetriever
-from src.generation.client import LLMClient
+from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
-from src.generation.registry import model_registry, resolve_family_for_provider
+from src.generation.registry import (
+    ModelFamily,
+    model_registry,
+    provider_registry,
+    resolve_family_for_provider,
+)
 from src.utils.app_paths import (
     corpus_path,
     data_dir,
@@ -64,6 +70,43 @@ _DEFAULT_PROVIDER = (
     os.environ.get("APP_DEFAULT_PROVIDER", "").strip().lower()
     or ("vllm" if os.environ.get("VLLM_BASE_URL") else "ollama")
 )
+
+
+def _enabled_providers() -> list[str]:
+    """Providers THIS deployment exposes — the runtime boundary between PC
+    and HPC (no environment-specific ifs anywhere else in the codebase).
+
+    ``APP_PROVIDERS`` (comma-separated) wins; the default is the single
+    provider derived from the environment (ollama on PC, vllm when
+    VLLM_BASE_URL is set). Unknown names are dropped. Read lazily per call
+    so tests and launchers can vary the env without re-importing the app.
+    """
+    raw = (os.environ.get("APP_PROVIDERS") or "").strip()
+    if raw:
+        provs = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        valid = [p for p in provs if provider_registry.get(p) is not None]
+        return valid or [_DEFAULT_PROVIDER]
+    return [_DEFAULT_PROVIDER]
+
+
+_PROVIDER_LABELS = {
+    "ollama": "Ollama (local)",
+    "vllm": "vLLM (server)",
+    "openai_compatible": "OpenAI-compatible (server)",
+    "huggingface": "In-process (HuggingFace)",
+}
+
+
+# Boot-time sanity: explicit APP_PROVIDERS that excludes the default provider
+# would boot into a provider the deployment says is unavailable — recover to
+# the first enabled one loudly rather than failing the first request.
+_boot_enabled = _enabled_providers()
+if _DEFAULT_PROVIDER not in _boot_enabled:
+    print(
+        f"[provider] APP_DEFAULT_PROVIDER={_DEFAULT_PROVIDER!r} is not in "
+        f"APP_PROVIDERS={_boot_enabled} — booting with {_boot_enabled[0]!r}"
+    )
+    _DEFAULT_PROVIDER = _boot_enabled[0]
 
 ACTIVE_CONFIG = {
     "provider": _DEFAULT_PROVIDER,
@@ -406,122 +449,170 @@ async def get_assets(path: str):
     return Response(content=asset.read_bytes(), media_type=media)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Served-model discovery
+#
+# The YAML catalog (config/models.yaml) is METADATA ONLY — it is never proof
+# that a model is installed. Availability comes exclusively from the provider
+# the app is connected to:
+#   Ollama              -> GET  /api/tags  (+ POST /api/show for context_length)
+#   vLLM / OpenAI-compat-> GET /v1/models  (incl. server-reported max_model_len)
+# A model file on someone's disk that the connected server does NOT serve is
+# invisible to Audit; a model served by that server is usable even when it is
+# absent from the catalog (registered dynamically with honestly-sourced or
+# explicitly-flagged fallback metadata).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Conservative last-resort context window when neither the catalog nor the
+# server reports one. Always flagged metadata_source="fallback" so the UI can
+# show it as assumed (and it errs small for budget safety).
+_SERVED_CTX_FALLBACK = 8192
+
+
+def _family_entry(f: ModelFamily, metadata_source: str) -> dict:
+    return {
+        "id": f.id,
+        "display_name": f.display_name,
+        "provider": f.provider,
+        "model_name": f.model_name,
+        "context_window": f.context_window,
+        "thinking_capable": f.thinking_capable,
+        "recommended_execution_mode": f.recommended_execution_mode,
+        "think_mode": f.think_mode,
+        "served": True,
+        "metadata_source": metadata_source,
+    }
+
+
+def _register_served_family(
+    prov: str,
+    served_id: str,
+    context_window: int,
+    thinking_capable: bool,
+    display_name: str,
+) -> str:
+    """Register (or reuse) a family for a served model so /api/provider can
+    switch to it. think_mode follows the ACTIVE provider's transport:
+    vLLM controls thinking per request via chat_template_kwargs
+    (inert for templates that don't read it) — never via name suffixes;
+    Ollama uses its top-level `think` key (think_mode is metadata only there).
+    """
+    base = re.sub(r"[^a-z0-9]+", "_", str(served_id).lower()).strip("_") or "served_model"
+    fam_id = base
+    existing = model_registry.get(fam_id)
+    if existing is not None and (
+        existing.provider != prov or existing.model_name != served_id
+    ):
+        fam_id = f"{base}__{prov}"
+        existing = model_registry.get(fam_id)
+    if existing is None:
+        model_registry.register(ModelFamily(
+            id=fam_id,
+            display_name=display_name,
+            provider=prov,
+            model_name=served_id,
+            context_window=int(context_window),
+            thinking_capable=bool(thinking_capable),
+            recommended_execution_mode="GPU",
+            think_mode="template" if prov in ("vllm", "openai_compatible") else "none",
+        ))
+    return fam_id
+
+
+def _served_family_entry(prov: str, served_id: str, server_ctx: int | None) -> dict:
+    """Map one served model id to a family entry. Metadata resolution order:
+    1. exact match in THIS provider's catalog section -> catalog metadata;
+    2. exact model_name match in another provider's section -> metadata
+       reused, transport (think_mode) follows the active provider;
+    3. server-reported context (vLLM max_model_len / Ollama /api/show);
+    4. flagged conservative fallback (never presented as detected).
+    """
+    for f in model_registry.list_by_provider(prov):
+        if f.model_name == served_id or f.id == served_id:
+            return _family_entry(f, "catalog")
+    for f in model_registry.list_all():
+        if f.provider == prov:
+            continue
+        if f.model_name == served_id:
+            fam_id = _register_served_family(
+                prov, served_id, f.context_window, f.thinking_capable, f.display_name
+            )
+            return _family_entry(model_registry.get(fam_id), "catalog")
+    if isinstance(server_ctx, int) and server_ctx > 0:
+        fam_id = _register_served_family(prov, served_id, server_ctx, False, served_id)
+        return _family_entry(model_registry.get(fam_id), "server")
+    fam_id = _register_served_family(
+        prov, served_id, _SERVED_CTX_FALLBACK, False, served_id
+    )
+    return _family_entry(model_registry.get(fam_id), "fallback")
+
+
 @app.get("/api/providers")
 async def get_providers():
-    """Get list of active provider backends (local + HPC vLLM)."""
-    return ["ollama", "vllm"]
+    """Providers enabled in THIS deployment (APP_PROVIDERS). The inactive
+    provider is not offered: the UI renders this list verbatim and
+    /api/provider + /api/models reject anything outside it."""
+    active = ACTIVE_CONFIG["provider"]
+    return [
+        {
+            "name": p,
+            "label": _PROVIDER_LABELS.get(p, p),
+            "active": p == active,
+        }
+        for p in _enabled_providers()
+    ]
 
 
 @app.get("/api/models")
 async def get_models(provider: str):
-    """
-    Get available model families dynamically for the selected provider from the Model Registry.
-    For Ollama, queries the local service dynamically and performs automated family mapping
-    or dynamic family generation for un-registered local models (Objective 1).
-    """
+    """Models available for the selected provider, DISCOVERED from the
+    connected server — never from the YAML catalog alone."""
     prov = provider.lower().strip()
-    if prov in ("vllm", "huggingface"):
-        families = model_registry.list_by_provider(prov)
-        return [
-            {
-                "id": f.id,
-                "display_name": f.display_name,
-                "provider": f.provider,
-                "model_name": f.model_name,
-                "context_window": f.context_window,
-                "thinking_capable": f.thinking_capable,
-                "recommended_execution_mode": f.recommended_execution_mode
-            }
-            for f in families
-        ]
+
+    if prov not in _enabled_providers():
+        raise HTTPException(
+            status_code=403,
+            detail=f"Provider {prov!r} is not enabled in this deployment.",
+        )
+
+    # ── Ollama: models installed in the connected Ollama service ────────
     if prov == "ollama":
+        ollama = provider_registry.get("ollama")
         try:
-            # Query local Ollama service dynamically
-            with httpx.Client(timeout=3.0) as client:
-                r = client.get("http://localhost:11434/api/tags")
-                if r.status_code == 200:
-                    ollama_data = r.json()
-                    ollama_models = [m["name"] for m in ollama_data.get("models", [])]
-                else:
-                    ollama_models = []
+            tags = ollama.list_tags(base_url=ollama_base_url())
         except Exception:
-            # Raise connection exception if Ollama is offline
-            raise HTTPException(status_code=503, detail="Ollama local service is offline or unreachable")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Ollama service is offline or unreachable at {ollama_base_url()}",
+            )
+        return [
+            _served_family_entry(prov, tag, ollama.show_context_length(tag))
+            for tag in tags
+        ]
 
-        if not ollama_models:
-            # If Ollama is running but has no models installed, return empty list
-            return []
+    # ── vLLM / any OpenAI-compatible server: what the server SERVES ─────
+    if prov in ("vllm", "openai_compatible"):
+        compat = provider_registry.get(prov)
+        try:
+            served = compat.served_models()
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail=f"{prov} server is offline or unreachable at {compat.base_url}",
+            )
+        return [
+            _served_family_entry(prov, s["id"], s.get("max_model_len"))
+            for s in served
+        ]
 
-        # Perform mapping or dynamic registration
-        resolved_families = []
-        for model_tag in ollama_models:
-            # Try to find a registered family that matches this tag
-            matched = None
-            for f in model_registry.list_by_provider("ollama"):
-                if f.model_name == model_tag or f.model_name in model_tag or model_tag in f.model_name:
-                    matched = f
-                    break
-            
-            if matched:
-                resolved_families.append({
-                    "id": matched.id,
-                    "display_name": matched.display_name,
-                    "provider": "ollama",
-                    "model_name": matched.model_name,
-                    "context_window": matched.context_window,
-                    "thinking_capable": matched.thinking_capable,
-                    "recommended_execution_mode": matched.recommended_execution_mode
-                })
-            else:
-                # Dynamically register a new family on the fly (unregistered local model)
-                base_name = model_tag.split(":")[0] if ":" in model_tag else model_tag
-                friendly_name = base_name.replace("-", " ").replace("_", " ").title()
-                tag_suffix = f" ({model_tag.split(':')[1]})" if ":" in model_tag and model_tag.split(':')[1] != "latest" else ""
-                display_name = f"{friendly_name}{tag_suffix}"
-                
-                # Clean ID
-                fam_id = model_tag.replace(":", "_").replace(".", "_").replace("-", "_")
-                
-                # Check thinking capability from substrings
-                thinking_capable = any(t in model_tag.lower() for t in ["thinking", "r1", "reason", "o1", "o3"])
-                
-                # Guess context window (must match registry defaults):
-                #   qwen3 family (qwen3:4b, qwen3:8b, qwen3.6, incois-qa) = 32768
-                #   qwen2.5 = 8192 · llama3 = 8192 · gemma = 8192 · else 8192
-                tag = model_tag.lower()
-                if "qwen3" in tag or "incois-qa" in tag:
-                    context_window = 32768
-                elif "llama3" in tag or "llama-3" in tag or "gemma" in tag:
-                    context_window = 8192
-                else:
-                    context_window = 8192
-                
-                # Register in memory
-                from src.generation.registry import ModelFamily
-                new_fam = ModelFamily(
-                    id=fam_id,
-                    display_name=display_name,
-                    provider="ollama",
-                    model_name=model_tag,
-                    context_window=context_window,
-                    thinking_capable=thinking_capable,
-                    recommended_execution_mode="GPU"
-                )
-                model_registry.register(new_fam)
+    # ── In-process provider: the catalog IS the install list ────────────
+    if prov == "huggingface":
+        return [
+            _family_entry(f, "catalog")
+            for f in model_registry.list_by_provider(prov)
+        ]
 
-                resolved_families.append({
-                    "id": fam_id,
-                    "display_name": display_name,
-                    "provider": "ollama",
-                    "model_name": model_tag,
-                    "context_window": context_window,
-                    "thinking_capable": thinking_capable,
-                    "recommended_execution_mode": "GPU"
-                })
-
-        return resolved_families
-    else:
-        raise HTTPException(status_code=400, detail="Unknown provider requested")
+    raise HTTPException(status_code=400, detail="Unknown provider requested")
 
 
 @app.post("/api/provider")
@@ -531,8 +622,13 @@ async def switch_provider(request: ProviderSwitchRequest):
     Also registers the Groq API key in-memory for the current session.
     """
     prov = request.provider.lower().strip()
-    if prov not in ["ollama", "vllm"]:
-        raise HTTPException(status_code=400, detail="Unknown provider")
+    # Backend enforcement of the deployment boundary (not just UI hiding):
+    # the provider must be enabled for THIS deployment via APP_PROVIDERS.
+    if prov not in _enabled_providers():
+        raise HTTPException(
+            status_code=403,
+            detail=f"Provider {prov!r} is not enabled in this deployment.",
+        )
 
     family_id = request.model
     family = model_registry.get(family_id)
@@ -1795,6 +1891,7 @@ def status():
         gpu = "CPU"
     return {
         "provider": ACTIVE_CONFIG["provider"],
+        "enabled_providers": _enabled_providers(),
         "model_family": ACTIVE_CONFIG["model_family"],
         "model": ACTIVE_CONFIG["model"],
         "mode": ACTIVE_CONFIG["mode"],

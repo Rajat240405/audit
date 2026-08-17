@@ -64,7 +64,18 @@ GROUNDING RULES (critical — audit transparency):
 7. Every number, figure, date, budget amount, percentage, and measurement MUST be copied VERBATIM from the retrieved context. NEVER supply a statistic from memory or training data (e.g. sea-level rise rates, radar counts, year ranges).
 8. If a name, programme, or figure is NOT in the retrieved context, OMIT it. An omitted detail is always better than an invented one. If the retrieved documents are silent on a point, state that the documents do not address it.
 9. Cite the source for each substantive claim using its [Source N] tag from the context (e.g. "[Source 1]").
-10. Do NOT hallucinate or make up facts, statistics, or claims not present in the context. If the context does not contain enough information to answer, say: "The provided context does not contain sufficient information to answer this question."""
+10. Do NOT hallucinate or make up facts, statistics, or claims that are not supported by the provided context.
+
+If the provided context is insufficient to answer the question, clearly state:
+1. That the available context is insufficient.
+2. Which specific topic, entity, fact, or part of the question is missing from the context.
+3. What portion of the question can be answered from the available context, if any.
+
+Do not use a generic refusal when you can identify the missing information.
+
+For example, if the user asks "Compare INCOIS and Virat Kohli" and the context contains information about INCOIS but nothing about Virat Kohli, say that the context contains information about INCOIS but does not contain sufficient information about Virat Kohli to make the comparison.
+
+Never fill the missing information using your own general knowledge."""
 
 
 def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> str:

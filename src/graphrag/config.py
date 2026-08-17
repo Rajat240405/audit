@@ -21,6 +21,17 @@ def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
 
+def _default_ollama_url() -> str:
+    """Shared Ollama endpoint resolver (local import keeps this module
+    dependency-light; falls back to the upstream default on any error)."""
+    try:
+        from src.generation.client import ollama_base_url
+
+        return ollama_base_url()
+    except Exception:  # noqa: BLE001
+        return "http://localhost:11434"
+
+
 @dataclass
 class GraphRAGConfig:
     """Runtime configuration for the GraphRAG pipeline."""
@@ -59,8 +70,11 @@ class GraphRAGConfig:
     )
 
     # ── Local LLM (Ollama) entity/relationship extraction ───────────────
+    # GRAPHRAG_OLLAMA_URL wins; otherwise follow the shared Ollama endpoint
+    # resolver (OLLAMA_BASE_URL / OLLAMA_HOST) so a non-default Ollama port
+    # works everywhere without a second knob.
     ollama_base_url: str = field(
-        default_factory=lambda: _env("GRAPHRAG_OLLAMA_URL", "http://localhost:11434")
+        default_factory=lambda: _env("GRAPHRAG_OLLAMA_URL", "") or _default_ollama_url()
     )
     ollama_model: str = field(
         default_factory=lambda: _env("GRAPHRAG_OLLAMA_MODEL", "qwen3:8b")

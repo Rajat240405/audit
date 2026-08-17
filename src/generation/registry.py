@@ -280,13 +280,38 @@ class BaseProvider(ABC):
         return max(1, len(text) // 4)
 
 
+def _resolved_ollama_url() -> str:
+    """Current configured Ollama endpoint (env-driven; see client.ollama_base_url)."""
+    from src.generation.client import ollama_base_url
+
+    return ollama_base_url()
+
+
 class OllamaProvider(BaseProvider):
     """
     Provider implementation for local Ollama service.
+
+    The endpoint is NEVER hardcoded to 11434: it defaults to
+    :func:`src.generation.client.ollama_base_url` (OLLAMA_BASE_URL /
+    OLLAMA_HOST / localhost:11434), so health checks, generation, streaming
+    and model discovery all hit the same configured endpoint even when the
+    default port is unusable (e.g. a Windows excluded port range).
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434") -> None:
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None) -> None:
+        self._base_url_explicit = base_url is not None
+        self.base_url = (base_url or _resolved_ollama_url()).rstrip("/")
+
+    def _url(self, base_url: str | None = None) -> str:
+        """Resolve the endpoint for THIS call: explicit arg wins; a provider
+        built without an explicit URL re-resolves the env every call (same
+        laziness as OpenAICompatibleProvider), so health/generate/discovery
+        can never drift to a stale 11434 after an env change."""
+        if base_url:
+            return base_url.rstrip("/")
+        if not self._base_url_explicit:
+            self.base_url = _resolved_ollama_url()
+        return self.base_url
 
     def generate(
         self,
@@ -298,6 +323,7 @@ class OllamaProvider(BaseProvider):
         num_ctx: int = 16384,
         api_key: Optional[str] = None,
         timeout_seconds: int = 300,
+        base_url: Optional[str] = None,
         **kwargs,
     ) -> LLMResponse:
         # CRITICAL: use /api/chat + messages so Ollama applies the model's own
@@ -329,9 +355,13 @@ class OllamaProvider(BaseProvider):
 
         start_time = time.monotonic()
 
+        # LLMClient always passes its (resolved) base_url — explicit arg
+        # wins; otherwise the env is re-resolved (never a stale default).
+        url = self._url(base_url)
+
         with httpx.Client(timeout=timeout_seconds) as client:
             response = client.post(
-                f"{self.base_url}/api/chat",
+                f"{url}/api/chat",
                 json=payload,
             )
             response.raise_for_status()
@@ -357,10 +387,7 @@ class OllamaProvider(BaseProvider):
 
     def models(self) -> List[str]:
         try:
-            r = httpx.get(f"{self.base_url}/api/tags", timeout=3.0)
-            if r.status_code == 200:
-                data = r.json()
-                return [m["name"] for m in data.get("models", [])]
+            return self.list_tags()
         except Exception:
             pass
         # Fallback matching the requested UI defaults (qwen3:8b is the
@@ -368,9 +395,39 @@ class OllamaProvider(BaseProvider):
         # whenever Ollama is offline)
         return ["qwen3:8b", "qwen2.5:7b", "qwen2.5:3b", "llama3.2:3b", "gemma2:9b"]
 
+    def list_tags(self, base_url: str | None = None) -> List[str]:
+        """Models actually installed in THIS Ollama (``GET /api/tags``).
+
+        Raises on connection/HTTP failure — callers that need an
+        offline-tolerant path use :meth:`models`; the discovery endpoint
+        turns the exception into HTTP 503 instead of pretending the catalog
+        is installed."""
+        url = self._url(base_url)
+        with httpx.Client(timeout=3.0) as client:
+            r = client.get(f"{url}/api/tags")
+            r.raise_for_status()
+            return [m["name"] for m in (r.json().get("models") or []) if m.get("name")]
+
+    def show_context_length(self, model: str, base_url: str | None = None) -> int | None:
+        """Real ``context_length`` from ``POST /api/show`` (server-reported,
+        not guessed). None when Ollama does not report it."""
+        url = self._url(base_url)
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                r = client.post(f"{url}/api/show", json={"name": model})
+                if r.status_code != 200:
+                    return None
+                info = r.json().get("model_info") or {}
+                for k, v in info.items():
+                    if str(k).endswith("context_length") and isinstance(v, int):
+                        return v
+        except Exception:  # noqa: BLE001 - metadata is best-effort
+            return None
+        return None
+
     def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
         """Same signature as OpenAICompatibleProvider.health (LLMClient always passes base_url)."""
-        url = (base_url or self.base_url).rstrip("/")
+        url = self._url(base_url)
         try:
             with httpx.Client(timeout=5) as client:
                 response = client.get(f"{url}/api/tags")
@@ -689,6 +746,37 @@ class OpenAICompatibleProvider(BaseProvider):
 
     def models(self) -> List[str]:
         return [os.environ.get("VLLM_MODEL") or "Qwen3.6-35B-A3B-FP8"]
+
+    def served_models(self, base_url: str | None = None) -> List[Dict[str, Any]]:
+        """Models actually SERVED by the connected server (``GET /v1/models``).
+
+        This is the ONLY availability source for the vLLM path: a model file
+        sitting in someone's directory is irrelevant — what the connected
+        vLLM process serves is what Audit can use. Returns
+        ``[{"id": <served id>, "max_model_len": <int|None>}, ...]``
+        (vLLM reports ``max_model_len`` per model card when launched with a
+        known context, so the context window is server-reported rather than
+        invented). Raises on connection/HTTP failure — the endpoint surface
+        turns that into HTTP 503 instead of silently falling back to the
+        YAML catalog."""
+        from src.generation.openai_url import models_url
+
+        url = models_url(self._url(base_url))
+        with httpx.Client(timeout=4.0) as client:
+            r = client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        out: List[Dict[str, Any]] = []
+        for m in (data.get("data") or []):
+            mid = m.get("id")
+            if not mid:
+                continue
+            max_len = m.get("max_model_len")
+            out.append({
+                "id": mid,
+                "max_model_len": int(max_len) if isinstance(max_len, (int, float)) else None,
+            })
+        return out
 
     def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
         """Readiness for any OpenAI-compatible server.

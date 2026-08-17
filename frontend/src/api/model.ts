@@ -4,6 +4,7 @@ import type { ExecutionMode, ServerStatus, SourceItem } from "@/types";
 export interface ProviderInfo {
   name: string;
   label?: string;
+  active?: boolean;
 }
 
 export interface ModelFamily {
@@ -13,6 +14,13 @@ export interface ModelFamily {
   context_window: number;
   thinking_capable: boolean;
   recommended_execution_mode?: string;
+  provider?: string;
+  think_mode?: string;
+  /** true when the entry was discovered from the running server (always true
+   * for the discovery-driven /api/models endpoint) */
+  served?: boolean;
+  /** where the metadata came from: catalog | server | fallback (assumed) */
+  metadata_source?: string;
 }
 
 export async function fetchProviders(): Promise<ProviderInfo[]> {

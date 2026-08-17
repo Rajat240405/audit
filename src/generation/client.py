@@ -38,6 +38,39 @@ class LLMResponse:
     raw_response: dict | None = None
 
 
+def ollama_base_url() -> str:
+    """THE configured Ollama endpoint — one resolver for every code path
+    (client base URL, provider health, generation, streaming, /api/models
+    discovery). Resolution order:
+
+      1. ``OLLAMA_BASE_URL`` — full URL, e.g. ``http://127.0.0.1:12000``
+      2. ``OLLAMA_HOST``     — upstream-style ``host[:port]`` (scheme added;
+                               a wildcard bind like ``0.0.0.0:12000`` becomes
+                               ``127.0.0.1:12000`` because clients cannot dial
+                               the wildcard address)
+      3. ``http://localhost:11434`` (upstream default)
+
+    Windows note: if the default port fails with ``bind: An attempt was made
+    to access a socket in a way forbidden by its access permissions`` while
+    nothing listens there, the port is inside a WinHTTP excluded range
+    (``netsh interface ipv4 show excludedportrange protocol=tcp``). Serve
+    Ollama on a free port (e.g. ``OLLAMA_HOST=127.0.0.1:12000 ollama serve``)
+    and set the same value here — no code change, no hardcoded port.
+    """
+    raw = (os.environ.get("OLLAMA_BASE_URL") or "").strip()
+    if not raw:
+        host = (os.environ.get("OLLAMA_HOST") or "").strip()
+        if host:
+            raw = host if "://" in host else f"http://{host}"
+    if not raw:
+        return "http://localhost:11434"
+    raw = raw.rstrip("/")
+    # Clients cannot connect to a wildcard bind address — dial loopback instead.
+    raw = re.sub(r"^(https?://)0\.0\.0\.0(?=[:/]|$)", r"\g<1>127.0.0.1", raw)
+    raw = raw.replace("://[::]", "://127.0.0.1").replace("://[::1]", "://127.0.0.1")
+    return raw
+
+
 class LLMClient:
     """
     Provider-agnostic LLM client for parliamentary grounded generation.
@@ -131,7 +164,7 @@ class LLMClient:
         pinned an explicit base_url, e.g. a custom Ollama host)."""
         p = provider.lower().strip()
         if p == "ollama":
-            return "http://localhost:11434"
+            return ollama_base_url()
         if p == "vllm":
             return (os.environ.get("VLLM_BASE_URL") or "http://localhost:8001").rstrip("/")
         return "http://localhost:8000"

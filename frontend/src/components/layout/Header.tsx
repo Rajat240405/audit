@@ -1,6 +1,7 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Moon, Sun, Brain, Settings as SettingsIcon } from "lucide-react";
-import { fetchModels, setProvider } from "@/api/model";
+import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import { SourceFilter } from "./SourceFilter";
 import { useThemeStore } from "@/store/useThemeStore";
@@ -33,6 +34,15 @@ const DRAFT_STYLES = [
 export function Header() {
   const app = useAppStore();
 
+  // The deployment's ENABLED providers come from the backend (/api/providers)
+  // — never hardcoded. A single-provider deployment (PC=ollama, HPC=vllm)
+  // renders exactly that one option.
+  const { data: providers } = useQuery({
+    queryKey: ["providers"],
+    queryFn: fetchProviders,
+    staleTime: 300_000,
+  });
+
   const { data: models } = useQuery({
     queryKey: ["models", app.provider],
     queryFn: () => fetchModels(app.provider),
@@ -57,6 +67,17 @@ export function Header() {
     }
   };
 
+  // If the locally-stored provider isn't enabled in this deployment
+  // (e.g. "ollama" default on an HPC vLLM backend), adopt the active one.
+  useEffect(() => {
+    if (!providers || providers.length === 0) return;
+    if (!providers.some((p) => p.name === app.provider)) {
+      const preferred = providers.find((p) => p.active) ?? providers[0];
+      void changeProvider(preferred.name);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers]);
+
   return (
     <header className="flex shrink-0 items-center gap-3 border-b border-border bg-surface px-4 py-2">
       <div className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-wide">
@@ -66,12 +87,15 @@ export function Header() {
 
       <div className="flex flex-1 items-center justify-center gap-3 text-sm">
         <Select value={app.provider} onValueChange={changeProvider}>
-          <SelectTrigger className="w-24">
+          <SelectTrigger className="w-28">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="ollama">Ollama</SelectItem>
-            <SelectItem value="vllm">vLLM</SelectItem>
+            {(providers ?? []).map((p) => (
+              <SelectItem key={p.name} value={p.name}>
+                {p.label ?? p.name}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
 

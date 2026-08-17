@@ -11,12 +11,18 @@ from src.utils.app_paths import config_path
 def test_production_catalog_vllm_is_hpc_only():
     data = load_model_catalog(str(config_path("models.yaml")))
     vllm = [f["model_name"] for f in data["providers"]["vllm"]["families"]]
-    assert vllm == [
-    "Qwen3.6-27B",
-    "Qwen3.6-30B-A3B",
-    "Qwen3.6-35B-A3B-FP8",
-    ]
+    assert vllm == ["Qwen3.6-27B", "Qwen3.6-30B-A3B", "Qwen3.6-35B-A3B-FP8"]
     assert "qwen3:8b" not in vllm
+
+
+def test_production_catalog_vllm_never_uses_name_suffix():
+    """HPC thinking control is chat_template_kwargs only (no /think|/nothink)."""
+    data = load_model_catalog(str(config_path("models.yaml")))
+    families = data["providers"]["vllm"]["families"]
+    assert all(f.get("think_mode") == "template" for f in families)
+    fp8 = next(f for f in families if f["model_name"] == "Qwen3.6-35B-A3B-FP8")
+    assert fp8["context_window"] == 32768
+    assert fp8["thinking_capable"] is True
 
 
 def test_docker_catalog_adds_host_ollama_and_keeps_hpc():
@@ -28,8 +34,12 @@ def test_docker_catalog_adds_host_ollama_and_keeps_hpc():
     assert names[0] == "qwen3:8b"
     assert "Qwen3.6-27B" in names
     assert "Qwen3.6-30B-A3B" in names
+    assert "Qwen3.6-35B-A3B-FP8" in names
     host = next(f for f in families if f["id"] == "ollama_qwen3_8b")
     assert host["think_mode"] == "none"
+    # The HPC overlay entries mirror production: template mode, never suffix.
+    hpc = [f for f in families if f["id"] != "ollama_qwen3_8b"]
+    assert all(f.get("think_mode") == "template" for f in hpc)
 
 
 def test_docker_catalog_registers_for_vllm_dropdown(monkeypatch):
@@ -42,6 +52,7 @@ def test_docker_catalog_registers_for_vllm_dropdown(monkeypatch):
     assert "ollama_qwen3_8b" in ids
     assert "qwen3.6_27b" in ids
     assert "qwen3.6_30b_a3b" in ids
+    assert "qwen3.6_35b_a3b_fp8" in ids
     host = next(f for f in vllm if f.id == "ollama_qwen3_8b")
     assert host.model_name == "qwen3:8b"
     assert host.think_mode == "none"
