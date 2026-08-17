@@ -457,10 +457,15 @@ class AnswerGenerator:
         # ── 4. Simulate Exact Serialized Outbound Payload Size (Question 2) ──
         temp_val = getattr(self.llm_client, "temperature", 0.2)
         tokens_val = getattr(self.llm_client, "max_tokens", 2048)
-        
-        # Convert any MagicMocks safely to avoid serialization failures in tests
-        temp_val = 0.2 if isinstance(temp_val, MagicMock) else temp_val
-        tokens_val = 2048 if isinstance(tokens_val, MagicMock) else tokens_val
+
+        # These attributes come from the client object; coerce anything
+        # non-numeric (e.g. a misconfigured stand-in) to the fallback so the
+        # simulated payload always serializes. Generic type check only — no
+        # test-framework types belong in production code.
+        if isinstance(temp_val, bool) or not isinstance(temp_val, (int, float)):
+            temp_val = 0.2
+        if isinstance(tokens_val, bool) or not isinstance(tokens_val, int):
+            tokens_val = 2048
 
         simulated_payload = {
             "model": model_name,
@@ -472,14 +477,11 @@ class AnswerGenerator:
                 "num_ctx": effective_window,
             },
         }
-        
+
         try:
-            # Custom default serializer to safely handle mock attributes during pytest collection
-            def mock_safe_serializer(o):
-                if isinstance(o, MagicMock):
-                    return "mock-value"
-                return str(o)
-            serialized_bytes = len(json.dumps(simulated_payload, default=mock_safe_serializer).encode("utf-8"))
+            # default=str stringifies any leftover non-JSON value instead
+            # of crashing the stats log.
+            serialized_bytes = len(json.dumps(simulated_payload, default=str).encode("utf-8"))
         except Exception:
             serialized_bytes = len(str(simulated_payload).encode("utf-8"))
 

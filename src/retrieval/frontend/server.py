@@ -30,7 +30,7 @@ from src.retrieval.graph.store import GraphStore
 from src.retrieval.graph.retriever import GraphRetriever
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
-from src.generation.registry import model_registry
+from src.generation.registry import model_registry, resolve_family_for_provider
 from src.utils.app_paths import (
     corpus_path,
     data_dir,
@@ -157,9 +157,20 @@ if graph_store.graph_file.exists():
     graph_store.load()
 graph_retriever = GraphRetriever(store=graph_store)
 
-# Resolve default starting configuration dynamically from registry
-_default_fam = model_registry.get(ACTIVE_CONFIG["model_family"])
+# Resolve default starting configuration dynamically from registry. When the
+# env selects a non-Ollama provider (HPC: APP_DEFAULT_PROVIDER=vllm), the
+# global default family (PC/ollama "qwen3") is not served by that provider —
+# re-resolve to a family the provider actually serves (VLLM_MODEL first, else
+# the provider's first catalog entry) so the first request cannot 404 against
+# vLLM. PC/ollama boot is unchanged.
+_default_fam = resolve_family_for_provider(
+    model_registry,
+    ACTIVE_CONFIG["provider"],
+    ACTIVE_CONFIG["model_family"],
+    preferred_model=os.environ.get("VLLM_MODEL"),
+)
 if _default_fam:
+    ACTIVE_CONFIG["model_family"] = _default_fam.id
     ACTIVE_CONFIG["model"] = _default_fam.model_name
     _num_ctx = _default_fam.context_window
 else:

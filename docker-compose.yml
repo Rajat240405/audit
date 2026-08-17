@@ -23,7 +23,8 @@ services:
       APP_MODEL_DIR: /models
       APP_MODE: serve
       # OpenAI-compatible path to host Ollama (not native /api/chat).
-      # Later: VLLM_BASE_URL=http://<vllm-host>:8001  VLLM_MODEL=Qwen3.6-27B
+      # HPC: VLLM_BASE_URL=http://<vllm-host>:8001  VLLM_MODEL=Qwen3.6-35B-A3B-FP8
+      # (vLLM served with --reasoning-parser qwen3 --max-model-len 32768)
       APP_DEFAULT_PROVIDER: vllm
       VLLM_BASE_URL: http://host.docker.internal:11434/v1
       VLLM_MODEL: qwen3:8b

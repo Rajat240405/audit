@@ -104,7 +104,9 @@ class LLMClient:
 
         The model catalog (config/models.yaml) decides how this provider/model
         signals think/nothink:
-          - vLLM families: "suffix"  -> /think /nothink model-name suffix
+          - vLLM families: "template" -> chat_template_kwargs.enable_thinking
+            per request; the model NAME is never mangled with /think|/nothink
+            (not a vLLM mechanism — the server 404s unknown model ids).
           - Ollama / other servers: "none" -> model name untouched (server default)
         Safe default when the family isn't found: "none" (never mangle a name)."""
         try:

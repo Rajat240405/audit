@@ -37,11 +37,14 @@ class ModelFamily:
     thinking_capable: bool
     recommended_execution_mode: str = "GPU"
     # How this provider's model signals think/nothink per request:
-    #   "suffix"   -> append /think or /nothink to the model name (vLLM qwen3.5+)
-    #   "template" -> send chat_template_kwargs.enable_thinking (vLLM + Qwen3.6;
+    #   "template" -> send chat_template_kwargs.enable_thinking (vLLM + Qwen3.x;
     #                 model name untouched, thinking controlled per-request)
     #   "key"      -> top-level request flag (Ollama `think`)
     #   "none"     -> provider decides (default)
+    # The old "suffix" value (append /think or /nothink to the model NAME) was
+    # removed: it is not a vLLM mechanism — the server 404s any model id it
+    # does not serve. populate_model_registry migrates legacy "suffix" entries
+    # to "template" with a warning. Model names are NEVER mangled.
     think_mode: str = "none"
 
     @classmethod
@@ -176,10 +179,56 @@ def populate_model_registry(reg: ModelRegistry, catalog: Optional[dict] = None) 
             entry = dict(entry)
             entry.setdefault("provider", provider)
             entry.setdefault("recommended_execution_mode", "GPU")
-            entry.setdefault("think_mode", "suffix" if provider == "vllm" else "none")
+            # vLLM controls Qwen3.x thinking per-request via
+            # chat_template_kwargs.enable_thinking ("template") — never via a
+            # /think|/nothink model-name suffix (not a vLLM mechanism).
+            entry.setdefault("think_mode", "template" if provider == "vllm" else "none")
+            if entry["think_mode"] == "suffix":
+                print(
+                    f"[models] family {entry.get('id')!r}: think_mode 'suffix' was removed "
+                    "(vLLM does not serve '<model>/think' ids) — migrated to 'template' "
+                    "(chat_template_kwargs.enable_thinking, model name untouched)"
+                )
+                entry["think_mode"] = "template"
             reg.register(ModelFamily.from_dict(entry))
             count += 1
     return count
+
+
+def resolve_family_for_provider(
+    reg: ModelRegistry,
+    provider: str,
+    family_id: str,
+    preferred_model: Optional[str] = None,
+) -> Optional[ModelFamily]:
+    """Resolve the boot-time model family for an env-selected provider.
+
+    The global default family is the PC/Ollama one ("qwen3"). When the
+    environment selects a different provider (HPC: APP_DEFAULT_PROVIDER=vllm),
+    the boot model must be one that provider actually serves — otherwise the
+    first request 404s against vLLM until someone manually switches. Order:
+
+      1. ``family_id`` itself, if it belongs to the active provider (PC path —
+         unchanged behavior);
+      2. the provider family whose model_name/id equals ``preferred_model``
+         (HPC: ``VLLM_MODEL``);
+      3. the first family registered for the active provider;
+      4. the original ``family_id`` family as a last resort.
+
+    Pure lookup — no side effects.
+    """
+    fam = reg.get(family_id)
+    if fam is None or fam.provider == provider:
+        return fam
+    candidates = reg.list_by_provider(provider)
+    wanted = (preferred_model or "").strip()
+    if wanted:
+        for f in candidates:
+            if f.model_name == wanted or f.id == wanted:
+                return f
+    if candidates:
+        return candidates[0]
+    return fam
 
 
 # Create global pre-populated Model Registry (from the catalog file)
@@ -505,11 +554,14 @@ class OpenAICompatibleProvider(BaseProvider):
 
     Think/nothink is PROVIDER-AWARE via ``think_mode`` (from the model
     catalog, config/models.yaml — per model/provider, not hardcoded):
-      - "suffix": append ``/think`` / ``/nothink`` to the model name + send
-        ``chat_template_kwargs.enable_thinking`` (vLLM qwen3.5+ convention).
-      - "none":   leave the model name untouched; the server uses its own
-        default thinking behaviour (Ollama /v1, llama.cpp, TGI, LM Studio…).
-      - ``None`` think (unspecified) -> never mangle the model name.
+      - "template": send ``chat_template_kwargs.enable_thinking`` per request
+        (vLLM + Qwen3.x — the HPC Qwen3.6 control). The model NAME is never
+        modified: /think|/nothink name suffixes are not a vLLM mechanism
+        (the server 404s any model id it does not serve).
+      - "none":     the server uses its own default thinking behaviour
+        (Ollama /v1, llama.cpp, TGI, LM Studio…).
+      - ``None`` think (unspecified) -> no chat_template_kwargs either; the
+        server default applies.
     """
 
     def __init__(self, base_url: str | None = None) -> None:
@@ -536,30 +588,23 @@ class OpenAICompatibleProvider(BaseProvider):
     def _completions_url(self, base_url: str | None = None) -> str:
         return self.chat_completions_url(self._url(base_url))
 
-    def _think_model(self, model: str, think: bool | None, think_mode: str = "none") -> str:
-        """Apply the think/nothink signal ONLY for servers that support the
-        model-name suffix convention (vLLM). Safe default: never mangle."""
-        if think is None or think_mode != "suffix":
-            return model
-        return f"{model}/think" if think else f"{model}/nothink"
-
     def _payload(
         self, model: str, messages: list, temperature: float, max_tokens: int,
         num_ctx: int, stream: bool, think: bool | None, think_mode: str = "none",
     ) -> dict:
         body: dict = {
-            "model": model,
+            "model": model,  # sent verbatim — never mangled with /think|/nothink
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
         }
-        # chat_template_kwargs.enable_thinking is a vLLM qwen3+ mechanism.
-        # Send it for:
-        #   "suffix"   — vLLM model-name suffix convention (/think /nothink)
-        #   "template" — vLLM Qwen3.6 (model name untouched, thinking per-request)
-        # Do NOT send for "none" — the server decides (Ollama, llama.cpp, etc.)
-        if think is not None and think_mode in ("suffix", "template"):
+        # chat_template_kwargs.enable_thinking is THE vLLM Qwen3.x thinking
+        # control (Standard=False / Deep=True, per request, model id untouched).
+        # Send it ONLY for "template" families — for "none" the server decides
+        # (Ollama /v1, llama.cpp, etc. would just ignore the extra kwarg, but
+        # not sending keeps the contract explicit).
+        if think is not None and think_mode == "template":
             body["chat_template_kwargs"] = {"enable_thinking": bool(think)}
         return body
 
@@ -573,8 +618,7 @@ class OpenAICompatibleProvider(BaseProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        model_name = self._think_model(model, think, think_mode)
-        body = self._payload(model_name, messages, temperature, max_tokens,
+        body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=False, think=think, think_mode=think_mode)
         start = time.monotonic()
         try:
@@ -586,13 +630,16 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RuntimeError(f"OpenAI-compatible generate failed: {e}") from e
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
+        # Parity with OllamaProvider: ``text`` is the VISIBLE answer only.
+        # The chain-of-thought (qwen3 ``reasoning_content``) stays available in
+        # ``raw_response``; the UI surfaces reasoning via the streaming path.
+        # Gluing CoT onto the answer here would corrupt downstream citation
+        # verification and diverge from the Ollama response shape.
         text = msg.get("content") or ""
-        reasoning = msg.get("reasoning_content") or ""
-        full = (reasoning + text) if reasoning else text
         usage = data.get("usage") or {}
         lat = (time.monotonic() - start) * 1000
         return LLMResponse(
-            text=full, model=model,
+            text=text, model=model,
             prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
             completion_tokens=int(usage.get("completion_tokens", 0) or 0),
             total_tokens=int(usage.get("total_tokens", 0) or 0),
@@ -612,8 +659,7 @@ class OpenAICompatibleProvider(BaseProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        model_name = self._think_model(model, think, think_mode)
-        body = self._payload(model_name, messages, temperature, max_tokens,
+        body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=True, think=think, think_mode=think_mode)
         with httpx.Client(timeout=timeout_seconds) as client:
             with client.stream("POST", self._completions_url(base_url), json=body) as resp:
@@ -642,7 +688,7 @@ class OpenAICompatibleProvider(BaseProvider):
         yield {"type": "done"}
 
     def models(self) -> List[str]:
-        return [os.environ.get("VLLM_MODEL") or "Qwen3.6-27B"]
+        return [os.environ.get("VLLM_MODEL") or "Qwen3.6-35B-A3B-FP8"]
 
     def health(self, api_key: Optional[str] = None, base_url: str | None = None) -> bool:
         """Readiness for any OpenAI-compatible server.

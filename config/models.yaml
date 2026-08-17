@@ -26,10 +26,18 @@ providers:
       - { id: qwen2.5_1.5b,   display_name: "Qwen 2.5 (1.5B)",        model_name: "qwen2.5:1.5b",    context_window: 8192,   thinking_capable: false, recommended_execution_mode: CPU }
 
   # ── HPC (A40) — vLLM server. OpenAI-compatible, multi-user batching.
-  #    ACTIVE model = Qwen3.6-27B (think/nothink per mode).
-  #    To switch: set VLLM_MODEL to another model_name here (e.g. the A3B MoE
-  #    below) — no code change. Both are "installed" in the catalog.
-  #    think_mode: "suffix" = vLLM /think /nothink model-name convention.
+  #    DEPLOYED model = Qwen3.6-35B-A3B-FP8 (32768 context), selected at boot
+  #    via VLLM_MODEL (see .env.example). To switch models, set VLLM_MODEL to
+  #    another model_name below — no code change.
+  #    Serve the model with:
+  #      vllm serve <path> --served-model-name Qwen3.6-35B-A3B-FP8 \
+  #        --reasoning-parser qwen3 --max-model-len 32768 --port 8001
+  #    (--reasoning-parser qwen3 splits thinking into reasoning_content so the
+  #     Model Activity panel works and the answer stream stays clean.)
+  #    think_mode: "template" = thinking is controlled PER REQUEST via
+  #    chat_template_kwargs.enable_thinking (Standard=false / Deep=true).
+  #    The model name is NEVER mangled with /think or /nothink suffixes —
+  #    vLLM does not serve "<model>/think" ids (requests would 404).
   vllm:
     families:
       - id: qwen3.6_27b
@@ -37,21 +45,21 @@ providers:
         model_name: "Qwen3.6-27B"
         context_window: 65536          # capped so KV cache fits A40 alongside batch
         thinking_capable: true
-        think_mode: suffix
+        think_mode: template
         recommended_execution_mode: GPU
       - id: qwen3.6_30b_a3b
         display_name: "Qwen 3.6 30B-A3B (MoE)"
         model_name: "Qwen3.6-30B-A3B"  # fast standard-mode alternative; 3B active
         context_window: 131072
         thinking_capable: true
-        think_mode: suffix
+        think_mode: template
         recommended_execution_mode: GPU
       - id: qwen3.6_35b_a3b_fp8
         display_name: "Qwen 3.6 35B-A3B FP8"
         model_name: "Qwen3.6-35B-A3B-FP8"
         context_window: 32768
         thinking_capable: true
-        think_mode: template          # vLLM: chat_template_kwargs (no model name suffix)
+        think_mode: template          # vLLM: chat_template_kwargs (model name untouched)
         recommended_execution_mode: GPU
 
   # ── Any other OpenAI-compatible server (Ollama /v1, llama.cpp, LM Studio,

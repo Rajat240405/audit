@@ -11,7 +11,11 @@ from src.utils.app_paths import config_path
 def test_production_catalog_vllm_is_hpc_only():
     data = load_model_catalog(str(config_path("models.yaml")))
     vllm = [f["model_name"] for f in data["providers"]["vllm"]["families"]]
-    assert vllm == ["Qwen3.6-27B", "Qwen3.6-30B-A3B"]
+    assert vllm == [
+    "Qwen3.6-27B",
+    "Qwen3.6-30B-A3B",
+    "Qwen3.6-35B-A3B-FP8",
+    ]
     assert "qwen3:8b" not in vllm
 
 

@@ -28,14 +28,14 @@ providers:
         model_name: "Qwen3.6-27B"
         context_window: 65536
         thinking_capable: true
-        think_mode: suffix
+        think_mode: template
         recommended_execution_mode: GPU
       - id: qwen3.6_30b_a3b
         display_name: "Qwen 3.6 30B-A3B (MoE)"
         model_name: "Qwen3.6-30B-A3B"
         context_window: 131072
         thinking_capable: true
-        think_mode: suffix
+        think_mode: template
         recommended_execution_mode: GPU
       - id: qwen3.6_35b_a3b_fp8
         display_name: "Qwen 3.6 35B-A3B FP8"
