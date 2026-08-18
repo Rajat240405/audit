@@ -19,7 +19,16 @@ providers:
   # ── Local dev (PC) — Ollama ───────────────────────────────────────────────
   ollama:
     families:
-      - { id: qwen3,          display_name: "Qwen 3",                 model_name: "qwen3:8b",        context_window: 32768,  thinking_capable: true,  recommended_execution_mode: GPU }
+      - id: qwen3
+        display_name: "Qwen 3"
+        model_name: "qwen3:8b"
+        context_window: 32768
+        # Capability block (canonical form). Ollama's thinking control is the
+        # top-level request-level `think` flag → control: request_flag.
+        # Legacy fields below are kept consistent for old readers (dual-read).
+        thinking: { supported: true, control: request_flag }
+        thinking_capable: true
+        recommended_execution_mode: GPU
       - { id: qwen2.5,        display_name: "Qwen 2.5",               model_name: "qwen2.5:7b",      context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
       - { id: llama3.2,       display_name: "Llama 3.2",              model_name: "llama3.2:3b",     context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
       - { id: gemma2,         display_name: "Gemma 2",                model_name: "gemma2:9b",       context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
@@ -29,6 +38,9 @@ providers:
   #    DEPLOYED model = Qwen3.6-35B-A3B-FP8 (32768 context), selected at boot
   #    via VLLM_MODEL (see .env.example). To switch models, set VLLM_MODEL to
   #    another model_name below — no code change.
+  #    Qwen3.8-27B-FP8 is catalogued below (Task 2 preparation). Its server
+  #    env ADDITIONALLY requires vLLM>=0.17.0 and `pip install
+  #    "transformers>=5.8.0"` — see the entry's comment/serving notes.
   #    Serve the model with:
   #      vllm serve <path> --served-model-name Qwen3.6-35B-A3B-FP8 \
   #        --reasoning-parser qwen3 --max-model-len 32768 --port 8001
@@ -58,8 +70,49 @@ providers:
         display_name: "Qwen 3.6 35B-A3B FP8"
         model_name: "Qwen3.6-35B-A3B-FP8"
         context_window: 32768
+        # Capability block (canonical form); legacy keys kept consistent.
+        thinking: { supported: true, control: chat_template_kwargs }
+        # Serving requirements = HOW the server must be launched (deployment
+        # metadata only — never read by execution policy or sent in requests).
+        serving: { reasoning_parser: qwen3, max_model_len: 32768, notes: "A40 48GB FP8" }
         thinking_capable: true
-        think_mode: template          # vLLM: chat_template_kwargs (model name untouched)
+        think_mode: template          # legacy wire string (model name untouched)
+        recommended_execution_mode: GPU
+      # ── Qwen3.8-27B-FP8 — catalogued from the HF model card + official vLLM
+      #    recipe (Task 2; specs verified, not assumed):
+      #      dense 27B LM (64 layers = 48 Gated-DeltaNet linear + 16 full
+      #      attention; unlike 3.6-A3B it is NOT MoE) + native vision tower;
+      #      fine-grained block-FP8 (128×128, e4m3), checkpoint 28.7 GiB;
+      #      native context 262,144 (1M via YaRN override); MTP trained.
+      #    Thinking control VERIFIED = chat_template_kwargs.enable_thinking
+      #    per request — the same mechanism as Qwen3.6 (no new wire path).
+      #    Qwen3.8 ALSO supports reasoning_effort (xhigh|medium|low) and
+      #    preserve_thinking via chat_template_kwargs; both are optional
+      #    tuners deliberately left unwired in Task 2 (server defaults apply:
+      #    effort xhigh, preserve on).
+      #    A40 = Ampere (SM86, no FP8 tensor cores): FP8 checkpoints run
+      #    weight-only via Marlin kernels in modern vLLM — fits VRAM, no FP8
+      #    speedup; do NOT pass --kv-cache-dtype fp8 on A40. Serve (Task-2
+      #    candidate, to be verified on the HPC):
+      #      vllm serve <path> --served-model-name Qwen3.8-27B-FP8 \
+      #        --reasoning-parser qwen3 --max-model-len 32768 \
+      #        --gpu-memory-utilization 0.90 --port 8001
+      #    context_window is the DEPLOYED window (32768, like the 35B entry);
+      #    native 262,144 is possible with --max-model-len given VRAM.
+      - id: qwen3.8_27b_fp8
+        display_name: "Qwen 3.8 27B FP8"
+        model_name: "Qwen3.8-27B-FP8"   # vLLM --served-model-name — sent verbatim
+        context_window: 32768           # deployed window (native 262144 — see above)
+        # Capability block (canonical form); legacy keys kept consistent.
+        thinking: { supported: true, control: chat_template_kwargs }
+        # Serving requirements = HOW the server must be launched (deployment
+        # metadata only — never read by execution policy, never sent on wire).
+        serving:
+          reasoning_parser: qwen3
+          max_model_len: 32768
+          notes: "requires vLLM>=0.17.0 + transformers>=5.8.0; native ctx 262144 (served 32768 on A40); Ampere/SM86 runs FP8 weight-only via Marlin — no --kv-cache-dtype fp8"
+        thinking_capable: true
+        think_mode: template
         recommended_execution_mode: GPU
 
   # ── Any other OpenAI-compatible server (Ollama /v1, llama.cpp, LM Studio,

@@ -573,15 +573,18 @@ class HybridRAGPipeline:
                     record = self._doc_map.get(pid)
                     if record is None:
                         continue
-                    g = grouped.setdefault(pid, {"record": record, "score": score, "chunks": []})
+                    g = grouped.setdefault(
+                        pid, {"record": record, "score": score, "chunks": [], "chunk_ids": []}
+                    )
                     if chunk.chunk_text not in g["chunks"]:
                         g["chunks"].append(chunk.chunk_text)
+                        g["chunk_ids"].append(chunk.chunk_id)
                     g["score"] = max(g["score"], score)
                     continue
                 record = self._doc_map.get(doc_id)
                 if record is None:
                     continue
-                g = grouped.setdefault(doc_id, {"record": record, "score": score, "chunks": []})
+                g = grouped.setdefault(doc_id, {"record": record, "score": score, "chunks": [], "chunk_ids": []})
                 g["score"] = max(g["score"], score)
 
             for pid, g in grouped.items():
@@ -606,7 +609,10 @@ class HybridRAGPipeline:
                     doc_id=pid,
                     question=record.question_text,
                     answer=evidence,
-                    score=score,
+                    # Task-3 fix: use THIS group's max score — previously this
+                    # read the leaked loop variable (last candidate's score for
+                    # every result), corrupting score-based allocation.
+                    score=g["score"],
                     retrieval_method="rrf_fusion",
                     metadata={
                         "ministry": record.metadata.ministry,
@@ -617,6 +623,9 @@ class HybridRAGPipeline:
                             if record.metadata.question_type else None
                         ),
                         "document_type": record.metadata.document_type,
+                        # Task 3: long-chunk provenance for Deep-mode neighbor
+                        # pull-in (omitted when the parent hit directly)
+                        **({"chunk_ids": list(g["chunk_ids"])} if g["chunk_ids"] else {}),
                     },
                     dense_score=dense_score,
                     bm25_score=bm25_score,

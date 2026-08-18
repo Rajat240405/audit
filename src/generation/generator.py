@@ -3,11 +3,20 @@ Answer generator — grounded generation using adaptive context budgeting.
 
 Design Decisions
 ----------------
-1. ADAPTIVE CONTEXT BUDGETING: Build full context first, estimate tokens,
-   and selectively apply compression only when the prompt exceeds a configurable
-   safety threshold (e.g., 80% of num_ctx). Small-to-medium queries retain
-   complete, uncompressed details for superior answer quality, while massive
-   audit queries stay safe from context window overflow.
+1. DYNAMIC EVIDENCE BUDGETING (Task 3): when an ExecutionPlan is attached
+   (server/CLI always do), the prompt is assembled by
+   src.generation.evidence: the plan's reserve-based evidence budget
+   (num_ctx − max_tokens − scaffold − margin, minus the ACTUAL system prompt
+   and question) is spent admitting as many relevant candidates as fit —
+   whole documents first, semantic blocks second, at most one marked
+   sentence truncation as the last resort. No fixed document-count quota and
+   no unconditional per-document char cap apply in this path.
+
+   A LEGACY path (no plan attached — standalone/notebook use) keeps the old
+   behavior exactly: count slice (max_context_docs), per-doc char caps
+   (max_doc_chars), 0.80 threshold check. Small-to-medium queries retain
+   complete, uncompressed details either way, and massive audit queries stay
+   safe from context window overflow.
 
 2. We use a structured prompt with clear sections:
    - Task description (grounded Q&A answering)
@@ -44,6 +53,22 @@ from src.retrieval.result import RetrievedResult
 from src.generation.registry import model_registry
 from src.generation.defaults import default_num_ctx
 
+# Task-3 evidence engine. clean/truncate/extract helpers moved here for
+# module cohesion; they are re-exported so existing import sites
+# (pipeline.py, tests, notebooks) keep working unchanged.
+from src.generation.evidence import (  # noqa: F401  (re-exports)
+    AGGRESSIVE_HEAL_POOL,
+    AGGRESSIVE_HEAL_TOKENS,
+    Allocation,
+    allocate_evidence,
+    assemble_budgeted_prompt,
+    clean_parliament_text,
+    estimate_tokens,
+    extract_relevant_evidence,
+    render_user_prompt,
+    truncate_at_sentence,
+)
+
 console = Console()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,73 +102,6 @@ For example, if the user asks "Compare INCOIS and Virat Kohli" and the context c
 
 Never fill the missing information using your own general knowledge."""
 
-
-def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> str:
-    """
-    Intelligently extracts the most relevant paragraphs or blocks of text from a
-    retrieved answer matching query keywords, strictly staying within the character budget.
-    """
-    if len(text) <= max_chars:
-        return text
-
-    # Extract keywords from the query
-    keywords = [w.lower() for w in re.sub(r"[^\w\s]", " ", query).split() if len(w) > 3]
-    if not keywords:
-        return truncate_at_sentence(text, max_chars)
-
-    # Split answer text into paragraphs
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-    matched_paragraphs = []
-    
-    for p in paragraphs:
-        p_lower = p.lower()
-        if any(kw in p_lower for kw in keywords):
-            matched_paragraphs.append(p)
-
-    if matched_paragraphs:
-        assembled = ""
-        for p in matched_paragraphs:
-            if len(assembled) + len(p) + 2 <= max_chars:
-                assembled += p + "\n\n"
-            else:
-                remaining = max_chars - len(assembled)
-                if remaining > 100:
-                    assembled += truncate_at_sentence(p, remaining)
-                break
-        return assembled.strip() or truncate_at_sentence(text, max_chars)
-
-    return truncate_at_sentence(text, max_chars)
-
-
-
-
-
-def truncate_at_sentence(text: str, max_chars: int, marker: str = " ... [Truncated to fit context budget]") -> str:
-    """Truncate at a SENTENCE boundary — never mid-number/unit.
-
-    GLM critique #3: hard char-slicing (text[:max_chars]) can cut a figure
-    ("₹2,00,000 crore over 2024-2") or sever a [Source N] citation. This cuts
-    at the last sentence boundary before the limit instead.
-    """
-    if not text or len(text) <= max_chars:
-        return text
-    limit = max_chars - len(marker)
-    if limit <= 0:
-        return text[:max_chars]
-    # find the last sentence-ending punctuation before the limit
-    cut = -1
-    for end in (".", "!", "?", "\n"):
-        idx = text.rfind(end, 0, limit)
-        if idx > cut:
-            cut = idx
-    if cut > 0:
-        # keep the sentence-ending char + a bit of breathing room
-        return text[: cut + 1] + marker
-    # no sentence boundary found before limit — fall back to word boundary
-    space = text.rfind(" ", 0, limit)
-    if space > 0:
-        return text[:space] + marker
-    return text[:max_chars] + marker
 
 
 def compact_documents_with_llm(
@@ -203,134 +161,28 @@ def compact_documents_with_llm(
 
 
 
-# ── Parliamentary boilerplate cleaning ──────────────────────────────────
-# Strips structural boilerplate from question/answer text before it reaches
-# the LLM. Reduces token waste + noise (the "noise amplification" problem).
-# KEEPS the substantive (a)/(b)/(c) question parts and answer content.
-# Non-destructive — original docs in the index are untouched.
-
-_BOILER_LINE_PREFIXES = (
-    "GOVERNMENT OF INDIA",
-    "MINISTRY OF EARTH SCIENCES",
-    "LOK SABHA",
-    "RAJYA SABHA",
-    "UNSTARRED QUESTION",
-    "STARRED QUESTION",
-    "QUESTION NO.",
-    "TO BE ANSWERED ON",
-    "WILL THE MINISTER",
-    "THE MINISTER OF STATE",
-    "THE MINISTER FOR STATE",
-    "MINISTRY OF SCIENCE AND TECHNOLOGY",
-    "AND EARTH SCIENCES",
-    "ANSWER",
-    "(DR.",
-    "DR. ",
-    "PROF. ",
-    "********",
-    "*****",
-)
-
-_MEMBER_NAME_RE = re.compile(r"^(SHRI|SMT|SMT\.|MS|MRS|DR|PROF|KUMARI|MR)\.?\s+[A-Z]", re.IGNORECASE)
-_QUESTION_NUM_RE = re.compile(r"^\d{3,4}\.\s*$")
-_QUESTION_NUM_NAME_RE = re.compile(r"^\d{3,4}\.\s+(SHRI|SMT|DR|PROF)", re.IGNORECASE)
-
-
-def clean_parliament_text(text: str) -> str:
-    """Strip parliamentary boilerplate lines, keep substantive content."""
-    if not text:
-        return text
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        l = line.strip()
-        if not l:
-            continue
-        u = l.upper()
-        # skip all-star separators
-        if set(u) <= {"*", " "}:
-            continue
-        # skip boilerplate prefixes
-        if any(u.startswith(p) for p in _BOILER_LINE_PREFIXES):
-            continue
-        # skip member-name lines ("SHRI YOGENDER CHANDOLIA:")
-        if _MEMBER_NAME_RE.match(l) and l.rstrip().endswith(":"):
-            continue
-        # skip subject-title lines (short all-caps, not (a)/(b)/(c), no colon)
-        if (u == l and len(l) < 60 and not l.startswith("(") and ":" not in l):
-            continue
-        # skip standalone question numbers ("3035.")
-        if _QUESTION_NUM_RE.match(l):
-            continue
-        # skip "3035. SHRI X" question-number+member lines
-        if _QUESTION_NUM_NAME_RE.match(l):
-            continue
-        cleaned.append(l)
-    return "\n".join(cleaned)
-
-
 def build_user_prompt(
     question: str,
     retrieved_results: list[RetrievedResult],
     max_doc_chars: int = 999999,
 ) -> str:
-    parts = [
-        "Below is the most relevant parliamentary Question & Answer context retrieved for your question.",
-        "",
-        "=" * 70,
-        f"RETRIEVED CONTEXT ({len(retrieved_results)} records):",
-        "=" * 70,
-        "",
-    ]
+    """LEGACY prompt builder — fixed per-document char cap, used by the
+    no-plan fallback path (standalone AnswerGenerator) and existing callers.
 
-    for i, result in enumerate(retrieved_results, start=1):
-        parts.append(f"[Source {i}] (ID: {result.doc_id})")
-        if result.metadata.get("ministry"):
-            parts.append(f"Ministry: {result.metadata['ministry']}")
-        if result.metadata.get("subject"):
-            parts.append(f"Subject: {result.metadata['subject']}")
-        # Type-aware hint so the LLM knows what kind of source it is reading.
-        doc_type = (result.metadata.get("document_type") or "").lower()
-        hint = {
-            "technical_report": "Type: INCOIS Technical Report \u2014 scientific methodology, model results, data. Prioritize figures, dates, and quantitative claims.",
-            "annual_report": "Type: INCOIS Annual Report \u2014 year-in-review of activities. Cite the report year and section names where relevant.",
-            "research_publication": "Type: Research publication \u2014 academic paper. Prioritize findings, dates, and data.",
-            "general_report": "Type: INCOIS general report.",
-            "parliamentary_qa": "Type: Parliamentary Q&A \u2014 verbatim question-answer record.",
-            "audit_qa": "Type: Audit Q&A \u2014 verbatim question-answer record.",
-            "document": "Type: Audit document.",
-        }.get(doc_type)
-        if hint:
-            parts.append(hint)
-        parts.append("")
-
+    The budgeted Task-3 path assembles via evidence.allocate_evidence +
+    assemble_budgeted_prompt instead; both share the ONE renderer
+    (evidence.render_user_prompt), so the visual prompt contract
+    ([Source N] blocks, QUESTION/ANSWER sections, tail) is identical.
+    The old [clean] debug prints were removed (marked "remove later").
+    """
+    items = []
+    for result in retrieved_results:
         q_text = clean_parliament_text(result.question)
         a_text = clean_parliament_text(result.answer)
         if len(a_text) > max_doc_chars:
             a_text = extract_relevant_evidence(a_text, question, max_doc_chars)
-
-        # DEBUG: show cleaning is active (remove later if noisy)
-        console.print(f"[dim][clean] {result.doc_id}: Q {len(result.question)}->{len(q_text)} ch | A {len(result.answer)}->{len(a_text)} ch[/dim]")
-        console.print(f"[dim][clean] Q starts: {q_text[:100]!r}[/dim]")
-
-        parts.append(f"QUESTION: {q_text}")
-        parts.append(f"ANSWER: {a_text}")
-        parts.append("")
-        parts.append("-" * 70)
-
-    parts.extend([
-        "",
-        "=" * 70,
-        "USER QUESTION:",
-        "=" * 70,
-        question,
-        "",
-        "=" * 70,
-        "ANSWER:",
-        "=" * 70,
-    ])
-
-    return "\n".join(parts)
+        items.append((result, q_text, a_text))
+    return render_user_prompt(question, items)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -402,6 +254,186 @@ class AnswerGenerator:
         self.max_doc_chars = max_doc_chars
         self.context_budget_ratio = context_budget_ratio
         self.compression_enabled = compression_enabled
+        # Task 3: the ExecutionPlan attached by the server/CLI plan-binding
+        # (_apply_execution_plan / _apply_cli_plan). None → legacy behavior.
+        self.plan = None
+        self.last_allocation: Allocation | None = None
+        self._ctx_cache: tuple | None = None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Task-3 budgeted context assembly (shared by generate + generate_stream
+    # + the server's "what the model received" sources emission)
+    # ─────────────────────────────────────────────────────────────────────
+    def prepare_context(
+        self,
+        question: str,
+        retrieved_results: list[RetrievedResult],
+        *,
+        pool_override: int | None = None,
+        budget_override: int | None = None,
+    ) -> tuple[str, list[str], dict]:
+        """Assemble the user prompt under the attached ExecutionPlan.
+
+        Pool = initial candidates (plan.retrieval_top_k); budget =
+        plan.evidence_budget_tokens − actual system-prompt/question tokens.
+        Admission itself is budget-driven (evidence.allocate_evidence), never
+        count-driven. Returns (prompt, admitted_doc_ids, diagnostics).
+        Cached by (question, doc-id sequence, overrides, system-prompt) so the
+        non-stream generate(), the streaming path and the server sources
+        emission all reuse ONE assembly — stream/non-stream parity.
+        """
+        plan = self.plan
+        if plan is None:
+            raise RuntimeError("prepare_context requires an attached ExecutionPlan")
+        pool = retrieved_results[: max(1, int(pool_override or plan.retrieval_top_k))]
+        key = (
+            question,
+            tuple(r.doc_id for r in pool),
+            pool_override,
+            budget_override,
+            self.system_prompt or "",  # TONE suffixes mutate this per request
+        )
+        if self._ctx_cache and self._ctx_cache[0] == key:
+            return self._ctx_cache[1]
+        overhead = estimate_tokens((self.system_prompt or "") + "\n" + question)
+        base = budget_override if budget_override is not None else plan.evidence_budget_tokens
+        budget = max(0, int(base) - overhead)
+        alloc = allocate_evidence(pool, question, budget)
+        prompt = assemble_budgeted_prompt(question, alloc.admissions)
+        ids = alloc.admitted_ids
+        diag = {
+            "pool": len(pool),
+            "admitted": len(ids),
+            "evidence_budget_tokens": budget,
+            "evidence_used_tokens": alloc.used_tokens,
+            "prompt_est_tokens": estimate_tokens(prompt),
+            "skipped_doc_ids": list(alloc.skipped_doc_ids),
+            "truncated_doc_ids": list(alloc.truncated_doc_ids),
+        }
+        self.last_allocation = alloc
+        self._ctx_cache = (key, (prompt, ids, diag))
+        return prompt, ids, diag
+
+    def _no_context_result(self) -> GenerationResult:
+        return GenerationResult(
+            answer=(
+                "No relevant documents were retrieved from the knowledge base. "
+                "I cannot answer this question based on the available context."
+            ),
+            model=self.llm_client.model,
+            sources_used=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            generation_latency_ms=0.0,
+            prompt="",
+        )
+
+    def _provider_model(self) -> tuple[str, str]:
+        provider = getattr(self.llm_client, "provider", "ollama")
+        if not isinstance(provider, str):
+            provider = "ollama"
+        model_name = getattr(self.llm_client, "model", "qwen2.5:7b")
+        if not isinstance(model_name, str):
+            model_name = "qwen2.5:7b"
+        return provider, model_name
+
+    def _write_debug_prompt(self, total_prompt_text: str) -> None:
+        """Optional debug dump — under APP_DATA_DIR (never process CWD)."""
+        try:
+            from src.utils.app_paths import data_dir, prompt_debug_path
+
+            data_dir().mkdir(parents=True, exist_ok=True)
+            dest = prompt_debug_path()
+            dest.write_text(total_prompt_text, encoding="utf-8")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not save prompt to debug file: {e}[/yellow]")
+
+    def _generation_result(self, response, source_ids, latency_ms, prompt) -> GenerationResult:
+        return GenerationResult(
+            answer=response.text,
+            model=response.model,
+            sources_used=list(source_ids),
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+            total_tokens=response.total_tokens,
+            generation_latency_ms=latency_ms,
+            prompt=prompt,
+            raw_response=response.raw_response,
+        )
+
+    def _graceful_context_fail_result(self, source_ids, prompt) -> GenerationResult:
+        return GenerationResult(
+            answer=(
+                "### ⚠️ Context Size Exceeded\n\n"
+                "The retrieved parliamentary context was too large for the LLM provider, "
+                "and our automated self-healing retry also exceeded request limits.\n\n"
+                "**Suggestions**:\n"
+                "1. Please try a more specific question with more precise keywords.\n"
+                "2. Try switching the Execution Mode to **⚡ Fast Mode** to use a lighter context budget."
+            ),
+            model=self.llm_client.model,
+            sources_used=list(source_ids),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            generation_latency_ms=0.0,
+            prompt=prompt,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Task-3 budgeted generate (plan attached)
+    # ─────────────────────────────────────────────────────────────────────
+    def _generate_budgeted(
+        self,
+        question: str,
+        retrieved_results: list[RetrievedResult],
+    ) -> GenerationResult:
+        if not retrieved_results:
+            return self._no_context_result()
+
+        provider, model_name = self._provider_model()
+        user_prompt, source_ids, diag = self.prepare_context(question, retrieved_results)
+        total_prompt_text = f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+
+        console.print(
+            f"[context] pool={diag['pool']} admitted={diag['admitted']} "
+            f"evidence≈{diag['evidence_used_tokens']}/{diag['evidence_budget_tokens']} tok "
+            f"prompt≈{diag['prompt_est_tokens']} tok ids={source_ids}"
+            + (f" truncated={diag['truncated_doc_ids']}" if diag["truncated_doc_ids"] else "")
+            + (f" skipped={diag['skipped_doc_ids']}" if diag["skipped_doc_ids"] else "")
+        )
+        self._write_debug_prompt(total_prompt_text)
+
+        try:
+            start_time = time.monotonic()
+            response = self.llm_client.generate(prompt=user_prompt, system=self.system_prompt)
+            latency_ms = (time.monotonic() - start_time) * 1000
+            return self._generation_result(response, source_ids, latency_ms, user_prompt)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 413:
+                raise
+            # Budget-conform self-heal: same allocator, aggressive budget —
+            # replaces the legacy fixed 2-docs × 500-chars heuristic.
+            console.print("[bold yellow]⚠️ HTTP 413 — retrying with aggressive budget-conform rebuild...[/bold yellow]")
+            heal_prompt, heal_ids, hdiag = self.prepare_context(
+                question,
+                retrieved_results,
+                pool_override=AGGRESSIVE_HEAL_POOL,
+                budget_override=AGGRESSIVE_HEAL_TOKENS,
+            )
+            console.print(
+                f"[bold yellow]Retry pool={hdiag['pool']} admitted={hdiag['admitted']} "
+                f"prompt≈{hdiag['prompt_est_tokens']} tok.[/bold yellow]"
+            )
+            try:
+                start_time = time.monotonic()
+                response = self.llm_client.generate(prompt=heal_prompt, system=self.system_prompt)
+                latency_ms = (time.monotonic() - start_time) * 1000
+                return self._generation_result(response, heal_ids, latency_ms, heal_prompt)
+            except Exception as retry_err:  # noqa: BLE001
+                console.print(f"[bold red]❌ Self-healing retry failed: {retry_err}[/bold red]")
+                return self._graceful_context_fail_result(source_ids, heal_prompt)
 
     def generate(
         self,
@@ -411,6 +443,11 @@ class AnswerGenerator:
         """
         Generate a grounded answer from retrieved context with provider-aware budgeting.
         """
+        # Task 3: budget-driven assembly when a plan is attached (server/CLI)
+        if self.plan is not None:
+            return self._generate_budgeted(question, retrieved_results)
+
+        # ── LEGACY path (no plan attached) — unchanged behavior ──
         # Limit context to max_context_docs
         context = retrieved_results[: self.max_context_docs]
 
@@ -595,6 +632,97 @@ class AnswerGenerator:
                 # Re-raise other HTTPStatusErrors
                 raise e
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Task-3 budgeted stream (plan attached) — mirrors _generate_budgeted's
+    # assembly exactly (same prepare_context cache) for stream parity.
+    # ─────────────────────────────────────────────────────────────────────
+    def _generate_stream_budgeted(self, question: str, context: list):
+        if not context:
+            yield {"type": "tokens", "text": (
+                "No relevant documents were retrieved from the knowledge base. "
+                "I cannot answer this question based on the available context."
+            )}
+            return
+
+        provider, model_name = self._provider_model()
+        stream_prompt, source_ids, diag = self.prepare_context(question, context)
+        print(
+            f"[context] pool={diag['pool']} admitted={diag['admitted']} "
+            f"evidence≈{diag['evidence_used_tokens']}/{diag['evidence_budget_tokens']} tok "
+            f"ids={source_ids}"
+        )
+
+        start_time = time.monotonic()
+        full_text: list[str] = []
+        try:
+            retried_413 = False
+            # Fast mode resilience: some Ollama/qwen3 builds IGNORE think:false
+            # and spend the whole token budget on reasoning, leaving content
+            # EMPTY. We detect that (0 visible tokens from a think=false run)
+            # and retry once with thinking ON so the user always gets an answer.
+            think_disabled = getattr(self.llm_client, "think", None) is False
+            empty_retried = False
+            while True:
+                try:
+                    saw_token = False
+                    for chunk in self.llm_client.generate_stream(
+                        prompt=stream_prompt, system=self.system_prompt
+                    ):
+                        if isinstance(chunk, dict):
+                            ev_type = chunk.get("type", "tokens")
+                            if ev_type == "tokens":
+                                text = chunk.get("text", "")
+                                saw_token = True
+                                full_text.append(text)
+                                yield {"type": "tokens", "text": text}
+                            elif ev_type == "reasoning":
+                                yield {"type": "reasoning", "text": chunk.get("text", "")}
+                            elif ev_type == "answer_start":
+                                yield {"type": "answer_start"}
+                            elif ev_type == "done":
+                                break
+                        else:
+                            saw_token = True
+                            full_text.append(chunk)
+                            yield {"type": "tokens", "text": chunk}
+                    if not saw_token and think_disabled and not empty_retried:
+                        empty_retried = True
+                        self.llm_client.think = True
+                        full_text.clear()
+                        print("[gen] think=false gave no answer — retrying with thinking ON")
+                        continue
+                    break
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 413 and not retried_413:
+                        console.print("[bold yellow]⚠️ HTTP 413 during stream — aggressive budget-conform rebuild...[/bold yellow]")
+                        retried_413 = True
+                        stream_prompt, source_ids, _ = self.prepare_context(
+                            question,
+                            context,
+                            pool_override=AGGRESSIVE_HEAL_POOL,
+                            budget_override=AGGRESSIVE_HEAL_TOKENS,
+                        )
+                        continue
+                    raise  # re-raise other HTTP errors or second 413
+        finally:
+            latency_ms = (time.monotonic() - start_time) * 1000
+
+        text = "".join(full_text)
+        prompt_tokens = estimate_tokens(
+            f"SYSTEM PROMPT:\n{self.system_prompt}\n\nUSER PROMPT:\n{stream_prompt}"
+        )
+        completion_tokens = estimate_tokens(text)
+        yield {
+            "type": "meta",
+            "model": model_name,
+            "provider": provider,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "generation_latency_ms": latency_ms,
+            "sources_used": source_ids,
+        }
+
     def generate_stream(self, question: str, context: list, **overrides):
         """Stream a grounded answer token-by-token.
 
@@ -604,6 +732,12 @@ class AnswerGenerator:
         Yields dicts: {"type": "tokens", "text": ...} then a final
         {"type": "meta", ...} with token estimates + latency.
         """
+        # Task 3: budget-driven assembly when a plan is attached (server/CLI)
+        if self.plan is not None:
+            yield from self._generate_stream_budgeted(question, context)
+            return
+
+        # ── LEGACY path (no plan attached) — unchanged behavior ──
         context = context[: self.max_context_docs]
         if not context:
             yield {"type": "tokens", "text": (

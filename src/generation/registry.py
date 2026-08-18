@@ -21,22 +21,114 @@ from src.generation.client import LLMResponse
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model Registry Models
+# Model capability model
+#
+# Layer separation (Model Capability Architecture, Task 1):
+#   ModelCapabilities (ModelFamily) — WHAT the model can do. Metadata only.
+#   ServingSpec                     — HOW the server must be launched (never
+#                                     consulted by execution policy).
+#   Provider adapters (below)       — HOW requests are encoded on the wire.
+#   src.generation.policy           — WHICH parameters an execution mode means,
+#                                     derived FROM capabilities (not hardcoded).
+# ModelFamily stays import-compatible (same fields, plus optional new ones);
+# legacy catalog keys (think_mode / thinking_capable) are dual-read into the
+# capability specs, and the legacy fields are kept consistent for old readers.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Canonical thinking-control mechanisms (capability vocabulary), mapped onto
+# the legacy adapter "wire" strings used by the provider implementations
+# (adapters are intentionally untouched — wire behavior is preserved exactly):
+#   "chat_template_kwargs" -> "template"  (vLLM: chat_template_kwargs.enable_thinking)
+#   "request_flag"         -> "key"       (Ollama: top-level `think`)
+#   "server_default"       -> "none"      (send nothing; server decides)
+_CONTROL_TO_WIRE: Dict[str, str] = {
+    "chat_template_kwargs": "template",
+    "request_flag": "key",
+    "server_default": "none",
+}
+_CONTROL_ALIASES: Dict[str, str] = {
+    # canonical values
+    "chat_template_kwargs": "chat_template_kwargs",
+    "request_flag": "request_flag",
+    "server_default": "server_default",
+    # legacy wire aliases accepted from catalogs
+    "template": "chat_template_kwargs",
+    "key": "request_flag",
+    "none": "server_default",
+}
+
+
+def _normalize_control(value: Any) -> Optional[str]:
+    """Normalize any accepted thinking-control spelling to the canonical value."""
+    if value is None:
+        return None
+    norm = _CONTROL_ALIASES.get(str(value).strip().lower())
+    if norm is None:
+        print(f"[models] unrecognized thinking control {value!r} — ignored")
+    return norm
+
+
+def _wire_for_control(control: Optional[str], fallback: str = "none") -> str:
+    """Legacy adapter wire string for a canonical control value."""
+    if control is None:
+        return fallback
+    return _CONTROL_TO_WIRE.get(control, fallback)
+
+
+def provider_transport_default_control(provider: str) -> str:
+    """PROVIDER transport default (not model metadata): how this provider
+    encodes thinking on the wire when a family says nothing. vLLM /
+    OpenAI-compatible servers use chat_template_kwargs (inert for templates
+    that don't read it); everything else defers to the server."""
+    if provider in ("vllm", "openai_compatible"):
+        return "chat_template_kwargs"
+    return "server_default"
+
+
+def provider_transport_default_think_mode(provider: str) -> str:
+    """Legacy-string view of provider_transport_default_control (used by
+    served-model discovery when registering dynamic families)."""
+    return _wire_for_control(provider_transport_default_control(provider))
+
+
+@dataclass
+class ThinkingSpec:
+    """Model thinking CAPABILITY. `supported`: None = unknown (never claimed).
+    `control`: canonical mechanism or None (provider transport default)."""
+    supported: Optional[bool] = None
+    control: Optional[str] = None  # "request_flag" | "chat_template_kwargs" | "server_default" | None
+
+
+@dataclass
+class ServingSpec:
+    """Server-launch requirements for this model (deployment metadata ONLY —
+    never read by execution policy, never sent in a request)."""
+    reasoning_parser: Optional[str] = None
+    max_model_len: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@dataclass
+class GenerationDefaults:
+    """Model-specific generation defaults (used only where the execution
+    profile does not pin the value; all optional, unset = unchanged wire)."""
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+
 
 @dataclass
 class ModelFamily:
     """
-    Metadata representation of a family of models.
+    Metadata representation of a family of models (a capability record).
     """
     id: str
     display_name: str
-    provider: str  # "ollama" | "huggingface"
-    model_name: str  # Single concrete model name on the provider
+    provider: str  # "ollama" | "vllm" | "openai_compatible" | "huggingface"
+    model_name: str  # Single concrete model name on the provider (never mangled)
     context_window: int
     thinking_capable: bool
     recommended_execution_mode: str = "GPU"
-    # How this provider's model signals think/nothink per request:
+    # LEGACY (kept consistent; legacy adapter wire string):
     #   "template" -> send chat_template_kwargs.enable_thinking (vLLM + Qwen3.x;
     #                 model name untouched, thinking controlled per-request)
     #   "key"      -> top-level request flag (Ollama `think`)
@@ -46,46 +138,116 @@ class ModelFamily:
     # does not serve. populate_model_registry migrates legacy "suffix" entries
     # to "template" with a warning. Model names are NEVER mangled.
     think_mode: str = "none"
+    # Capability specs (optional; dual-read with the legacy keys above).
+    thinking: ThinkingSpec = None  # type: ignore[assignment]  (set in __post_init__)
+    serving: ServingSpec = None    # type: ignore[assignment]
+    defaults: GenerationDefaults = None  # type: ignore[assignment]
+    max_output_tokens: Optional[int] = None
+    metadata_source: str = "catalog"  # catalog | server | fallback (discovery)
+
+    def __post_init__(self) -> None:
+        if self.thinking is None:
+            self.thinking = ThinkingSpec(
+                supported=bool(self.thinking_capable),
+                control=_normalize_control(self.think_mode),
+            )
+        if self.serving is None:
+            self.serving = ServingSpec()
+        if self.defaults is None:
+            self.defaults = GenerationDefaults()
 
     @classmethod
     def from_dict(cls, d: dict) -> "ModelFamily":
-        """Build from a catalog entry (config/models.yaml). Unknown keys ignored."""
+        """Build from a catalog entry (config/models.yaml).
+
+        Dual-read: the new capability blocks (`thinking`, `serving`,
+        `defaults`) and the legacy flat keys (`think_mode`,
+        `thinking_capable`) are both accepted. When both are present and
+        disagree, the capability block wins with a loud warning. The legacy
+        fields on the resulting family are kept consistent either way, so
+        existing readers see identical values."""
+        d = dict(d)
+        provider = str(d.get("provider", ""))
+        provider_default = provider_transport_default_control(provider)
+
+        t_block = d.get("thinking") or {}
+        raw_control = t_block.get("control", d.get("think_mode"))
+        control = _normalize_control(raw_control)
+        if control is None and raw_control is None:
+            control = provider_default
+        wire = _wire_for_control(control, fallback=provider_transport_default_think_mode(provider))
+
+        legacy_capable = d.get("thinking_capable")
+        supported = t_block.get("supported", legacy_capable)
+        if (
+            control is not None
+            and "think_mode" in d
+            and _normalize_control(d.get("think_mode")) is not None
+            and "thinking" in d
+            and _normalize_control(d["think_mode"]) != control
+        ):
+            print(
+                f"[models] family {d.get('id')!r}: think_mode={d['think_mode']!r} conflicts "
+                f"with thinking.control={control!r} — capability block wins"
+            )
+
         allowed = {
             "id", "display_name", "provider", "model_name", "context_window",
-            "thinking_capable", "recommended_execution_mode", "think_mode",
+            "recommended_execution_mode", "metadata_source",
         }
-        return cls(**{k: v for k, v in d.items() if k in allowed})
+        base = {k: v for k, v in d.items() if k in allowed}
+        serving = d.get("serving") or {}
+        defaults = d.get("defaults") or {}
+        return cls(
+            **base,
+            thinking_capable=bool(supported) if supported is not None else False,
+            think_mode=wire,
+            thinking=ThinkingSpec(
+                supported=(bool(supported) if supported is not None else None),
+                control=control,
+            ),
+            serving=ServingSpec(
+                reasoning_parser=serving.get("reasoning_parser"),
+                max_model_len=(
+                    int(serving["max_model_len"])
+                    if isinstance(serving.get("max_model_len"), (int, float))
+                    else None
+                ),
+                notes=serving.get("notes"),
+            ),
+            defaults=GenerationDefaults(
+                temperature=defaults.get("temperature"),
+                top_p=defaults.get("top_p"),
+            ),
+            max_output_tokens=(
+                int(d["max_output_tokens"])
+                if isinstance(d.get("max_output_tokens"), (int, float))
+                else None
+            ),
+        )
 
     def get_execution_params(self, mode: str) -> Dict[str, Any]:
-        """
-        Adjust execution parameters based on Fast/Deep profiles.
-        Identical across all models (independent of thinking capabilities):
-        - Fast Profile: temperature = 0.0, max_tokens = 4096, top-k docs = 3, max characters = 1000.
-        - Deep Profile: temperature = 0.2, max_tokens = 12288, top-k docs = 5, max characters = 3000.
+        """COMPATIBILITY SHIM — legacy fast/deep table, now resolved through
+        the execution policy (src.generation.policy.resolve_execution) so
+        every consumer sees the same capability-derived values. Prefer
+        resolve_execution() in new code.
 
-        Deep mode uses 12288 max_tokens because thinking-capable models (Qwen3.6)
-        consume max_tokens for BOTH reasoning + answer. With 4096 the model would
-        reason for ~3500 tokens and produce a truncated or empty answer.
-        """
-        mode = mode.lower().strip()
-        if mode == "deep":
-            return {
-                "temperature": 0.2,
-                "max_tokens": 12288,  # reasoning (~4-8k) + answer (~4k)
-                "max_context_docs": 5,
-                "max_doc_chars": 3000,
-                "thinking": True,     # Deep = think + cross-verify
-                "verify_depth": "full",
-            }
-        else:
-            return {
-                "temperature": 0.0,
-                "max_tokens": 4096,   # no reasoning overhead in Standard
-                "max_context_docs": 3,
-                "max_doc_chars": 1000,
-                "thinking": False,    # Fast = instant answer (reasoning off)
-                "verify_depth": "light",  # regex-only, no LLM judge
-            }
+        Fast profile: temperature 0.0 · max_tokens 4096 · docs 3 · chars 1000 ·
+        thinking OFF · verify light.
+        Deep profile: temperature 0.2 · max_tokens 12288 · docs 5 · chars 3000 ·
+        thinking ON · verify full. (Deep's 12288 = reasoning 8192 + output 4096
+        because thinking-capable models spend max_tokens on reasoning AND answer.)"""
+        from src.generation.policy import resolve_execution
+
+        plan = resolve_execution(self, mode, self.provider)
+        return {
+            "temperature": plan.temperature,
+            "max_tokens": plan.max_tokens,
+            "max_context_docs": plan.max_context_docs,
+            "max_doc_chars": plan.max_doc_chars,
+            "thinking": plan.thinking,
+            "verify_depth": plan.verify_depth,
+        }
 
 
 class ModelRegistry:
@@ -179,11 +341,13 @@ def populate_model_registry(reg: ModelRegistry, catalog: Optional[dict] = None) 
             entry = dict(entry)
             entry.setdefault("provider", provider)
             entry.setdefault("recommended_execution_mode", "GPU")
-            # vLLM controls Qwen3.x thinking per-request via
+            # Legacy default only when the entry carries NO thinking metadata
+            # at all. vLLM controls Qwen3.x thinking per-request via
             # chat_template_kwargs.enable_thinking ("template") — never via a
             # /think|/nothink model-name suffix (not a vLLM mechanism).
-            entry.setdefault("think_mode", "template" if provider == "vllm" else "none")
-            if entry["think_mode"] == "suffix":
+            if "think_mode" not in entry and "thinking" not in entry:
+                entry["think_mode"] = "template" if provider == "vllm" else "none"
+            if entry.get("think_mode") == "suffix":
                 print(
                     f"[models] family {entry.get('id')!r}: think_mode 'suffix' was removed "
                     "(vLLM does not serve '<model>/think' ids) — migrated to 'template' "
@@ -234,6 +398,24 @@ def resolve_family_for_provider(
 # Create global pre-populated Model Registry (from the catalog file)
 model_registry = ModelRegistry()
 populate_model_registry(model_registry)
+
+
+def resolve_think_mode(provider: str, model: str) -> str:
+    """Resolve the legacy adapter wire string ("template" | "key" | "none")
+    for (provider, model) from capability data — the single resolution point
+    behind LLMClient._family_think_mode.
+
+    Order: exact provider+model family -> model identity across any provider
+    (dev-parity: provider vllm pointed at Ollama /v1 with an ollama model) ->
+    "none" (never send thinking control to an unknown model).
+    """
+    for f in model_registry.list_all():
+        if f.provider == provider and (f.model_name == model or f.id == model):
+            return f.think_mode
+    for f in model_registry.list_all():
+        if f.model_name == model or f.id == model:
+            return f.think_mode
+    return "none"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider Interface and Implementations
@@ -346,12 +528,12 @@ class OllamaProvider(BaseProvider):
                 "num_ctx": num_ctx,
             },
         }
-        # mode-aware thinking: Fast=False (instant), Deep=True (reasoning)
+        # mode-aware thinking: Fast=False (instant), Deep=True (reasoning).
+        # Sent only when resolved upstream — no model-name heuristics here;
+        # capability metadata + the execution plan decide when to force it.
         think = kwargs.get("think")
         if think is not None:
             payload["think"] = bool(think)
-        elif "qwen3" in model.lower():
-            payload["think"] = True
 
         start_time = time.monotonic()
 

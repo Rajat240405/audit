@@ -14,6 +14,7 @@ export interface SourceItem {
   doc_id: string;
   ministry: string;
   subject: string;
+  date?: string | null;
   score: number;
   question: string;
   answer: string;

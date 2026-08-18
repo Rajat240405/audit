@@ -31,10 +31,12 @@ from src.retrieval.graph.store import GraphStore
 from src.retrieval.graph.retriever import GraphRetriever
 from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
+from src.generation.policy import resolve_execution
 from src.generation.registry import (
     ModelFamily,
     model_registry,
     provider_registry,
+    provider_transport_default_think_mode,
     resolve_family_for_provider,
 )
 from src.utils.app_paths import (
@@ -123,17 +125,85 @@ def _active_api_key(provider: str | None = None) -> str | None:
     return None
 
 
-def _resolve_max_tokens(provider: str, mode: str, family) -> int:
-    """Execution-profile max_tokens, with headroom for reasoning models.
+def _apply_execution_plan(family, prov: str, exec_mode: str):
+    """Resolve the execution policy for (family, mode, provider) ONCE and bind
+    the plan to the shared client/generator/config state. This is the ONLY
+    mode→parameters path in the server (previously copy-pasted per handler).
 
-    Qwen3.6 (and other thinking models) consume ``max_tokens`` with their
-    chain-of-thought BEFORE writing the answer. With a small budget the model
-    thinks, hits the cap, and returns content:null — a billed query that
-    produces nothing. For reasoning-capable cloud models we raise the cap so
-    tokens are guaranteed left for the final answer (reasoning tokens are
-    billed regardless, so truncating them just wastes the call).
+    Reasoning models (e.g. Qwen3.6) consume max_tokens with their
+    chain-of-thought BEFORE writing the answer — the Deep plan carries the
+    reasoning reserve so the answer budget survives (see policy.py).
     """
-    return family.get_execution_params(mode).get("max_tokens", 512)
+    plan = resolve_execution(family, exec_mode, prov)
+    resolved_model = family.model_name
+
+    llm_client.provider = prov
+    llm_client.model = resolved_model
+    llm_client.num_ctx = plan.num_ctx
+    llm_client.temperature = plan.temperature
+    llm_client.max_tokens = plan.max_tokens
+    llm_client.think = plan.thinking
+    ACTIVE_CONFIG["verify_depth"] = plan.verify_depth
+    ACTIVE_CONFIG["model"] = resolved_model
+    # Task 3: attach the resolved plan — the generator switches from legacy
+    # fixed-count/char-caps to reserve-based dynamic evidence budgeting.
+    generator.plan = plan
+    # Legacy fallback knobs still bound (used only if the plan were detached)
+    generator.max_doc_chars = plan.max_doc_chars
+    generator.max_context_docs = plan.max_context_docs
+    for w in plan.warnings:
+        print(f"[exec] warning: {w}")
+    return plan, resolved_model
+
+
+# ── Task 3 dynamic evidence budgeting — server-side helpers ────────────────
+def _effective_top_k(request_top_k, plan) -> int:
+    """Retrieval candidate pool for this request. The profile's initial pool
+    (fast 5 / deep 10 — an INITIAL pool, not a final document quota) is the
+    floor; an explicitly larger request top_k is still honored (API compat).
+    Budget-driven admission downstream decides what actually reaches the prompt.
+    """
+    pool = getattr(plan, "retrieval_top_k", 5) or 5
+    try:
+        req = int(request_top_k or 0)
+    except (TypeError, ValueError):
+        req = 0
+    return max(req, pool, 1)
+
+
+def _admitted_ids(question: str, results) -> list[str]:
+    """Budget-admitted doc ids for (question, results) via the generator's
+    shared prepare_context cache — the SAME assembly generate()/
+    generate_stream() then reuse, so the sources the UI shows are exactly the
+    evidence the model receives (stream/non-stream parity)."""
+    if getattr(generator, "plan", None) is None:
+        cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
+        return [r.doc_id for r in results[:cap]]
+    _, ids, _ = generator.prepare_context(question, results)
+    return ids
+
+
+def _filter_to_admitted(sources, admitted_ids, key=None) -> list:
+    keep = set(admitted_ids)
+    if key is None:
+        key = lambda s: getattr(s, "doc_id", None)  # noqa: E731
+    return [s for s in sources if key(s) in keep]
+
+
+def _maybe_enrich_deep_neighbors(plan, results) -> None:
+    """Deep-only neighbor-chunk pull-in: re-bond heading-like previous chunks
+    to mid-document long-chunk evidence (uses metadata already persisted in
+    the index; no reindexing). Best-effort — retrieval must never fail on it."""
+    if getattr(plan, "mode", "") != "deep":
+        return
+    try:
+        from src.generation.evidence import enrich_deep_neighbors
+
+        n = enrich_deep_neighbors(results, getattr(pipeline, "_long_chunk_map", {}) or {})
+        if n:
+            print(f"[context] deep neighbor pull-in: {n} heading chunk(s) bonded")
+    except Exception as e:  # noqa: BLE001
+        print(f"[context] neighbor pull-in skipped ({type(e).__name__}: {e})")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lazy pipeline loading
@@ -281,6 +351,7 @@ class SourceItem(BaseModel):
     doc_id: str
     ministry: Optional[str] = None
     subject: Optional[str] = None
+    date: Optional[str] = None  # R1: raw record date stamp, when the record carries one
     document_type: Optional[str] = None
     score: float
     question: str
@@ -492,10 +563,11 @@ def _register_served_family(
     display_name: str,
 ) -> str:
     """Register (or reuse) a family for a served model so /api/provider can
-    switch to it. think_mode follows the ACTIVE provider's transport:
-    vLLM controls thinking per request via chat_template_kwargs
-    (inert for templates that don't read it) — never via name suffixes;
-    Ollama uses its top-level `think` key (think_mode is metadata only there).
+    switch to it. think_mode follows the ACTIVE provider's transport default
+    (provider capability), not a provider-name conditional: vLLM controls
+    thinking per request via chat_template_kwargs (inert for templates that
+    don't read it) — never via name suffixes; Ollama uses its top-level
+    `think` key (think_mode is metadata only there).
     """
     base = re.sub(r"[^a-z0-9]+", "_", str(served_id).lower()).strip("_") or "served_model"
     fam_id = base
@@ -514,7 +586,7 @@ def _register_served_family(
             context_window=int(context_window),
             thinking_capable=bool(thinking_capable),
             recommended_execution_mode="GPU",
-            think_mode="template" if prov in ("vllm", "openai_compatible") else "none",
+            think_mode=provider_transport_default_think_mode(prov),
         ))
     return fam_id
 
@@ -638,24 +710,11 @@ async def switch_provider(request: ProviderSwitchRequest):
     ACTIVE_CONFIG["provider"] = prov
     ACTIVE_CONFIG["model_family"] = family.id
 
-    # Resolve concrete model parameters based on execution mode profile
+    # Resolve concrete model parameters through the execution policy
     exec_mode = ACTIVE_CONFIG["mode"]
-    exec_params = family.get_execution_params(exec_mode)
-    resolved_model = family.model_name
+    plan, resolved_model = _apply_execution_plan(family, prov, exec_mode)
 
-    ACTIVE_CONFIG["model"] = resolved_model
-
-    # Re-initialize the active inference client and generator
-    llm_client.provider = prov
-    llm_client.model = resolved_model
-    llm_client.num_ctx = family.context_window
-    llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = _resolve_max_tokens(prov, exec_mode, family)
-    llm_client.think = exec_params.get("thinking", False)  # Fast=off, Deep=on
-    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
     llm_client.api_key = _active_api_key(prov)  # session API key (slot or env)
-    generator.max_context_docs = exec_params["max_context_docs"]
-    generator.max_doc_chars = exec_params["max_doc_chars"]
     generator.llm_client = llm_client
 
     return {
@@ -663,8 +722,8 @@ async def switch_provider(request: ProviderSwitchRequest):
         "active_provider": prov,
         "active_model_family": family.display_name,
         "resolved_model": resolved_model,
-        "context_window": family.context_window,
-        "prompt_budget": int(family.context_window * 0.80),
+        "context_window": plan.num_ctx,
+        "prompt_budget": plan.prompt_budget_tokens,
         "thinking_capable": family.thinking_capable,
         "recommended_execution_mode": family.recommended_execution_mode,
         "is_connected": llm_client.check_health(api_key=_active_api_key(prov))
@@ -687,27 +746,15 @@ async def chat_endpoint(request: ChatRequest):
     # Resolve Model Family dynamically from Registry
     family_id = ACTIVE_CONFIG["model_family"]
     family = model_registry.get(family_id) or model_registry.get("qwen2.5")
-    
-    # Get adjusted execution parameters for the requested profile (Objective 1)
-    exec_params = family.get_execution_params(exec_mode)
-    resolved_model = family.model_name
 
-    # Dynamically bind properties and session key to client
-    llm_client.model = resolved_model
-    llm_client.num_ctx = family.context_window
-    llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
-    llm_client.think = exec_params.get("thinking", False)
-    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
+    # Resolve execution parameters through the execution policy (single source)
+    plan, resolved_model = _apply_execution_plan(family, ACTIVE_CONFIG["provider"], exec_mode)
     llm_client.api_key = _active_api_key()  # Propagate cached API key dynamically!
-    ACTIVE_CONFIG["model"] = resolved_model
 
-    # Configure document and context sizes dynamically from execution profile (Objective 1)
-    generator.max_doc_chars = exec_params["max_doc_chars"]
-    generator.max_context_docs = exec_params["max_context_docs"]
-
-    # Calculate token budgets dynamically: Prompt Budget = 0.80 * Context Window (Objective 5)
-    prompt_budget = int(family.context_window * 0.80)
+    # Task 3: the reported prompt budget is now the REAL, reserve-based
+    # evidence budget the allocator enforces (was the informational-only
+    # 0.80 × num_ctx figure).
+    prompt_budget = plan.evidence_budget_tokens
     generator.context_budget_ratio = 0.80
 
     t_ret_start = time.perf_counter()
@@ -786,10 +833,14 @@ async def chat_endpoint(request: ChatRequest):
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
         else:
             results, timings = pipeline.retrieve(
-                query, top_k=request.top_k, doc_types=request.doc_types,
+                query, top_k=_effective_top_k(request.top_k, plan),
+                doc_types=request.doc_types,
                 orgs=request.orgs, doc_categories=request.doc_categories,
             )
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
+            # Task 3 (Deep): re-bond heading-like neighbor chunks before
+            # evidence is budgeted — metadata already in the index maps.
+            _maybe_enrich_deep_neighbors(plan, results)
 
         # Format Retrieved Results into Source Items
         for r in results:
@@ -797,6 +848,7 @@ async def chat_endpoint(request: ChatRequest):
                 doc_id=r.doc_id,
                 ministry=r.metadata.get("ministry") or "-",
                 subject=r.metadata.get("subject") or "-",
+                date=r.metadata.get("date"),
                 score=float(r.score),
                 question=r.question,
                 answer=r.answer,
@@ -806,9 +858,17 @@ async def chat_endpoint(request: ChatRequest):
                 rerank_score=float(r.rerank_score) if r.rerank_score is not None else None,
             ))
 
-        gen_cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
-        if len(sources) > gen_cap:
-            sources = sources[:gen_cap]
+        # Task 3: the model receives the budget-admitted set (not a fixed
+        # count). prepare_context runs ONCE here (pure, no LLM); generate()
+        # reuses the cached assembly — "what the model received" == sources.
+        if ret_mode != "graph" and getattr(generator, "plan", None) is not None:
+            admitted = _admitted_ids(query, results)
+            if len(sources) != len(admitted):
+                print(
+                    f"[context] pool={len(sources)} admitted={len(admitted)} "
+                    "(budget-driven)"
+                )
+            sources = _filter_to_admitted(sources, admitted)
 
         t_gen_start = time.perf_counter()
         
@@ -920,6 +980,7 @@ def _to_sources(results: list) -> list[dict]:
             "doc_id": r.doc_id,
             "ministry": r.metadata.get("ministry") or "-",
             "subject": r.metadata.get("subject") or "-",
+            "date": r.metadata.get("date"),
             "document_type": r.metadata.get("document_type"),
             "score": float(r.score),
             "question": r.question,
@@ -1390,27 +1451,17 @@ def _remove_rejected_sentences(answer: str, rejected_claims: list[str]) -> tuple
 
 def _resolve_exec(request: ChatStreamRequest):
     """Bind ACTIVE_CONFIG / llm_client / generator per execution profile —
-    mirrors the resolution in chat_endpoint."""
+    identical resolution path as chat_endpoint and the provider switch."""
     exec_mode = request.mode.lower()
     ACTIVE_CONFIG["mode"] = exec_mode
     family_id = ACTIVE_CONFIG["model_family"]
     family = model_registry.get(family_id) or model_registry.get("qwen2.5")
-    exec_params = family.get_execution_params(exec_mode)
-    resolved_model = family.model_name
-    llm_client.model = resolved_model
-    llm_client.num_ctx = family.context_window
-    llm_client.temperature = exec_params["temperature"]
-    llm_client.max_tokens = _resolve_max_tokens(ACTIVE_CONFIG["provider"], exec_mode, family)
-    llm_client.think = exec_params.get("thinking", False)
-    ACTIVE_CONFIG["verify_depth"] = exec_params.get("verify_depth", "full")
+    plan, resolved_model = _apply_execution_plan(family, ACTIVE_CONFIG["provider"], exec_mode)
     llm_client.api_key = _active_api_key()
-    ACTIVE_CONFIG["model"] = resolved_model
     print(f"[exec] mode={exec_mode} think={'ON' if llm_client.think else 'OFF'} "
           f"model={resolved_model} verify={ACTIVE_CONFIG['verify_depth']}")
-    generator.max_doc_chars = exec_params["max_doc_chars"]
-    generator.max_context_docs = exec_params["max_context_docs"]
     generator.context_budget_ratio = 0.80
-    return family, exec_params, resolved_model
+    return family, plan, resolved_model
 
 
 @app.post("/api/chat/stream")
@@ -1453,7 +1504,7 @@ def chat_stream(request: ChatStreamRequest):
             pass
 
         try:
-            family, exec_params, resolved_model = _resolve_exec(request)
+            family, plan, resolved_model = _resolve_exec(request)
         except Exception as e:  # noqa: BLE001
             yield _sse({"type": "error", "message": f"Config resolution failed: {e}"})
             yield _sse({"type": "done"})
@@ -1538,11 +1589,14 @@ def chat_stream(request: ChatStreamRequest):
 
                 yield _sse({"type": "status", "stage": "embed", "message": "Embedding query…", "done": False})
                 results, timings = pipeline.retrieve(
-                    query, top_k=request.top_k, on_stage=_collect,
+                    query, top_k=_effective_top_k(request.top_k, plan),
+                    on_stage=_collect,
                     doc_types=request.doc_types,
                     orgs=request.orgs,
                     doc_categories=request.doc_categories,
                 )
+                # Task 3 (Deep): re-bond heading-like neighbor chunks
+                _maybe_enrich_deep_neighbors(plan, results)
                 for name, info in stage_events:
                     label = {
                         "embed": "Embed query", "dense": "Semantic search (dense)",
@@ -1556,17 +1610,18 @@ def chat_stream(request: ChatStreamRequest):
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
 
-            # Fast/Deep generation context is max_context_docs (3 / 5), not
-            # retrieval top_k (still 5 for rerank). Emit only what the LLM gets
-            # so "What the model received" matches generate_stream's slice.
+            # Task 3: emit EXACTLY what the model receives — the budget-admitted
+            # set from the shared prepare_context cache (generate_stream reuses
+            # the identical assembly). Not a fixed count: as many relevant
+            # documents as the evidence budget fits.
             if not is_graph:
-                gen_cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
-                if len(sources) > gen_cap:
+                admitted = _admitted_ids(query, results)
+                if len(sources) != len(admitted):
                     print(
-                        f"[context] retrieved={len(sources)} "
-                        f"generation_context={gen_cap} (max_context_docs)"
+                        f"[context] pool={len(sources)} admitted={len(admitted)} "
+                        "(budget-driven)"
                     )
-                    sources = sources[:gen_cap]
+                sources = _filter_to_admitted(sources, admitted, key=lambda s: s["doc_id"])
 
             yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
 

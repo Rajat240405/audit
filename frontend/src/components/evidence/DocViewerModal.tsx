@@ -32,6 +32,14 @@ export function DocViewerModal() {
             <span>
               <span className="font-medium text-foreground">Ministry:</span> {source.ministry}
             </span>
+            {source.date && (
+              <>
+                <span className="hidden text-border sm:inline">|</span>
+                <span>
+                  <span className="font-medium text-foreground">Date:</span> {source.date}
+                </span>
+              </>
+            )}
             <span className="hidden text-border sm:inline">|</span>
             <span className="truncate">{source.subject}</span>
             <span className="ml-auto shrink-0">

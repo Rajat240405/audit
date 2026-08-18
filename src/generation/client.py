@@ -143,20 +143,13 @@ class LLMClient:
           - Ollama / other servers: "none" -> model name untouched (server default)
         Safe default when the family isn't found: "none" (never mangle a name)."""
         try:
-            from src.generation.registry import model_registry
+            from src.generation.registry import resolve_think_mode
         except Exception:  # noqa: BLE001
             return "none"
-        # 1) exact provider+model match
-        for f in model_registry.list_all():
-            if f.provider == self.provider and (f.model_name == self.model or f.id == self.model):
-                return f.think_mode
-        # 2) fallback: match by model identity across any provider — covers
-        #    dev-parity where provider stays "vllm" but VLLM_BASE_URL points
-        #    at Ollama /v1 with an ollama model (qwen3:8b -> think_mode none).
-        for f in model_registry.list_all():
-            if f.model_name == self.model or f.id == self.model:
-                return f.think_mode
-        return "none"
+        # Single capability-driven resolution point (registry.resolve_think_mode):
+        # exact provider+model family -> model identity across providers
+        # (dev-parity) -> "none" for unknown models. No model-name conditionals.
+        return resolve_think_mode(self.provider, self.model)
 
     @staticmethod
     def _default_base_url(provider: str) -> str:
@@ -329,14 +322,13 @@ class LLMClient:
             "stream": True,
             "options": options,
         }
-        # qwen3-family models: explicitly enable reasoning so Ollama streams
-        # the thinking (the Model Activity panel shows it live). Ollama accepts
-        # `think` at the TOP LEVEL of the request (not inside options) —
-        # unknown option keys are silently ignored, so put it where it counts.
+        # Thinking control is a request-level Ollama flag (`think` at the TOP
+        # LEVEL of the request, not inside options — unknown option keys are
+        # silently ignored). Sent only when the caller resolved a value:
+        # Fast=False (instant), Deep=True; unset → the server default applies
+        # (capability metadata decides defaults, not model-name heuristics).
         if think is not None:
             payload["think"] = bool(think)  # Fast=False (instant), Deep=True
-        elif "qwen3" in self.model.lower():
-            payload["think"] = True
 
         # Inline <think> blocks may span several NDJSON chunks; buffer content
         # until a closing tag arrives so we never split a thought mid-way.

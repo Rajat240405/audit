@@ -21,6 +21,29 @@ from rich.table import Table
 from src.data.loader import DataLoader
 from src.generation.client import LLMClient
 from src.generation.generator import AnswerGenerator
+from src.generation.policy import ExecutionPlan, resolve_execution
+
+
+def _apply_cli_plan(llm_client: LLMClient, llm_model: str, mode: str) -> ExecutionPlan:
+    """Resolve the SAME ExecutionPlan the server uses and bind it to the CLI
+    client — server/CLI mode parity (single policy source). Previously the
+    CLI set only `think`, drifting from the profile's other parameters.
+
+    Unknown models (not in the catalog) resolve with flagged fallback
+    capabilities, and the client's own num_ctx is kept (previous CLI behavior).
+    """
+    from src.generation.registry import model_registry
+
+    family = model_registry.get(llm_model)
+    plan = resolve_execution(family, mode, llm_client.provider, model_name=llm_model)
+    if family is not None:
+        llm_client.num_ctx = plan.num_ctx  # catalog context window when known
+    llm_client.temperature = plan.temperature
+    llm_client.max_tokens = plan.max_tokens
+    llm_client.think = plan.thinking
+    for w in plan.warnings:
+        console.print(f"[yellow][exec] warning: {w}[/yellow]")
+    return plan
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 from src.utils.app_paths import data_dir, index_dir as default_index_dir
 from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
@@ -248,8 +271,9 @@ def query(
 
     # Check if LLM is available
     llm_client = LLMClient(model=llm_model)
-    # mode-aware thinking: fast=off (instant), deep=on (reasoning)
-    llm_client.think = (mode == "deep")
+    # Execution parameters resolve through the SAME ExecutionPlan as the
+    # server (single policy source): fast = thinking OFF/4096, deep = ON/12288.
+    plan = _apply_cli_plan(llm_client, llm_model, mode)
     if not llm_client.check_health():
         console.print("\n[yellow]⚠ LLM not available.[/yellow]")
         console.print("  Start Ollama:  ollama serve")
@@ -262,8 +286,22 @@ def query(
         ))
         return
 
-    console.print(f"\n[cyan]Generating answer with {llm_model}...[/cyan]")
+    console.print(
+        f"\n[cyan]Generating answer with {llm_model} "
+        f"(mode={plan.mode}, max_tokens={plan.max_tokens}, think={plan.thinking})...[/cyan]"
+    )
     generator = AnswerGenerator(llm_client=llm_client)
+    # Task 3: attach the resolved plan — budget-driven dynamic evidence
+    # budgeting (same architecture as the server). Legacy fallback knobs are
+    # still bound (used only if the plan were detached).
+    generator.plan = plan
+    generator.max_context_docs = plan.max_context_docs
+    generator.max_doc_chars = plan.max_doc_chars
+    # Deep-only neighbor-chunk pull-in (heading re-bonding; index metadata)
+    if plan.mode == "deep":
+        from src.generation.evidence import enrich_deep_neighbors
+
+        enrich_deep_neighbors(results, getattr(pipeline, "_long_chunk_map", {}) or {})
     gen_result = generator.generate(question, results)
 
     console.print(Panel(
