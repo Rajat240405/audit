@@ -676,7 +676,17 @@ class AnswerGenerator:
                                 full_text.append(text)
                                 yield {"type": "tokens", "text": text}
                             elif ev_type == "reasoning":
-                                yield {"type": "reasoning", "text": chunk.get("text", "")}
+                                # Application-boundary think-gate (invariant):
+                                # reasoning may reach consumers ONLY when the
+                                # resolved plan says thinking is ON. Standard
+                                # resolves thinking=False, and some providers
+                                # still stream reasoning (several Ollama/qwen3
+                                # builds ignore think:false) — the application
+                                # drops those events here instead of trusting
+                                # the provider flag. Plan-less consumers keep
+                                # legacy behavior (no plan → not gated).
+                                if self.plan is None or self.plan.thinking:
+                                    yield {"type": "reasoning", "text": chunk.get("text", "")}
                             elif ev_type == "answer_start":
                                 yield {"type": "answer_start"}
                             elif ev_type == "done":
@@ -807,7 +817,13 @@ class AnswerGenerator:
                                 full_text.append(text)
                                 yield {"type": "tokens", "text": text}
                             elif ev_type == "reasoning":
-                                yield {"type": "reasoning", "text": chunk.get("text", "")}
+                                # Same application-boundary think-gate as the
+                                # budgeted path: no plan (this legacy branch)
+                                # keeps legacy behavior; a plan gates by
+                                # plan.thinking. Some providers stream
+                                # reasoning even against think=false.
+                                if self.plan is None or self.plan.thinking:
+                                    yield {"type": "reasoning", "text": chunk.get("text", "")}
                             elif ev_type == "answer_start":
                                 yield {"type": "answer_start"}
                             elif ev_type == "done":

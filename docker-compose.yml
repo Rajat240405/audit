@@ -11,7 +11,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: incois-audit-app:local
+    image: incois-audit-app:hpc5
     container_name: incois-audit-app
     ports:
       - "8000:8000"

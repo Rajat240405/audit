@@ -231,14 +231,18 @@ def test_block_selection_marks_internal_gaps_and_preserves_relevance():
             "Trailing unrelated epilogue about soil moisture.",
         ]
     )
-    # whole answer ≈ 77 tok incl. header → 55 forces the block path: the two
+    # whole answer ≈ 77 tok incl. header → 70 forces the block path: the two
     # keyword-bearing blocks fit (with an internal gap marker between them).
-    alloc = allocate_evidence([_res(0, answer)], "INCOIS buoys GNSS", 55)
+    # DECLARED (bridge task): the tail-omission marker now also marks the
+    # dropped epilogue — markers cost budget, so the tuned budget rose 55→70;
+    # the semantics under test (internal gap marked, relevance preserved) stand.
+    alloc = allocate_evidence([_res(0, answer)], "INCOIS buoys GNSS", 70)
     adm = alloc.admissions[0]
     assert "tsunami buoys" in adm.evidence_text
     assert "GNSS station" in adm.evidence_text
     assert "omitted" in adm.evidence_text                  # gap marker present
     assert _OMISSION_TEMPLATE.format(n=1) in adm.evidence_text or "passage(s) omitted" in adm.evidence_text
+    assert "soil moisture" not in adm.evidence_text        # epilogue still shed
     assert alloc.used_tokens <= alloc.budget_tokens
 
 
@@ -331,13 +335,17 @@ def test_neighbor_pull_in_bonds_heading_only():
     assert enrich_deep_neighbors([r], mapping) == 0
 
 
-def test_neighbor_pull_in_rejects_body_blobs_and_bad_ids():
+def test_deep_sibling_window_pulls_body_siblings_and_skips_bad_ids():
+    # SANCTIONED CHANGE (bridge task, scope item 7): the old heading-only
+    # pull-in could never rescue torn table rows (they live in body blobs).
+    # The Deep sibling window now pulls ±1 siblings regardless of shape,
+    # bounded by DEEP_SIBLING_MAX. Bad ids are still rejected.
     r = _res(0, "Matched chunk body.")
     r.metadata = {"chunk_ids": ["parent_L2"]}
-    blob = "Then the ministry elaborated. " * 40            # not heading-like
+    blob = "Then the ministry elaborated. " * 40            # body blob sibling
     mapping = {"parent_L1": _Chunk(blob)}
-    assert enrich_deep_neighbors([r], mapping) == 0
-    assert blob not in r.answer
+    assert enrich_deep_neighbors([r], mapping) == 1
+    assert r.answer.startswith(blob.rstrip())              # window strips edges
     r2 = _res(1, "body")
     r2.metadata = {"chunk_ids": ["weird-id"]}
     assert enrich_deep_neighbors([r2], mapping) == 0

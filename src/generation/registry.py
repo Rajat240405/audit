@@ -774,6 +774,55 @@ class HuggingFaceProvider(BaseProvider):
         }
 
 
+# ── Inline <think>…</think> extraction (OpenAI-compatible streaming) ────────
+# A server launched WITHOUT a reasoning parser embeds the model's thinking
+# inside ``delta.content`` as ``<think>…</think>`` text. The qwen3/deepseek_r1
+# parsers split it server-side instead. This splitter handles the no-parser
+# wire shape so thinking still surfaces separately from the visible answer.
+# Buffered across SSE deltas — a think block (or even the tag itself) can be
+# split over several chunks. Exact parity with LLMClient._stream_ollama
+# (build 3), plus partial-tag hold-back.
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _drain_inline_thinking(buf: str) -> tuple[List[Dict[str, str]], str]:
+    """Split buffered content into reasoning/tokens events.
+
+    Returns ``(events, remainder)`` where ``remainder`` holds an unterminated
+    think-block or a partial ``<think>`` tag tail (deferred until more deltas
+    arrive). Closed ``<think>…</think>`` blocks become ``reasoning`` events;
+    everything else becomes ``tokens`` events in original order.
+    """
+    events: List[Dict[str, str]] = []
+    out = buf
+    while True:
+        open_i = out.find(_THINK_OPEN)
+        if open_i < 0:
+            # No complete open tag. Hold back any tail that could be the
+            # START of a "<think>" tag split across deltas ("<", "<t", …).
+            hold = 0
+            for n in range(min(len(out), len(_THINK_OPEN) - 1), 0, -1):
+                if _THINK_OPEN.startswith(out[-n:]):
+                    hold = n
+                    break
+            emit = out[:-hold] if hold else out
+            if emit:
+                events.append({"type": "tokens", "text": emit})
+            return events, (out[-hold:] if hold else "")
+        close_i = out.find(_THINK_CLOSE, open_i + len(_THINK_OPEN))
+        if close_i < 0:
+            # Think block still open — emit the answer text before it, defer
+            # the in-progress thinking until its close tag arrives.
+            if open_i:
+                events.append({"type": "tokens", "text": out[:open_i]})
+            return events, out[open_i:]
+        if open_i:
+            events.append({"type": "tokens", "text": out[:open_i]})
+        events.append({"type": "reasoning", "text": out[open_i + len(_THINK_OPEN):close_i]})
+        out = out[close_i + len(_THINK_CLOSE):]
+
+
 class OpenAICompatibleProvider(BaseProvider):
     """Inference adapter for ANY OpenAI-compatible server (vLLM, Ollama /v1,
     llama.cpp, LM Studio, TGI, LiteLLM…).
@@ -892,7 +941,22 @@ class OpenAICompatibleProvider(BaseProvider):
                         timeout_seconds=300, think=None, base_url=None,
                         think_mode: str = "none", **kwargs):
         """Yields {type: reasoning|tokens|answer_start|done} — same contract
-        as the Ollama/HF streams, so the frontend reasoning panel is shared."""
+        as the Ollama/HF streams, so the frontend reasoning panel is shared.
+
+        Thinking deltas are separated from answer deltas for EVERY wire shape
+        an OpenAI-compatible server produces:
+          1. ``delta.reasoning_content`` — older vLLM reasoning parsers
+             (deepseek_r1), DeepSeek-style servers.
+          2. ``delta.reasoning`` — newer vLLM ``Qwen3ReasoningParser`` (what
+             the HPC catalog declares: serving.reasoning_parser: qwen3).
+             Newer vLLM renamed the streaming field; reading ONLY
+             ``reasoning_content`` silently drops all thinking here — the
+             answer renders fine, the Thinking panel never fills.
+          3. ``delta.thinking`` — a few builds use this name.
+          4. No reasoning parser at all — thinking arrives INLINE inside
+             ``delta.content`` as ``<think>…</think>``; extracted exactly
+             like the Ollama adapter (build 3) so the answer stays clean.
+        """
         messages: list = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -900,6 +964,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=True, think=think, think_mode=think_mode)
+        buf = ""  # content-side buffer for inline <think> extraction (shape 4)
         with httpx.Client(timeout=timeout_seconds) as client:
             with client.stream("POST", self._completions_url(base_url), json=body) as resp:
                 resp.raise_for_status()
@@ -915,15 +980,46 @@ class OpenAICompatibleProvider(BaseProvider):
                     except Exception:  # noqa: BLE001
                         continue
                     delta = ((chunk.get("choices") or [{}])[0].get("delta") or {})
-                    reasoning = delta.get("reasoning_content") or ""
+                    reasoning = (
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or delta.get("thinking")
+                        or ""
+                    )
                     if reasoning:
                         yield {"type": "reasoning", "text": reasoning}
                     content = delta.get("content") or ""
                     if content:
-                        if not answered:
-                            yield {"type": "answer_start"}
-                            answered = True
-                        yield {"type": "tokens", "text": content}
+                        buf += content
+                        events, buf = _drain_inline_thinking(buf)
+                        for ev in events:
+                            if ev["type"] == "tokens":
+                                if not answered:
+                                    yield {"type": "answer_start"}
+                                    answered = True
+                            yield ev
+        # Flush: the stream ended while a think block was still open (e.g.
+        # the token budget ran out mid-thought) or with a partial tag tail.
+        # Unterminated thinking was NEVER answer text — emit it as reasoning
+        # so the visible answer stays empty and the server can surface its
+        # "reasoning but no answer" notice instead of raw chain-of-thought.
+        if buf:
+            open_i = buf.find(_THINK_OPEN)
+            if open_i >= 0:
+                pre, tail = buf[:open_i], buf[open_i + len(_THINK_OPEN):]
+                if pre:
+                    if not answered:
+                        yield {"type": "answer_start"}
+                        answered = True
+                    yield {"type": "tokens", "text": pre}
+                if tail:
+                    yield {"type": "reasoning", "text": tail}
+            else:
+                # dangling partial like "<t" — never meaningful, but don't lose text
+                if not answered:
+                    yield {"type": "answer_start"}
+                    answered = True
+                yield {"type": "tokens", "text": buf}
         yield {"type": "done"}
 
     def models(self) -> List[str]:

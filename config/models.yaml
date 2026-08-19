@@ -29,6 +29,20 @@ providers:
         thinking: { supported: true, control: request_flag }
         thinking_capable: true
         recommended_execution_mode: GPU
+      - id: qwen3.5_9b
+        display_name: "Qwen 3.5 (9B)"
+        model_name: "qwen3.5:9b"
+        # DEPLOYED window on the PC (mirrors qwen3:8b) — catalog convention.
+        # Native context is 262,144 (hybrid Gated-DeltaNet, dense 9B) per the
+        # official HF card; thinking-capable, toggled per request. Registered
+        # explicitly so it never falls to the served-model FALLBACK path
+        # (8192, thinking unclaimed) — under 8192 the Deep evidence budget
+        # (num_ctx − 12288 − scaffold − margin) clamps to 0 and Deep gets NO
+        # usable evidence (Bug-3 root cause, 2026-08-18).
+        context_window: 32768
+        thinking: { supported: true, control: request_flag }
+        thinking_capable: true
+        recommended_execution_mode: GPU
       - { id: qwen2.5,        display_name: "Qwen 2.5",               model_name: "qwen2.5:7b",      context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
       - { id: llama3.2,       display_name: "Llama 3.2",              model_name: "llama3.2:3b",     context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }
       - { id: gemma2,         display_name: "Gemma 2",                model_name: "gemma2:9b",       context_window: 8192,   thinking_capable: false, recommended_execution_mode: GPU }

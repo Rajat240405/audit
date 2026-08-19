@@ -171,15 +171,51 @@ def _effective_top_k(request_top_k, plan) -> int:
     return max(req, pool, 1)
 
 
+def _admission_diag(question: str, results) -> tuple[list[str], dict]:
+    """Admitted ids + full admission diagnostics for (question, results).
+
+    Planned path (ExecutionPlan attached): budget-driven admission via the
+    generator's shared prepare_context cache — the SAME assembly generate()/
+    generate_stream() then reuse (stream/non-stream parity). The diagnostics
+    carry the fields needed to distinguish, at runtime:
+      CASE A  pool > admitted  → correct Task-3 budget admission (skipped ids listed)
+      CASE B  retrieved < retrieval_top_k → narrowed upstream of admission
+              (see the per-stage counts in the server trace line); NOT a
+              top_k-propagation issue when effective_top_k in the trace is the
+              plan pool (5 Standard / 10 Deep)
+      CASE C  legacy_max_context_docs_fallback=True → plan was MISSING on a
+              request that should be planned (alarm — planned requests must
+              never hit the legacy cap)
+    """
+    plan = getattr(generator, "plan", None)
+    if plan is None:
+        cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
+        ids = [r.doc_id for r in results[:cap]]
+        return ids, {
+            "plan_attached": False,
+            "legacy_max_context_docs_fallback": True,
+            "legacy_cap": cap,
+            "pool": len(results),
+            "admitted": len(ids),
+            "skipped_doc_ids": [r.doc_id for r in results[cap:]],
+            "evidence_budget_tokens": None,
+            "evidence_used_tokens": None,
+        }
+    _, ids, diag = generator.prepare_context(question, results)
+    diag["plan_attached"] = True
+    diag["legacy_max_context_docs_fallback"] = False
+    diag["retrieved_count"] = len(results)   # hybrids-stage parents (pre-slice)
+    diag["retrieval_top_k"] = getattr(plan, "retrieval_top_k", None)
+    diag["plan_evidence_budget_tokens"] = getattr(plan, "evidence_budget_tokens", None)
+    return ids, diag
+
+
 def _admitted_ids(question: str, results) -> list[str]:
     """Budget-admitted doc ids for (question, results) via the generator's
     shared prepare_context cache — the SAME assembly generate()/
     generate_stream() then reuse, so the sources the UI shows are exactly the
     evidence the model receives (stream/non-stream parity)."""
-    if getattr(generator, "plan", None) is None:
-        cap = max(1, int(getattr(generator, "max_context_docs", 5) or 5))
-        return [r.doc_id for r in results[:cap]]
-    _, ids, _ = generator.prepare_context(question, results)
+    ids, _ = _admission_diag(question, results)
     return ids
 
 
@@ -1615,12 +1651,43 @@ def chat_stream(request: ChatStreamRequest):
             # the identical assembly). Not a fixed count: as many relevant
             # documents as the evidence budget fits.
             if not is_graph:
-                admitted = _admitted_ids(query, results)
-                if len(sources) != len(admitted):
-                    print(
-                        f"[context] pool={len(sources)} admitted={len(admitted)} "
-                        "(budget-driven)"
-                    )
+                admitted, adiag = _admission_diag(query, results)
+                # Runtime evidence trace (Bug-2 diagnostics). Reads:
+                #   CASE A  retrieved > admitted (budget) → correct Task-3
+                #           behavior; skipped/evidence_used tell you why.
+                #   CASE B  retrieved < retrieval_top_k → the retrieval side
+                #           narrowed the pool (check dense/bm25/rrf/reranked
+                #           counts); effective_top_k proves whether the plan
+                #           pool (5 Standard / 10 Deep) reached the pipeline.
+                #   CASE C  legacy_fallback=True → a planned request hit the
+                #           max_context_docs cap — an alarm, never expected.
+                # (stage_events exists here: this branch only runs on the
+                # hybrid path, where it is populated.)
+                stage_counts = {
+                    name: info.get("count")
+                    for name, info in stage_events
+                    if "count" in info
+                }
+                print(
+                    "[evidence-trace]"
+                    f" mode={getattr(plan, 'mode', '?')}"
+                    f" provider={ACTIVE_CONFIG['provider']}"
+                    f" model={resolved_model}"
+                    f" plan={'ON' if adiag.get('plan_attached') else 'MISSING'}"
+                    f" retrieval_top_k={adiag.get('retrieval_top_k')}"
+                    f" effective_top_k={_effective_top_k(request.top_k, plan)}"
+                    f" dense={stage_counts.get('dense', '-')}"
+                    f" bm25={stage_counts.get('bm25', '-')}"
+                    f" rrf={stage_counts.get('rrf', '-')}"
+                    f" reranked={stage_counts.get('rerank', '-')}"
+                    f" retrieved={adiag.get('retrieved_count', adiag.get('pool', '-'))}"
+                    f" admitted={adiag.get('admitted', len(admitted))}"
+                    f" skipped={len(adiag.get('skipped_doc_ids') or [])}{adiag.get('skipped_doc_ids') or []}"
+                    f" evidence_budget={adiag.get('plan_evidence_budget_tokens', '-')}"
+                    f" evidence_budget_after_overhead={adiag.get('evidence_budget_tokens', '-')}"
+                    f" evidence_used={adiag.get('evidence_used_tokens', '-')}"
+                    f" legacy_max_context_docs_fallback={adiag.get('legacy_max_context_docs_fallback', '?')}"
+                )
                 sources = _filter_to_admitted(sources, admitted, key=lambda s: s["doc_id"])
 
             yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
@@ -1687,8 +1754,17 @@ def chat_stream(request: ChatStreamRequest):
                     streamed_parts.append(ev["text"])
                     yield _sse({"type": "tokens", "text": ev["text"]})
                 elif ev["type"] == "reasoning":
-                    # live chain-of-thought — forwarded to the Model Activity panel
-                    yield _sse({"type": "reasoning", "text": ev["text"]})
+                    # Frontend boundary gate (Bug-1 invariant): reasoning may
+                    # reach the canvas ONLY when the RESOLVED plan says
+                    # thinking is ON. Standard resolves thinking=False — and
+                    # some providers ignore think:false (several Ollama/qwen3
+                    # builds) — so the application enforces the mode here,
+                    # never the provider flag. The generator gates the same
+                    # invariant upstream; this is the last boundary before
+                    # the frontend either way.
+                    if plan is None or plan.thinking:
+                        # live chain-of-thought — forwarded to the Model Activity panel
+                        yield _sse({"type": "reasoning", "text": ev["text"]})
                 elif ev["type"] == "answer_start":
                     yield _sse({"type": "phase", "phase": "generating"})
                 elif ev["type"] == "meta":

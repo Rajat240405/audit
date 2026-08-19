@@ -590,16 +590,19 @@ class HybridRAGPipeline:
             for pid, g in grouped.items():
                 record = g["record"]
                 long_doc = len(record.answer_text or "") > self.long_doc_chars
-                if g["chunks"]:
-                    evidence = "\n\n".join(g["chunks"])
-                elif long_doc:
-                    from src.generation.generator import extract_relevant_evidence
+                # Retrieval → evidence bridge (assembly-side; no reindex):
+                # retrieval identified the RELEVANT PARENT; evidence assembly
+                # now works from the parent's full answer — ONE mechanism for
+                # chunk-hit and parent-only cases alike. Replaces the two
+                # problematic paths: (a) joining only matched ~500-char chunk
+                # windows (torn tables; hit-order jumbling) and (b) the
+                # 2,000-char keyword-paragraph fallback (intro + captions but
+                # zero table rows). Structural unit selection happens in
+                # allocate_evidence under the plan budget; giant parents are
+                # structurally windowed here (assemble_parent_evidence).
+                from src.generation.evidence import assemble_parent_evidence
 
-                    evidence = extract_relevant_evidence(
-                        record.answer_text or "", query, max_chars=2000
-                    )
-                else:
-                    evidence = record.answer_text
+                evidence = assemble_parent_evidence(record.answer_text or "", query)
 
                 dense_score = next((s for d_id, s in dense_results if d_id == pid), None)
                 bm25_score = next((s for d_id, s in bm25_results if d_id == pid), None)
@@ -626,6 +629,10 @@ class HybridRAGPipeline:
                         # Task 3: long-chunk provenance for Deep-mode neighbor
                         # pull-in (omitted when the parent hit directly)
                         **({"chunk_ids": list(g["chunk_ids"])} if g["chunk_ids"] else {}),
+                        # Bridge: evidence = parent-level assembly (not chunk
+                        # windows / keyword filter) — Deep sibling rescue is
+                        # subsumed and skips flagged results.
+                        **({"evidence_source": "parent_full"} if (g["chunks"] or long_doc) else {}),
                     },
                     dense_score=dense_score,
                     bm25_score=bm25_score,

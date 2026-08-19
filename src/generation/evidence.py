@@ -105,14 +105,33 @@ def _is_structural_heading(line: str) -> bool:
     return bool(_STRUCT_TAIL_RE.search(l))
 
 
+# Row-ish line: no-dot annexure row ("1 WEST BENGAL ...") or dotted numeric
+# row ("1) 2022-23 31.00") — used for ADJACENCY PROTECTION in the cleaner.
+_ROWISH_RE = re.compile(r"^\d{1,4}[.)]?\s+\S")
+
+
 def clean_parliament_text(text: str) -> str:
-    """Strip parliamentary boilerplate lines, keep substantive content."""
+    """Strip parliamentary boilerplate lines, keep substantive content.
+
+    Adjacency protection (bridge task): the all-caps title rule must never
+    delete table rows ("1 WEST BENGAL BANKURA BANKURA"), table headers
+    adjacent to rows ("SNO. STATE DISTRICT STATION"), or wrap fragments
+    glued to rows ("SANTINIKETAN-") — all are short uppercase lines that
+    the generic rule treats as "subject titles". Lines in/adjacent to a
+    row-ish line are exempt from that ONE rule; all other rules stand.
+    """
     if not text:
         return text
     lines = text.split("\n")
+    stripped = [l.strip() for l in lines]
+    adj: set[int] = set()
+    for k, l in enumerate(stripped):
+        if _ROWISH_RE.match(l):
+            adj.add(k)
+            adj.add(k - 1)
+            adj.add(k + 1)
     cleaned = []
-    for line in lines:
-        l = line.strip()
+    for k, l in enumerate(stripped):
         if not l:
             continue
         u = l.upper()
@@ -127,13 +146,15 @@ def clean_parliament_text(text: str) -> str:
             continue
         # skip subject-title lines (short all-caps, not (a)/(b)/(c), no colon)
         # — but KEEP structural report headings so they stay bonded to the
-        # content they label (Task-3 boundary preservation).
+        # content they label (Task-3 boundary preservation), and KEEP
+        # row-run-adjacent table lines (bridge-task adjacency protection).
         if (
             u == l
             and len(l) < 60
             and not l.startswith("(")
             and ":" not in l
             and not _is_structural_heading(l)
+            and k not in adj
         ):
             continue
         # skip standalone question numbers ("3035.")
@@ -241,6 +262,76 @@ class Block:
 _LIST_ITEM_RE = re.compile(r"^\s*(\((?:[a-z]|[ivxIVX]+|\d+)\)|\d{1,2}[.)]\s|[-•–*]\s)\s*")
 _TABLE_HINT_RE = re.compile(r"\S\s{2,}\S")
 
+# ── Row-run tables (the corpus's ACTUAL table representation) ───────────────
+# Annexure rows in the parliament corpus are linear no-dot numbered lines:
+#   "1 WEST BENGAL BANKURA BANKURA" / "33 WEST BENGAL WEST MEDINIPUR CAMPUS)"
+# with OCR/page-wrap fragments ("SANTINIKETAN-") glued backwards onto their row.
+# A run of >= _MIN_ROW_RUN strictly-increasing numbered units is a table;
+# oversized runs emit bounded row-group blocks (never splitting a row unit).
+_PLAIN_ROW_RE = re.compile(r"^(\d{1,4})\s+\S")
+_MIN_ROW_RUN = 4
+_ROW_GROUP_MAX_TOKENS = 250   # ~25 rows/group — unit stays coherent + fits any budget
+
+
+def _is_plain_row_start(line: str) -> bool:
+    return bool(_PLAIN_ROW_RE.match(line)) and not _LIST_ITEM_RE.match(line)
+
+
+def _fragment_continues_run(lines: list[str], j: int, prev_num: int) -> bool:
+    """Is the unnumbered line at ``j`` the torn TAIL of the previous row, or
+    the caption of the NEXT table (run over)? Glue it back only if a numbered
+    row CONTINUING the sequence follows within 2 lines. Crosses headings and
+    further fragment lines; a restart at n <= prev_num ("1 ..." of the next
+    annexure) ends the run."""
+    for k in (j + 1, j + 2):
+        if k >= len(lines):
+            return False
+        m = _PLAIN_ROW_RE.match(lines[k])
+        if m and not _LIST_ITEM_RE.match(lines[k]):
+            return int(m.group(1)) > prev_num
+    return False
+
+
+def _take_row_run(lines: list[str], i: int):
+    """Consume a no-dot numbered row run starting at ``i``.
+
+    A row unit = the numbered line plus short wrap-fragment continuation
+    lines glued BACK onto it ("SANTINIKETAN-" belongs to row 3). Fragments
+    never end with sentence punctuation and MUST continue the row sequence
+    (a caption of the next table ends the run instead). Run also ends at a
+    sequence inversion/restart, a structural heading, a list item, or prose.
+    Returns (units, next_i) with >= _MIN_ROW_RUN units, else (None, i).
+    """
+    units: list[list[str]] = []
+    j = i
+    prev_num = 0
+    while j < len(lines):
+        line = lines[j]
+        m = _PLAIN_ROW_RE.match(line)
+        if m and not _LIST_ITEM_RE.match(line):
+            n = int(m.group(1))
+            if n <= prev_num:
+                break                       # restart/inversion → run over
+            units.append([line])
+            prev_num = n
+            j += 1
+            continue
+        if (
+            units
+            and not _is_structural_heading(line)
+            and not _LIST_ITEM_RE.match(line)
+            and len(line) <= 90
+            and not line.rstrip().endswith(".")
+            and _fragment_continues_run(lines, j, prev_num)
+        ):
+            units[-1].append(line)          # wrap fragment → back onto its row
+            j += 1
+            continue
+        break
+    if len(units) < _MIN_ROW_RUN:
+        return None, i
+    return units, j
+
 
 def _is_heading_line(line: str) -> bool:
     """A line that labels following content rather than standing alone:
@@ -272,11 +363,32 @@ def _is_table_line(line: str) -> bool:
     return False
 
 
+def _caption_lookahead(lines: list[str], i: int) -> bool:
+    """Is ``lines[i]`` a table caption? Short declarative line within 2 lines
+    of a plain-row start, crossing only heading lines ("Details of Automatic
+    Weather Stations of West Bengal" / "(TOTAL: 35)"). Bonds into the table's
+    context like a heading so caption+header ride with every row group."""
+    l = lines[i]
+    if len(l) > 90 or l.rstrip().endswith((".", "!", "?")):
+        return False
+    for k in (i + 1, i + 2):
+        if k >= len(lines):
+            return False
+        if _is_plain_row_start(lines[k]):
+            return True
+        if not _is_heading_line(lines[k]):
+            return False
+    return False
+
+
 def segment_blocks(text: str) -> list[Block]:
     """Split cleaned evidence into ATOMIC semantic blocks.
 
     Rules:
       * a run of table-like lines          -> one "table" block
+      * a no-dot numbered row run (corpus annexure tables) -> bounded
+        row-group "table" blocks, context (Annexure heading + caption +
+        header) replicated on each group, rows never split mid-unit
       * a run of list items                -> one "list" block
       * any other non-empty line           -> one "paragraph" block
       * a heading line is never its own surviving unit — it PREFIXES the
@@ -300,8 +412,39 @@ def segment_blocks(text: str) -> list[Block]:
 
     while i < len(lines):
         line = lines[i]
+        # Row runs take priority over heading detection: ALL-CAPS row lines
+        # ("1 WEST BENGAL BANKURA BANKURA") would otherwise be swallowed as
+        # headings and the whole annexure lost with the trailing-drop rule.
+        row_run, nxt = (_take_row_run(lines, i) if _is_plain_row_start(line) else (None, i))
+        if row_run:
+            head = take_heading()
+            context = [l for l in head.split("\n") if l]
+            ctx_tokens = estimate_tokens("\n".join(context)) if context else 0
+            group: list[list[str]] = []
+            group_tokens = ctx_tokens
+            for unit in row_run:
+                u_tok = estimate_tokens("\n".join(unit))
+                if group and group_tokens + u_tok > _ROW_GROUP_MAX_TOKENS:
+                    blocks.append(Block(
+                        text="\n".join(context + [ln for u in group for ln in u]),
+                        kind="table",
+                    ))
+                    group, group_tokens = [], ctx_tokens
+                group.append(unit)
+                group_tokens += u_tok
+            if group:
+                blocks.append(Block(
+                    text="\n".join(context + [ln for u in group for ln in u]),
+                    kind="table",
+                ))
+            i = nxt
+            continue
         if _is_heading_line(line) and not _LIST_ITEM_RE.match(line):
             pending_heading.append(line)
+            i += 1
+            continue
+        if not _LIST_ITEM_RE.match(line) and _caption_lookahead(lines, i):
+            pending_heading.append(line)      # table caption rides the run
             i += 1
             continue
         head = take_heading()
@@ -547,13 +690,54 @@ def _render_selected(blocks: list[Block], selected: set[int]) -> tuple[str, int]
         while j < len(blocks) and j not in selected:
             j += 1
         gap = j - i
-        if parts and j < len(blocks):  # internal gap only (not head/tail)
+        if parts and j < len(blocks):  # internal gap
+            parts.append(_OMISSION_TEMPLATE.format(n=gap))
+            omitted += gap
+        elif parts and gap:
+            # TAIL omission: mark it — a surviving caption/intro may promise
+            # content ("details are given in Annexure-I") that no longer
+            # follows. The omission must be explicit, never silent.
             parts.append(_OMISSION_TEMPLATE.format(n=gap))
             omitted += gap
         elif gap:
-            omitted += gap  # head/tail omissions counted, not marked
+            omitted += gap  # head omission still counted, not marked
         i = j
     return "\n\n".join(parts), omitted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retrieval → evidence bridge: ONE parent-evidence mechanism
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Bounded structural window for oversized parents (~18k chars). Modest
+# parents (the whole parliamentary corpus; the AWS doc is ~1.3k tokens) pass
+# through WHOLE — retrieval identified the relevant parent; structural
+# assembly + the budgeted allocator decide what the model sees.
+PARENT_EVIDENCE_CAP_TOKENS = 4500
+
+
+def assemble_parent_evidence(answer_text: str, query: str) -> str:
+    """The single evidence-source mechanism for a relevant parent document.
+
+    Modest parents pass through whole (zero loss — the downstream
+    ``allocate_evidence`` budget remains authoritative). Oversized parents
+    (annual-report-scale) are windowed by the SAME structural machinery the
+    allocator uses — segment into blocks, keyword-anchored selection,
+    document-order emission with omission markers. NEVER the retired
+    2,000-char keyword-paragraph filter (which kept intros + annexure
+    captions while dropping every table row) and never a raw head cut.
+    """
+    text = answer_text or ""
+    if estimate_tokens(text) <= PARENT_EVIDENCE_CAP_TOKENS:
+        return text
+    keywords = query_keywords(query)
+    blocks = segment_blocks(text)
+    sel = _select_blocks(blocks, keywords, PARENT_EVIDENCE_CAP_TOKENS)
+    if sel is None:
+        best = _best_single_block(blocks, keywords)
+        return _truncate_tokens(best.text, PARENT_EVIDENCE_CAP_TOKENS)
+    emitted, _omitted, _truncated, _cost = sel
+    return emitted
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,8 +908,9 @@ def _chunk_seq(chunk_id: str) -> Optional[tuple[str, int]]:
 
 
 def _neighbor_is_contextual(chunk_text: str) -> bool:
-    """Only pull a neighbor that plausibly labels the matched chunk (short
-    heading-ish lines), never a big body blob."""
+    """LEGACY heuristic (superseded by the Deep sibling window below, which no
+    longer requires heading-ish neighbors). Kept exported for the prior
+    investigation's probes."""
     lines = [l.strip() for l in (chunk_text or "").split("\n") if l.strip()]
     if not lines or len(lines) > 3:
         return False
@@ -734,33 +919,69 @@ def _neighbor_is_contextual(chunk_text: str) -> bool:
     return all(len(l) <= 90 and not l.endswith(".") for l in lines)
 
 
-def enrich_deep_neighbors(results: list[RetrievedResult], long_chunk_map) -> int:
-    """DEEP profile only: when a result's evidence came from middle-of-document
-    long chunks, pre-bond the IMMEDIATELY PRECEDING chunk if it is heading-like
-    — the matched 500-char chunk then keeps its section label (metadata chain
-    ``{parent}_L{n}`` already persisted in the index maps; no reindexing).
+# Deep sibling window: around each matched chunk, pull ADJACENT siblings
+# (± window) so torn structural units (e.g. the "SANTINIKETAN-" / next-row
+# split across 500-char chunks) rejoin. Bounded: at most DEEP_SIBLING_MAX
+# sibling chunks per result — the window cannot balloon evidence.
+DEEP_SIBLING_WINDOW = 1
+DEEP_SIBLING_MAX = 2
 
-    Mutates ``r.answer`` by prefixing at most ONE neighbor chunk (dedup-safe);
-    the downstream budget accounting simply sees the enlarged evidence, so the
-    overall context budget is still enforced. Returns enrichment count."""
+
+def enrich_deep_neighbors(results: list[RetrievedResult], long_chunk_map) -> int:
+    """DEEP profile only: bounded sibling-window rescue around matched chunks.
+
+    For results whose evidence is ALREADY the whole parent
+    (``evidence_source == "parent_full"`` — the bridge task's normal output)
+    there is nothing to rescue: skipped. Otherwise, for each matched chunk,
+    adjacent ``_L{n±WINDOW}`` siblings are prepended in document order
+    (dedup-by-containment makes this idempotent), at most DEEP_SIBLING_MAX
+    chunks per result. Heading-ness is no longer required — a torn table row
+    lives in a body blob, not a caption.
+    """
     added = 0
     for r in results:
-        ids = (r.metadata or {}).get("chunk_ids") or []
-        seqs = sorted(n for n in (_chunk_seq(cid) for cid in ids) if n)
-        if not seqs:
+        if (r.metadata or {}).get("evidence_source") == "parent_full":
+            continue  # bridge subsumes rescue (DECLARED semantics change)
+        seen_seqs = {
+            seq for cid in ((r.metadata or {}).get("chunk_ids") or [])
+            if (seq := _chunk_seq(cid))
+        }
+        if not seen_seqs:
             continue
-        parent, n = seqs[0]
-        if n <= 0:
+        anchors = sorted(seen_seqs)
+        pulled: list[tuple[int, str]] = []
+        used = {n for _, n in anchors}
+        for pid, n in anchors:
+            for n2 in range(max(0, n - DEEP_SIBLING_WINDOW), n + DEEP_SIBLING_WINDOW + 1):
+                if n2 in used:
+                    continue
+                ch = long_chunk_map.get(f"{pid}_L{n2}")
+                text = (getattr(ch, "chunk_text", "") or "").rstrip()
+                if not text or text in (r.answer or ""):
+                    continue
+                used.add(n2)
+                pulled.append((n2, text))
+        if not pulled:
             continue
-        neighbor = getattr(long_chunk_map, "get", lambda _k: None)(f"{parent}_L{n - 1}")
-        if neighbor is None:
-            continue
-        text = getattr(neighbor, "chunk_text", "") or ""
-        if not text or text in (r.answer or ""):
-            continue
-        if _neighbor_is_contextual(text):
-            r.answer = text.rstrip() + "\n" + (r.answer or "")
-            added += 1
+        if len(anchors) == 1:
+            # surround the anchor in DOCUMENT order: earlier siblings prepended,
+            # later siblings appended (a torn row rejoins on both sides).
+            _, n0 = anchors[0]
+            pulled.sort(key=lambda t: (abs(t[0] - n0), t[0]))    # closest first
+            kept = pulled[:DEEP_SIBLING_MAX]
+            before = [t for t in kept if t[0] < n0]
+            after = [t for t in kept if t[0] > n0]
+            r.answer = (
+                ("\n".join(t for _, t in before) + "\n" if before else "")
+                + (r.answer or "")
+                + ("\n" + "\n".join(t for _, t in after) if after else "")
+            )
+        else:
+            # multiple anchors: bounded prepend in document order (legacy shape)
+            pulled.sort(key=lambda t: t[0])
+            kept = pulled[:DEEP_SIBLING_MAX]
+            r.answer = "\n".join(t for _, t in kept) + "\n" + (r.answer or "")
+        added += len(kept)
     return added
 
 
