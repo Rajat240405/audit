@@ -8,8 +8,9 @@ Design Decisions
      fail-safe fallback systems.
    - "archive": Loads actual, genuine Lok Sabha metadata from the official
      Parliament of India dataset on Zenodo, downloads each official PDF from
-     questionsFilePath, extracts the full question and answer text using pypdf,
-     and populates question_text and answer_text directly from the official document.
+     questionsFilePath, extracts the full question and answer text (PyMuPDF-based
+     table-aware extraction with automatic pypdf fallback), and populates
+     question_text and answer_text directly from the official document.
    - "mock": Produces high-quality, topic-aligned synthetic records.
    - "local": Loads records from a local JSONL file.
 
@@ -559,11 +560,8 @@ class RealArchiveScraper(Scraper):
         of ``"scanned"`` / ``"parser_failure"`` / ``"unsupported"`` on failure.
         """
         if doc_type == "pdf":
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(io.BytesIO(data))
-                text = "".join((p.extract_text() or "") for p in reader.pages)
-            except Exception:
+            text = self._extract_pdf_text_bytes(data)
+            if text is None:
                 return None, "parser_failure"
             if not text.strip():
                 return None, "scanned"
@@ -574,6 +572,36 @@ class RealArchiveScraper(Scraper):
         else:
             return None, "unsupported"
         return self._split_question_answer(text), None
+
+    @staticmethod
+    def _extract_pdf_text_bytes(data: bytes) -> str | None:
+        """
+        Extract full text from PDF bytes.
+
+        Prefers the PyMuPDF-based extractor from ``src.data.pdf_table_extract``,
+        which reconstructs visual table rows (pypdf flat extraction interleaves
+        wrapped table cells between rows — see investigation_table_extraction).
+        Falls back verbatim to the legacy pypdf path when PyMuPDF is unavailable
+        or raises, so behavior degrades gracefully instead of failing ingestion.
+        Returns None only if every available strategy fails.
+        """
+        try:
+            from src.data.pdf_table_extract import extract_pdf_text
+
+            text = extract_pdf_text(data)
+            if text is not None and text.strip():
+                return text
+        except ImportError:
+            pass  # PyMuPDF not installed — legacy path below
+        except Exception:
+            pass  # PyMuPDF failed on this file — try the legacy path below
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(data))
+            return "".join((p.extract_text() or "") for p in reader.pages)
+        except Exception:
+            return None
 
     def _extract_text_from_pdf(self, pdf_path: Path) -> tuple[str, str] | None:
         """Extract question and answer from a local PDF file (compatibility wrapper)."""
