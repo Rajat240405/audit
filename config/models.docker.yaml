@@ -44,7 +44,8 @@ providers:
       - id: qwen3.6_35b_a3b_fp8
         display_name: "Qwen 3.6 35B-A3B FP8"
         model_name: "Qwen3.6-35B-A3B-FP8"
-        context_window: 32768
+        context_window: 32768           # deployed/app-blessed window (default app ceiling)
+        native_context_window: 131072   # see rationale in config/models.yaml
         thinking_capable: true
         think_mode: template          # vLLM: chat_template_kwargs (no model name suffix)
         recommended_execution_mode: GPU
@@ -52,7 +53,8 @@ providers:
       - id: qwen3.8_27b_fp8
         display_name: "Qwen 3.8 27B FP8"
         model_name: "Qwen3.8-27B-FP8"
-        context_window: 32768
+        context_window: 32768           # deployed/app-blessed window (default app ceiling)
+        native_context_window: 262144   # model CAPABILITY (see config/models.yaml)
         thinking_capable: true
         think_mode: template          # vLLM: chat_template_kwargs (no model name suffix)
         recommended_execution_mode: GPU

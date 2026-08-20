@@ -11,7 +11,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: incois-audit-app:hpc5
+    image: incois-audit-app:local
     container_name: incois-audit-app
     ports:
       - "8000:8000"
@@ -23,8 +23,11 @@ services:
       APP_MODEL_DIR: /models
       APP_MODE: serve
       # OpenAI-compatible path to host Ollama (not native /api/chat).
-      # HPC: VLLM_BASE_URL=http://<vllm-host>:8001  VLLM_MODEL=Qwen3.6-35B-A3B-FP8
-      # (vLLM served with --reasoning-parser qwen3 --max-model-len 32768)
+      # HPC: VLLM_BASE_URL=http://<vllm-host>:8001  — VLLM_MODEL optional:
+      # unset = dynamic /v1/models discovery of the served model; set only
+      # to pin an exact served id for testing.
+      # (vLLM served per config/models.yaml serving specs — e.g.
+      #  --reasoning-parser qwen3 --max-model-len 131072 for Qwen3.8)
       APP_DEFAULT_PROVIDER: vllm
       VLLM_BASE_URL: http://host.docker.internal:11434/v1
       VLLM_MODEL: qwen3:8b

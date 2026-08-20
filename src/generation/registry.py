@@ -128,6 +128,14 @@ class ModelFamily:
     context_window: int
     thinking_capable: bool
     recommended_execution_mode: str = "GPU"
+    # Model NATIVE context (capability the model itself supports, e.g. from
+    # the HF card). Distinct from context_window, which is the DEPLOYED /
+    # application-blessed window for this catalogue entry ("how much of the
+    # context this deployment intends to use"). None = not documented in the
+    # catalog — capability math falls back to context_window (never invented).
+    # effective runtime context = min(native_or_context_window,
+    # vllm_serving_limit_if_known, application_ceiling) — resolved by policy.
+    native_context_window: Optional[int] = None
     # LEGACY (kept consistent; legacy adapter wire string):
     #   "template" -> send chat_template_kwargs.enable_thinking (vLLM + Qwen3.x;
     #                 model name untouched, thinking controlled per-request)
@@ -194,6 +202,7 @@ class ModelFamily:
         allowed = {
             "id", "display_name", "provider", "model_name", "context_window",
             "recommended_execution_mode", "metadata_source",
+            "native_context_window",
         }
         base = {k: v for k, v in d.items() if k in allowed}
         serving = d.get("serving") or {}
@@ -1023,7 +1032,17 @@ class OpenAICompatibleProvider(BaseProvider):
         yield {"type": "done"}
 
     def models(self) -> List[str]:
-        return [os.environ.get("VLLM_MODEL") or "Qwen3.6-35B-A3B-FP8"]
+        """Model ids this provider may send. DISCOVERY-BACKED: the ids the
+        connected server actually serves (TTL-cached — /v1/models is not
+        re-polled per call). Falls back to the explicit ``VLLM_MODEL`` pin /
+        the historical catalog default when the server is unreachable, so
+        this legacy BaseProvider API keeps its non-raising contract."""
+        try:
+            from src.generation.vllm_discovery import discover_vllm_models
+
+            return [m["id"] for m in discover_vllm_models()]
+        except Exception:  # noqa: BLE001 - offline contract preserved
+            return [os.environ.get("VLLM_MODEL") or "Qwen3.6-35B-A3B-FP8"]
 
     def served_models(self, base_url: str | None = None) -> List[Dict[str, Any]]:
         """Models actually SERVED by the connected server (``GET /v1/models``).
@@ -1084,7 +1103,10 @@ class OpenAICompatibleProvider(BaseProvider):
     def capabilities(self) -> Dict[str, Any]:
         return {
             "execution_environment": "Any OpenAI-compatible server (vLLM HPC / Ollama /v1 local)",
-            "default_context": 32768,
+            # Context is NOT a provider-level constant: effective context is
+            # resolved per active model as min(native ∩ serving-limit ∩ app
+            # ceiling) by the execution policy (src.generation.policy).
+            "context_handling": "dynamic: min(model native, serving max_model_len, app ceiling)",
             "latency_profile": "Server-dependent (vLLM A40 27B ~15-25 tok/s)",
         }
 

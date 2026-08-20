@@ -40,7 +40,10 @@ def _apply_cli_plan(llm_client: LLMClient, llm_model: str, mode: str) -> Executi
         llm_client.num_ctx = plan.num_ctx  # catalog context window when known
     llm_client.temperature = plan.temperature
     llm_client.max_tokens = plan.max_tokens
-    llm_client.think = plan.thinking
+    # Wire think from the plan: identical to plan.thinking for catalogued
+    # models; None for dynamic/unknown-capability models so no thinking
+    # control is sent (server default) — parity with _apply_execution_plan.
+    llm_client.think = plan.wire_think
     for w in plan.warnings:
         console.print(f"[yellow][exec] warning: {w}[/yellow]")
     return plan

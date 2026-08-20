@@ -78,7 +78,10 @@ def test_production_catalog_capability_views():
     assert f.thinking.control == "chat_template_kwargs"
     assert f.think_mode == "template"
     assert f.serving.reasoning_parser == "qwen3"
-    assert f.serving.max_model_len == 32768
+    # serving limit raised 32768 -> 65536 (2026-08-19 HPC deployment change;
+    # A40 fp16-KV headroom). The pin exists to catch accidental metadata
+    # edits, not to freeze the 32K bottleneck.
+    assert f.serving.max_model_len == 65536
 
     # legacy-only HPC entries also normalize to the canonical control
     assert reg.get("qwen3.6_27b").thinking.control == "chat_template_kwargs"

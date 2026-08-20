@@ -86,6 +86,23 @@ export interface ServerStatus {
   mode: ExecutionMode;
   retrieval_mode: RetrievalMode;
   gpu: string;
+  /** additive (served-model discovery) — optional extras from the backend */
+  enabled_providers?: string[];
+  provider_base_url?: string;
+  served_model?: string;
+  model_display_name?: string;
+  /** where capabilities came from: catalog | server | fallback */
+  model_metadata_source?: string;
+  /** tri-state thinking capability: true/false known, null/absent = unknown */
+  thinking_supported?: boolean | null;
+  /** model NATIVE context (capability), null = not documented */
+  native_context_tokens?: number | null;
+  /** vLLM serving limit (--max-model-len) if the server reports it, else null */
+  serving_context_tokens?: number | null;
+  /** application safety ceiling (RAG_MAX_CONTEXT_TOKENS or catalogue default) */
+  app_context_limit_tokens?: number;
+  /** effective runtime context = min(native?, serving?, ceiling) */
+  effective_context_tokens?: number;
 }
 
 export interface GraphBuildStatus {

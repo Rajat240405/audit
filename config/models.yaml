@@ -49,17 +49,25 @@ providers:
       - { id: qwen2.5_1.5b,   display_name: "Qwen 2.5 (1.5B)",        model_name: "qwen2.5:1.5b",    context_window: 8192,   thinking_capable: false, recommended_execution_mode: CPU }
 
   # ── HPC (A40) — vLLM server. OpenAI-compatible, multi-user batching.
-  #    DEPLOYED model = Qwen3.6-35B-A3B-FP8 (32768 context), selected at boot
-  #    via VLLM_MODEL (see .env.example). To switch models, set VLLM_MODEL to
-  #    another model_name below — no code change.
+  #    The active model is DISCOVERED from the server's /v1/models (VLLM_MODEL
+  #    remains an optional pin — see .env.example) and resolved against this
+  #    catalog by exact model_name; served model ids Qwen3.8-27B-FP8 /
+  #    Qwen3.6-35B-A3B-FP8 map to the families below.
   #    Qwen3.8-27B-FP8 is catalogued below (Task 2 preparation). Its server
   #    env ADDITIONALLY requires vLLM>=0.17.0 and `pip install
   #    "transformers>=5.8.0"` — see the entry's comment/serving notes.
   #    Serve the model with:
   #      vllm serve <path> --served-model-name Qwen3.6-35B-A3B-FP8 \
-  #        --reasoning-parser qwen3 --max-model-len 32768 --port 8001
+  #        --reasoning-parser qwen3 --max-model-len 65536 --port 8001
   #    (--reasoning-parser qwen3 splits thinking into reasoning_content so the
   #     Model Activity panel works and the answer stream stays clean.)
+  #    Serving limit 65536 (2026-08-19, was 32768): 2× the old 32K bottleneck,
+  #    sized for A40 48GB — FP8 weights ≈ 35.5 GiB leave ~6 GiB KV at the
+  #    default 0.90 utilization with fp16 KV cache; 131072 is reachable later
+  #    if fp8 KV is validated on this stack. Check vLLM's startup "GPU KV
+  #    cache size" log after launch. The app applies its own ceiling:
+  #    RAG_MAX_CONTEXT_TOKENS=65536 on this deployment (else the catalogue
+  #    context_window applies as the app ceiling).
   #    think_mode: "template" = thinking is controlled PER REQUEST via
   #    chat_template_kwargs.enable_thinking (Standard=false / Deep=true).
   #    The model name is NEVER mangled with /think or /nothink suffixes —
@@ -83,12 +91,19 @@ providers:
       - id: qwen3.6_35b_a3b_fp8
         display_name: "Qwen 3.6 35B-A3B FP8"
         model_name: "Qwen3.6-35B-A3B-FP8"
-        context_window: 32768
+        context_window: 32768           # deployed/app-blessed window (default app ceiling)
+        # Native context is NOT independently verified from this model's own
+        # card, so it is NOT claimed beyond what this catalog already proves:
+        # the sibling entry qwen3.6_30b_a3b (same generation, same MoE arch)
+        # above has been deployed at a 131072 window — hence the family
+        # supports >= 131072. Verify against the model card before claiming
+        # more (e.g. 262144).
+        native_context_window: 131072
         # Capability block (canonical form); legacy keys kept consistent.
         thinking: { supported: true, control: chat_template_kwargs }
         # Serving requirements = HOW the server must be launched (deployment
         # metadata only — never read by execution policy or sent in requests).
-        serving: { reasoning_parser: qwen3, max_model_len: 32768, notes: "A40 48GB FP8" }
+        serving: { reasoning_parser: qwen3, max_model_len: 65536, notes: "A40 48GB FP8; serving limit raised 32768->65536 (2026-08-19); fp16 KV default — validate free VRAM via startup KV log before going higher" }
         thinking_capable: true
         think_mode: template          # legacy wire string (model name untouched)
         recommended_execution_mode: GPU
@@ -106,25 +121,52 @@ providers:
       #    effort xhigh, preserve on).
       #    A40 = Ampere (SM86, no FP8 tensor cores): FP8 checkpoints run
       #    weight-only via Marlin kernels in modern vLLM — fits VRAM, no FP8
-      #    speedup; do NOT pass --kv-cache-dtype fp8 on A40. Serve (Task-2
-      #    candidate, to be verified on the HPC):
-      #      vllm serve <path> --served-model-name Qwen3.8-27B-FP8 \
-      #        --reasoning-parser qwen3 --max-model-len 32768 \
-      #        --gpu-memory-utilization 0.90 --port 8001
-      #    context_window is the DEPLOYED window (32768, like the 35B entry);
-      #    native 262,144 is possible with --max-model-len given VRAM.
+      #    speedup; do NOT pass --kv-cache-dtype fp8 on A40. NOTE: the live
+      #    HPC command (below) does pass --kv-cache-dtype fp8 — if the vLLM
+      #    build on the box rejects fp8 KV on SM86 at launch, drop that flag
+      #    AND lower --max-model-len to 65536 (fp16 KV doubles per-token KV).
+      #    Live HPC command (2026-08-19; serving limit 32768 -> 131072):
+      #      vllm serve /models/Qwen3.8-27B-FP8 \
+      #        --host 127.0.0.1 --port 8100 \
+      #        --served-model-name Qwen3.8-27B-FP8 \
+      #        --max-model-len 131072 \
+      #        --max-num-seqs 2 \
+      #        --gpu-memory-utilization 0.90 \
+      #        --kv-cache-dtype fp8 \
+      #        --enable-auto-tool-choice \
+      #        --tool-call-parser qwen3_coder
+      #    Reasoning-config note: the live command above has no
+      #    --reasoning-parser (tool calling only) — thinking then arrives
+      #    inline as <think>...</think> and the app extracts it (the
+      #    thinking-stream bridge handles that wire shape). Adding
+      #    --reasoning-parser qwen3 (serving spec below) keeps CoT out of the
+      #    answer text — recommended at relaunch, safe to add later.
+      #    KV budget @0.90 util: weights 28.7 GiB leave ~10-12 GiB; KV lives
+      #    only on the 16 full-attention layers (~32 KiB/token with fp8 KV at
+      #    a typical GQA shape) → 2 seqs × 131072 ≈ 8.2 GiB — comfortable.
+      #    262144 would need ≈16.4 GiB for 2 seqs — NOT safe at max-num-seqs 2,
+      #    so 131072 (native/2) is the stable 4× lift. Verify vLLM's startup
+      #    "GPU KV cache size: <tokens>" shows ≥ 262144 tokens.
+      #    context_window is the DEPLOYED/app-blessed window (default app
+      #    ceiling); raise the app ceiling via RAG_MAX_CONTEXT_TOKENS=131072
+      #    on this deployment. Native stays 262144 regardless of serving.
       - id: qwen3.8_27b_fp8
         display_name: "Qwen 3.8 27B FP8"
         model_name: "Qwen3.8-27B-FP8"   # vLLM --served-model-name — sent verbatim
-        context_window: 32768           # deployed window (native 262144 — see above)
+        context_window: 32768           # deployed/app-blessed window (default app ceiling)
+        native_context_window: 262144   # model CAPABILITY (HF card; 1M via YaRN) — deployment-agnostic
+        # Native capability vs serving vs app ceiling are separate inputs:
+        # effective runtime context = min(native 262144, vLLM max-model-len,
+        # RAG_MAX_CONTEXT_TOKENS-or-this-entry's-context_window). Serving
+        # (131072 today) never shrinks the model's native 262144.
         # Capability block (canonical form); legacy keys kept consistent.
         thinking: { supported: true, control: chat_template_kwargs }
         # Serving requirements = HOW the server must be launched (deployment
         # metadata only — never read by execution policy, never sent on wire).
         serving:
           reasoning_parser: qwen3
-          max_model_len: 32768
-          notes: "requires vLLM>=0.17.0 + transformers>=5.8.0; native ctx 262144 (served 32768 on A40); Ampere/SM86 runs FP8 weight-only via Marlin — no --kv-cache-dtype fp8"
+          max_model_len: 131072
+          notes: "requires vLLM>=0.17.0 + transformers>=5.8.0; native ctx 262144; served 131072 on A40 (2026-08-19, was 32768) — 2×131072 fp8-KV seqs fit @0.90 util, 262144 not safe at max-num-seqs 2; Ampere/SM86 runs FP8 weight-only via Marlin; live cmd keeps --kv-cache-dtype fp8 — if rejected on SM86, drop it and use 65536"
         thinking_capable: true
         think_mode: template
         recommended_execution_mode: GPU

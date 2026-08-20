@@ -211,13 +211,29 @@ def test_wire_request_uses_template_mechanism_with_verbatim_name(monkeypatch):
 def test_serving_metadata_is_catalog_data_only():
     fam = model_registry.get("qwen3.8_27b_fp8")
     assert fam.serving.reasoning_parser == "qwen3"   # same parser as Qwen3.6
-    assert fam.serving.max_model_len == 32768
+    # serving limit raised 32768 -> 131072 (2026-08-19 HPC change): 4× the old
+    # 32K bottleneck; 2 fp8-KV sequences fit @0.90 A40 util — 262144 (native)
+    # is deliberately NOT the serving limit at max-num-seqs 2.
+    assert fam.serving.max_model_len == 131072
+    assert fam.serving.max_model_len <= fam.native_context_window  # <= native
     assert fam.serving.notes and "transformers" in fam.serving.notes
     assert "0.17" in fam.serving.notes               # vLLM>=0.17.0 requirement
     # serving metadata NEVER leaks into the execution plan / wire
     plan = resolve_execution(fam, "deep", "vllm")
     assert not hasattr(plan, "reasoning_parser")
     assert plan.max_tokens == 12288                  # unaffected by serving spec
+
+
+def test_hpc_serving_limits_lifted_above_32k_and_bounded_by_native():
+    """The arbitrary 32K serving bottleneck is gone; nothing exceeds native."""
+    f38 = model_registry.get("qwen3.8_27b_fp8")
+    f36 = model_registry.get("qwen3.6_35b_a3b_fp8")
+    assert f38.serving.max_model_len == 131072 > 32768
+    assert f36.serving.max_model_len == 65536 > 32768
+    assert f38.serving.max_model_len <= f38.native_context_window
+    # app-side defaults unchanged: ceilings are per-model catalogue values,
+    # and overrides never require code edits (RAG_MAX_CONTEXT_TOKENS)
+    assert f38.context_window == 32768 and f36.context_window == 32768
 
 
 # ── 7./8. existing models unchanged ────────────────────────────────────────
@@ -228,7 +244,8 @@ def test_qwen36_unchanged():
     assert fam.think_mode == "template"
     assert fam.thinking.control == "chat_template_kwargs"
     assert fam.serving.reasoning_parser == "qwen3"
-    assert fam.serving.max_model_len == 32768
+    # serving limit raised 32768 -> 65536 (2026-08-19; A40 fp16-KV headroom)
+    assert fam.serving.max_model_len == 65536
     assert fam.context_window == 32768
     fast = resolve_execution(fam, "fast", "vllm")
     deep = resolve_execution(fam, "deep", "vllm")

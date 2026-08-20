@@ -36,8 +36,13 @@ from src.generation.registry import (
     ModelFamily,
     model_registry,
     provider_registry,
-    provider_transport_default_think_mode,
     resolve_family_for_provider,
+)
+from src.generation.vllm_discovery import (
+    VLLMDiscoveryError,
+    discover_active_vllm_model,
+    refresh_vllm_discovery,
+    resolve_served_family,
 )
 from src.utils.app_paths import (
     corpus_path,
@@ -125,6 +130,30 @@ def _active_api_key(provider: str | None = None) -> str | None:
     return None
 
 
+# Last successfully discovered vLLM serving context (--max-model-len). The
+# serving limit feeds effective-context resolution in the policy; when
+# discovery is currently failing we keep the last-known value rather than
+# silently dropping the clamp (loud note printed).
+_LAST_SERVING_LIMIT: int | None = None
+
+
+def _current_serving_limit(prov: str) -> int | None:
+    """Serving context limit for server providers (TTL-cached discovery —
+    never a per-request /v1/models call); None for non-server providers and
+    when never successfully discovered (the policy then does not clamp on
+    the serving input — nothing is invented)."""
+    global _LAST_SERVING_LIMIT
+    if prov not in ("vllm", "openai_compatible"):
+        return None
+    try:
+        active = discover_active_vllm_model()
+    except VLLMDiscoveryError:
+        return _LAST_SERVING_LIMIT
+    mml = active.get("max_model_len")
+    _LAST_SERVING_LIMIT = int(mml) if isinstance(mml, (int, float)) and mml > 0 else None
+    return _LAST_SERVING_LIMIT
+
+
 def _apply_execution_plan(family, prov: str, exec_mode: str):
     """Resolve the execution policy for (family, mode, provider) ONCE and bind
     the plan to the shared client/generator/config state. This is the ONLY
@@ -133,8 +162,14 @@ def _apply_execution_plan(family, prov: str, exec_mode: str):
     Reasoning models (e.g. Qwen3.6) consume max_tokens with their
     chain-of-thought BEFORE writing the answer — the Deep plan carries the
     reasoning reserve so the answer budget survives (see policy.py).
+
+    Context: the policy receives the currently-served vLLM limit (when
+    discoverable) so the effective context is
+    min(native ∩ serving ∩ app ceiling) — never a universal constant.
     """
-    plan = resolve_execution(family, exec_mode, prov)
+    plan = resolve_execution(
+        family, exec_mode, prov, serving_limit=_current_serving_limit(prov)
+    )
     resolved_model = family.model_name
 
     llm_client.provider = prov
@@ -142,7 +177,13 @@ def _apply_execution_plan(family, prov: str, exec_mode: str):
     llm_client.num_ctx = plan.num_ctx
     llm_client.temperature = plan.temperature
     llm_client.max_tokens = plan.max_tokens
-    llm_client.think = plan.thinking
+    # Wire-level think from the plan: equals plan.thinking for catalogued
+    # models (capability known); None for dynamically discovered unknown
+    # models — the provider adapters then send NO thinking control at all
+    # (their `think is not None` guards), so unknown models run at server
+    # default and never receive an invented control. plan.thinking stays the
+    # mode request for reasoning-display gating.
+    llm_client.think = plan.wire_think
     ACTIVE_CONFIG["verify_depth"] = plan.verify_depth
     ACTIVE_CONFIG["model"] = resolved_model
     # Task 3: attach the resolved plan — the generator switches from legacy
@@ -154,6 +195,35 @@ def _apply_execution_plan(family, prov: str, exec_mode: str):
     for w in plan.warnings:
         print(f"[exec] warning: {w}")
     return plan, resolved_model
+
+
+def _refresh_active_served_family() -> None:
+    """Re-resolve the ACTIVE served model for vLLM / OpenAI-compatible
+    providers before a generation request. TTL-cached (no /v1/models call per
+    request); an explicit VLLM_MODEL pin freezes the choice (override
+    semantics); non-server providers are a no-op. If the served model changed
+    since boot (HPC swap), ACTIVE_CONFIG follows the server — the model id
+    sent on the wire is always the currently-served one. Discovery failures
+    keep the last-known-good configuration (loudly)."""
+    prov = ACTIVE_CONFIG["provider"]
+    if prov not in ("vllm", "openai_compatible"):
+        return
+    if (os.environ.get("VLLM_MODEL") or "").strip():
+        return  # explicit pin wins; nothing to discover for the wire name
+    try:
+        active = discover_active_vllm_model()
+    except VLLMDiscoveryError as e:
+        print(f"[models] discovery refresh failed ({e}) — keeping {ACTIVE_CONFIG['model']}")
+        return
+    if active["id"] == ACTIVE_CONFIG["model"]:
+        return
+    fam, source = resolve_served_family(
+        active["id"], active.get("max_model_len"), provider=prov
+    )
+    print(f"[models] served model changed: {ACTIVE_CONFIG['model']} -> "
+          f"{active['id']} (metadata={source})")
+    ACTIVE_CONFIG["model_family"] = fam.id
+    ACTIVE_CONFIG["model"] = fam.model_name
 
 
 # ── Task 3 dynamic evidence budgeting — server-side helpers ────────────────
@@ -309,10 +379,42 @@ graph_retriever = GraphRetriever(store=graph_store)
 # Resolve default starting configuration dynamically from registry. When the
 # env selects a non-Ollama provider (HPC: APP_DEFAULT_PROVIDER=vllm), the
 # global default family (PC/ollama "qwen3") is not served by that provider —
-# re-resolve to a family the provider actually serves (VLLM_MODEL first, else
-# the provider's first catalog entry) so the first request cannot 404 against
-# vLLM. PC/ollama boot is unchanged.
-_default_fam = resolve_family_for_provider(
+# re-resolve to a family the provider actually serves so the first request
+# cannot 404 against vLLM. PC/ollama boot is unchanged.
+#
+# vLLM/openai_compatible boot order (DISCOVERY-AWARE, VLLM_MODEL optional):
+#   1. explicit VLLM_MODEL pin      → exact catalog resolution, or a dynamic
+#                                     conservative family when uncatalogued;
+#   2. otherwise /v1/models         → the ACTIVE served model (deterministic
+#                                     policy, see vllm_discovery), resolved
+#                                     against the catalog by EXACT name;
+#   3. discovery failure            → loud warning + the legacy first-family
+#                                     fallback (the app still boots while the
+#                                     server is down; per-request refresh
+#                                     retries discovery before generation).
+def _boot_served_family(provider: str) -> Optional[ModelFamily]:
+    if provider not in ("vllm", "openai_compatible"):
+        return None
+    try:
+        active = discover_active_vllm_model()  # honors the VLLM_MODEL pin itself
+    except VLLMDiscoveryError as e:
+        print(f"[models] served-model discovery unavailable at boot ({e}) — "
+              "falling back to catalog selection; will retry before generation")
+        return resolve_family_for_provider(
+            model_registry, provider, ACTIVE_CONFIG["model_family"],
+            preferred_model=os.environ.get("VLLM_MODEL"),
+        )
+    fam, source = resolve_served_family(
+        active["id"], active.get("max_model_len"), provider=provider
+    )
+    print(f"[models] active served model: {active['id']} "
+          f"(metadata={source}, pinned={active['pinned']}"
+          + (f", alternatives={active['alternatives']}" if active["alternatives"] else "")
+          + ")")
+    return fam
+
+
+_default_fam = _boot_served_family(ACTIVE_CONFIG["provider"]) or resolve_family_for_provider(
     model_registry,
     ACTIVE_CONFIG["provider"],
     ACTIVE_CONFIG["model_family"],
@@ -570,10 +672,10 @@ async def get_assets(path: str):
 # explicitly-flagged fallback metadata).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Conservative last-resort context window when neither the catalog nor the
-# server reports one. Always flagged metadata_source="fallback" so the UI can
-# show it as assumed (and it errs small for budget safety).
-_SERVED_CTX_FALLBACK = 8192
+# Conservative last-resort context window (8192) for models reporting none:
+# vllm_discovery.default_unknown_context() is the single definition, always
+# flagged metadata_source="fallback" so the UI can show it as assumed (and it
+# errs small for budget safety).
 
 
 def _family_entry(f: ModelFamily, metadata_source: str) -> dict:
@@ -584,47 +686,15 @@ def _family_entry(f: ModelFamily, metadata_source: str) -> dict:
         "model_name": f.model_name,
         "context_window": f.context_window,
         "thinking_capable": f.thinking_capable,
+        # Tri-state capability (additive; true/false known, null = unknown).
+        # Unknown models are never claimed thinking-capable — and nothing
+        # thinking-related is sent to them on the wire (plan.wire_think=None).
+        "thinking_supported": (f.thinking.supported if f.thinking else None),
         "recommended_execution_mode": f.recommended_execution_mode,
         "think_mode": f.think_mode,
         "served": True,
         "metadata_source": metadata_source,
     }
-
-
-def _register_served_family(
-    prov: str,
-    served_id: str,
-    context_window: int,
-    thinking_capable: bool,
-    display_name: str,
-) -> str:
-    """Register (or reuse) a family for a served model so /api/provider can
-    switch to it. think_mode follows the ACTIVE provider's transport default
-    (provider capability), not a provider-name conditional: vLLM controls
-    thinking per request via chat_template_kwargs (inert for templates that
-    don't read it) — never via name suffixes; Ollama uses its top-level
-    `think` key (think_mode is metadata only there).
-    """
-    base = re.sub(r"[^a-z0-9]+", "_", str(served_id).lower()).strip("_") or "served_model"
-    fam_id = base
-    existing = model_registry.get(fam_id)
-    if existing is not None and (
-        existing.provider != prov or existing.model_name != served_id
-    ):
-        fam_id = f"{base}__{prov}"
-        existing = model_registry.get(fam_id)
-    if existing is None:
-        model_registry.register(ModelFamily(
-            id=fam_id,
-            display_name=display_name,
-            provider=prov,
-            model_name=served_id,
-            context_window=int(context_window),
-            thinking_capable=bool(thinking_capable),
-            recommended_execution_mode="GPU",
-            think_mode=provider_transport_default_think_mode(prov),
-        ))
-    return fam_id
 
 
 def _served_family_entry(prov: str, served_id: str, server_ctx: int | None) -> dict:
@@ -634,25 +704,17 @@ def _served_family_entry(prov: str, served_id: str, server_ctx: int | None) -> d
        reused, transport (think_mode) follows the active provider;
     3. server-reported context (vLLM max_model_len / Ollama /api/show);
     4. flagged conservative fallback (never presented as detected).
+
+    Thin wrapper over vllm_discovery.resolve_served_family — ONE
+    implementation for the UI endpoint and the generation path, so both
+    resolve identically.
     """
-    for f in model_registry.list_by_provider(prov):
-        if f.model_name == served_id or f.id == served_id:
-            return _family_entry(f, "catalog")
-    for f in model_registry.list_all():
-        if f.provider == prov:
-            continue
-        if f.model_name == served_id:
-            fam_id = _register_served_family(
-                prov, served_id, f.context_window, f.thinking_capable, f.display_name
-            )
-            return _family_entry(model_registry.get(fam_id), "catalog")
-    if isinstance(server_ctx, int) and server_ctx > 0:
-        fam_id = _register_served_family(prov, served_id, server_ctx, False, served_id)
-        return _family_entry(model_registry.get(fam_id), "server")
-    fam_id = _register_served_family(
-        prov, served_id, _SERVED_CTX_FALLBACK, False, served_id
+    fam, source = resolve_served_family(
+        served_id,
+        server_ctx if isinstance(server_ctx, int) and server_ctx > 0 else None,
+        provider=prov,
     )
-    return _family_entry(model_registry.get(fam_id), "fallback")
+    return _family_entry(fam, source)
 
 
 @app.get("/api/providers")
@@ -778,6 +840,10 @@ async def chat_endpoint(request: ChatRequest):
     ret_mode = request.retrieval_mode.lower()
     exec_mode = request.mode.lower() # "fast" or "deep"
     ACTIVE_CONFIG["mode"] = exec_mode
+
+    # Follow the currently-served model for server providers (TTL-cached —
+    # no /v1/models call per request; no-op for Ollama/HF + VLLM_MODEL pins)
+    _refresh_active_served_family()
 
     # Resolve Model Family dynamically from Registry
     family_id = ACTIVE_CONFIG["model_family"]
@@ -1490,6 +1556,7 @@ def _resolve_exec(request: ChatStreamRequest):
     identical resolution path as chat_endpoint and the provider switch."""
     exec_mode = request.mode.lower()
     ACTIVE_CONFIG["mode"] = exec_mode
+    _refresh_active_served_family()  # TTL-cached; no-op unless server provider
     family_id = ACTIVE_CONFIG["model_family"]
     family = model_registry.get(family_id) or model_registry.get("qwen2.5")
     plan, resolved_model = _apply_execution_plan(family, ACTIVE_CONFIG["provider"], exec_mode)
@@ -2012,7 +2079,13 @@ def health_ready():
 
 @app.get("/api/status")
 def status():
-    """Workstation header status: provider, model, mode, GPU."""
+    """Workstation header status: provider, model, mode, GPU.
+
+    Additive discovery-sourced identity of the ACTIVE model (dynamic
+    served-model discovery). Existing keys (provider/model_family/model/
+    mode/retrieval_mode/gpu/enabled_providers) are unchanged — the frontend
+    contract is preserved; all new keys are optional extras.
+    """
     gpu = "CPU"
     try:
         import torch
@@ -2020,7 +2093,7 @@ def status():
             gpu = f"GPU ({torch.cuda.get_device_name(0)[:30]})"
     except Exception:  # noqa: BLE001
         gpu = "CPU"
-    return {
+    payload = {
         "provider": ACTIVE_CONFIG["provider"],
         "enabled_providers": _enabled_providers(),
         "model_family": ACTIVE_CONFIG["model_family"],
@@ -2028,6 +2101,62 @@ def status():
         "mode": ACTIVE_CONFIG["mode"],
         "retrieval_mode": ACTIVE_CONFIG["retrieval_mode"],
         "gpu": gpu,
+    }
+    prov = ACTIVE_CONFIG["provider"]
+    fam = model_registry.get(ACTIVE_CONFIG["model_family"])
+    if fam is not None:
+        payload["model_display_name"] = fam.display_name
+        payload["model_metadata_source"] = fam.metadata_source  # catalog|server|fallback
+        supported = fam.thinking.supported if fam.thinking else None
+        payload["thinking_supported"] = supported  # true/false; null = UNKNOWN
+    if prov in ("vllm", "openai_compatible"):
+        prov_inst = provider_registry.get(prov)
+        base = prov_inst._url() if prov_inst is not None else None  # env re-resolved
+        if base:
+            # in-cluster servers are unauthenticated; strip any userinfo
+            # anyway so a credentialed env URL can never leak to the UI
+            payload["provider_base_url"] = re.sub(r"(https?://)[^/@]+@", r"\1", base)
+        payload["served_model"] = ACTIVE_CONFIG["model"]  # id sent on the wire
+    if fam is not None:
+        # Context identity, resolved by the SAME policy helper the budget
+        # calculator uses — status/debug surface, additive keys only. None =
+        # unknown (e.g. vLLM not exposing --max-model-len); nothing invented.
+        from src.generation.policy import describe_context
+
+        ctx = describe_context(
+            catalog_context=int(fam.context_window),
+            native_context=fam.native_context_window,
+            serving_limit=_current_serving_limit(prov),
+        )
+        payload["native_context_tokens"] = ctx["native_context_tokens"]
+        payload["serving_context_tokens"] = ctx["serving_context_tokens"]
+        payload["app_context_limit_tokens"] = ctx["app_context_limit_tokens"]
+        payload["effective_context_tokens"] = ctx["effective_context_tokens"]
+    return payload
+
+
+@app.post("/api/models/refresh")
+async def refresh_models(provider: str | None = None):
+    """Force served-model re-discovery (bypasses the TTL cache) — the manual
+    refresh for HPC vLLM model swaps. The generation path picks the newly
+    discovered active model up immediately (and would do so by itself at TTL
+    expiry). A VLLM_MODEL pin keeps overriding whatever is discovered."""
+    prov = (provider or ACTIVE_CONFIG["provider"]).lower().strip()
+    if prov not in ("vllm", "openai_compatible"):
+        return {"status": "skipped",
+                "reason": f"provider {prov!r} is not served-model discovery-backed"}
+    try:
+        active = refresh_vllm_discovery()
+    except VLLMDiscoveryError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    _refresh_active_served_family()  # apply to the running config now
+    return {
+        "status": "ok",
+        "active_model": active["id"],
+        "max_model_len": active.get("max_model_len"),
+        "pinned": active["pinned"],
+        "alternatives": active["alternatives"],
+        "configured_model": ACTIVE_CONFIG["model"],
     }
 
 

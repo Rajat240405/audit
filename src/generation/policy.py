@@ -53,6 +53,86 @@ PROMPT_SCAFFOLD_TOKENS = 120
 SAFETY_MARGIN_RATIO = 0.05
 SAFETY_MARGIN_MIN_TOKENS = 256
 
+# ── Effective runtime context (dynamic context handling) ─────────────────────
+# The budget calculator's context input is NOT a constant. Conceptually:
+#
+#   effective_context = min( MODEL NATIVE CONTEXT
+#                          ∩ VLLM SERVING LIMIT (--max-model-len, if reported)
+#                          ∩ APPLICATION SAFETY LIMIT )
+#
+# with only EXISTING fallback behavior allowed when an input is unknown:
+#   * native unknown      → the family context_window (the catalogue's
+#                           declared capability — never a fabricated number);
+#   * serving unknown     → not clamped (the vLLM /v1/models endpoint does
+#                           not always expose --max-model-len; nothing is
+#                           invented in that case);
+#   * no app ceiling set  → the family's catalogue context_window (i.e. the
+#                           previous, de-facto application cap — preserving
+#                           today's budgets exactly on current deployments).
+#
+# The application safety limit is deliberate and INDEPENDENT of model/server:
+# RAG_MAX_CONTEXT_TOKENS (env). A 262K-native model served at 131K does not
+# entitle every request to 131K; operators raise the ceiling explicitly —
+# without a code change. Deep mode never means "fill the context": max_tokens
+# stays profile-derived; only the AVAILABLE capacity seen by the evidence
+# allocator grows.
+RAG_MAX_CONTEXT_TOKENS_ENV = "RAG_MAX_CONTEXT_TOKENS"
+
+
+def app_context_ceiling_from_env() -> Optional[int]:
+    """Configured application-side context ceiling (RAG_MAX_CONTEXT_TOKENS),
+    or None when unset/invalid (invalid values warn and fall back)."""
+    import os
+
+    raw = (os.environ.get(RAG_MAX_CONTEXT_TOKENS_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[exec] warning: {RAG_MAX_CONTEXT_TOKENS_ENV}={raw!r} is not an "
+              "integer — ignoring (family context window applies)")
+        return None
+    if value <= 0:
+        print(f"[exec] warning: {RAG_MAX_CONTEXT_TOKENS_ENV}={value} must be "
+              "positive — ignoring (family context window applies)")
+        return None
+    return value
+
+
+def describe_context(
+    catalog_context: int,
+    native_context: Optional[int],
+    serving_limit: Optional[int],
+    env_ceiling: Optional[int] = None,
+) -> dict:
+    """Resolve the effective runtime context AND expose every input (single
+    source for resolve_execution and /api/status — no duplicated min logic).
+
+    Returns keys: native_context_tokens, serving_context_tokens,
+    app_context_limit_tokens, effective_context_tokens, clamped_by.
+    Unknown inputs are None (nothing fabricated) and simply do not clamp.
+    """
+    if env_ceiling is None:
+        env_ceiling = app_context_ceiling_from_env()
+    inputs: dict = {
+        "capability": native_context if isinstance(native_context, int) and native_context > 0 else int(catalog_context),
+        "ceiling": env_ceiling if env_ceiling else int(catalog_context),
+    }
+    if isinstance(serving_limit, int) and serving_limit > 0:
+        inputs["serving"] = serving_limit
+    clamped_by = min(inputs, key=inputs.get)
+    return {
+        "native_context_tokens": (
+            native_context if isinstance(native_context, int) and native_context > 0 else None
+        ),
+        "serving_context_tokens": inputs.get("serving"),
+        "app_context_limit_tokens": inputs["ceiling"],
+        "effective_context_tokens": min(inputs.values()),
+        "clamped_by": clamped_by,
+    }
+
+
 # Standard(=fast)/Deep profile POLICY. These are policy choices applied ON TOP
 # OF capabilities — not model metadata.
 _PROFILES: dict = {
@@ -126,6 +206,20 @@ class ExecutionPlan:
     max_doc_chars: int
     # verification
     verify_depth: str
+    # What may actually go on the wire for THIS model: the mode value when
+    # thinking capability is KNOWN (supported true/false); None when the
+    # capability is UNKNOWN (dynamically discovered model) — consumers must
+    # send NOTHING thinking-related then (server default applies; no
+    # model-specific control may be enabled without reliable metadata).
+    # Optional trailing field: existing constructors stay valid; for every
+    # catalogued family this equals `thinking` (capability is always known).
+    wire_think: Optional[bool] = None
+    # Context identity (dynamic effective-context resolution): every input of
+    # the min() plus which one clamped — for status/debug surfaces.
+    native_context_tokens: Optional[int] = None
+    serving_context_tokens: Optional[int] = None
+    app_context_limit_tokens: Optional[int] = None
+    context_clamped_by: Optional[str] = None
     # resolution transparency — surfaced, never hidden
     warnings: Tuple[str, ...] = field(default_factory=tuple)
 
@@ -135,6 +229,7 @@ def resolve_execution(
     mode: str,
     provider: str = "ollama",
     model_name: str = "",
+    serving_limit: Optional[int] = None,
 ) -> ExecutionPlan:
     """Resolve (ModelFamily capabilities, mode, provider) → ExecutionPlan.
 
@@ -142,6 +237,13 @@ def resolve_execution(
     a flagged conservative fallback family is synthesized). No model-name
     conditionals anywhere: every parameter comes from the profile policy row
     clamped/derived against family capabilities.
+
+    `serving_limit` is the vLLM serving context (--max-model-len) when it was
+    discovered from the running server; None when unknown — it then simply
+    does not clamp (nothing is invented). The effective context is
+    min(capability ∩ serving? ∩ application ceiling) — see describe_context —
+    and feeds the SAME budget math downstream (num_ctx below is the
+    effective value; the allocation logic itself is unchanged).
     """
     from src.generation.registry import ModelFamily, resolve_think_mode
 
@@ -180,6 +282,30 @@ def resolve_execution(
         )
     num_ctx = int(num_ctx)
 
+    # ── Effective runtime context: capability ∩ serving? ∩ app ceiling ──
+    # `num_ctx` above is the catalogue context (capability input + default
+    # ceiling fallback). The effective value the budget math below consumes
+    # is the dynamic minimum; every clamp is surfaced as a warning — never
+    # silent. Context identity fields ride on the plan for debugging/status.
+    ctx_info = describe_context(
+        catalog_context=num_ctx,
+        native_context=getattr(fam, "native_context_window", None),
+        serving_limit=serving_limit,
+    )
+    effective_ctx = int(ctx_info["effective_context_tokens"])
+    ctx_was_clamped = effective_ctx != num_ctx
+    if ctx_was_clamped:
+        warnings.append(
+            # fires for restriction AND expansion alike (expansion = ceiling
+            # above the catalogue window) — transparency, never silent.
+            f"context resolved {num_ctx} → {effective_ctx} (limiting input: "
+            f"{ctx_info['clamped_by']}; native="
+            f"{ctx_info['native_context_tokens']}, serving="
+            f"{ctx_info['serving_context_tokens']}, app ceiling="
+            f"{ctx_info['app_context_limit_tokens']})"
+        )
+    num_ctx = effective_ctx
+
     # max_tokens = output budget + reasoning budget, clamped by the model's
     # declared output ceiling (if any). Clamp touches the REASONING share
     # first so the visible answer keeps its budget. No current catalog family
@@ -217,6 +343,20 @@ def resolve_execution(
         )
         evidence_budget = 0
 
+    # Wire-level thinking: only models with a KNOWN capability verdict may be
+    # sent a thinking control. ``supported`` is the tri-state capability
+    # (True/False/None=unknown — None only for dynamically discovered,
+    # uncatalogued models). For unknown models wire_think=None: adapters send
+    # nothing (their `think is not None` guards), so the server default
+    # applies and no model-specific control is ever invented for them.
+    # Reasoning display gating keeps using plan.thinking (the MODE request).
+    # (the synthesized fallback above is thinking_capable=False by
+    # construction, so its resolved supported=False keeps legacy wire values).
+    supported = getattr(getattr(fam, "thinking", None), "supported", None)
+    wire_think: Optional[bool] = (
+        None if supported is None else bool(prof["thinking"])
+    )
+
     return ExecutionPlan(
         mode=mode_norm,
         provider=provider,
@@ -226,6 +366,7 @@ def resolve_execution(
         top_p=getattr(getattr(fam, "defaults", None), "top_p", None),
         thinking=bool(prof["thinking"]),
         think_mode=resolve_think_mode(provider, model_name) if model_name else "none",
+        wire_think=wire_think,
         num_ctx=num_ctx,
         prompt_budget_tokens=int(num_ctx * PROMPT_BUDGET_RATIO),
         output_budget_tokens=output_budget,
@@ -237,5 +378,9 @@ def resolve_execution(
         max_context_docs=int(prof["max_context_docs"]),
         max_doc_chars=int(prof["max_doc_chars"]),
         verify_depth=str(prof["verify_depth"]),
+        native_context_tokens=ctx_info["native_context_tokens"],
+        serving_context_tokens=ctx_info["serving_context_tokens"],
+        app_context_limit_tokens=ctx_info["app_context_limit_tokens"],
+        context_clamped_by=(ctx_info["clamped_by"] if ctx_was_clamped else None),
         warnings=tuple(warnings),
     )

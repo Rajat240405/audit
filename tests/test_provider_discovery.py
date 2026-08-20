@@ -273,7 +273,15 @@ def test_switch_to_newly_served_model_works(api, monkeypatch):
     assert body["resolved_model"] == "Qwen3.8-27B"
     assert body["context_window"] == 65536
     assert srv.ACTIVE_CONFIG["provider"] == "vllm"
-    assert srv.llm_client.think is False  # fast profile default
+    # Dynamic-discovery model: thinking capability is UNKNOWN (supported=None)
+    # — the wire must carry NO thinking control at all (think=None; the
+    # adapter's `think is not None` guard then sends no chat_template_kwargs).
+    # This replaces the previous "think is False" assertion, which encoded the
+    # old behavior of actively sending enable_thinking=false to unknown models
+    # — a model-specific control enabled without reliable metadata (superseded
+    # per the dynamic vLLM discovery spec; nothing is sent now instead of a
+    # guessed "false").
+    assert srv.llm_client.think is None
 
 
 def test_vllm_models_503_when_server_unreachable(api, monkeypatch):

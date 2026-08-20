@@ -21,6 +21,9 @@ export interface ModelFamily {
   served?: boolean;
   /** where the metadata came from: catalog | server | fallback (assumed) */
   metadata_source?: string;
+  /** tri-state capability: true/false known, null = unknown (dynamic model —
+   * never claimed thinking-capable; no thinking control is sent on the wire) */
+  thinking_supported?: boolean | null;
 }
 
 export async function fetchProviders(): Promise<ProviderInfo[]> {
