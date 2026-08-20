@@ -1,0 +1,82 @@
+# Source-aware ingestion registry — consumed by `python -m src.scripts.ingest`.
+#
+# This file is DATA, not code: adding a ministry/source here (or simply
+# dropping a new folder under data/ — see `discovery:`) registers it for
+# ingestion WITHOUT touching the ingestion engine
+# (src/scripts/ingest.py reuses src/scripts/ingest_folder.py verbatim).
+#
+# Paths are relative to the resolved data root (APP_DATA_DIR or <repo>/data)
+# unless absolute. Every folder listed for a `folders` source is ingested
+# through the SAME engine as `ingest_folder --folder <path>`: smart document
+# type detection, deterministic content-hash dedup, append-only corpus writes
+# to data/corpus_reports.jsonl.
+#
+# kind: folders — convert every file in each folder (PDF/txt/md/json/jsonl)
+#                 via the shared converters (detect_doc_type driven).
+# kind: records — merge already-validated QARecord JSONL files (*.jsonl in
+#                 record_dirs, declaration order wins on id conflicts). Used
+#                 for the Phase-1 parliament pipeline output, whose ids
+#                 (e.g. "18-4-3035") must be preserved, not re-hashed.
+
+version: 1
+
+sources:
+
+  inbox:
+    kind: folders
+    folders: [inbox]
+    move_processed: true          # files move to inbox/processed — frontend UI contract
+    description: >
+      Frontend uploads and manual drop-ins (Settings -> "Upload & Ingest"
+      lands here). Server /api/ingest ingests this same folder; keep these
+      semantics in lockstep with src/retrieval/frontend/server.py.
+
+  parliament:
+    kind: records
+    record_dirs: [enriched, processed]
+    description: >
+      Parliamentary Q&A produced by the Phase-1 pipeline
+      (src/data/ingestion_pipeline.py -> data/processed/, optionally
+      data/enriched/). Records are merged as-is (ids preserved); enriched
+      files take precedence over processed on duplicate question_id.
+      Scraping itself stays in the Phase-1 pipeline — this source only
+      pulls its OUTPUT into the canonical corpus.
+
+  incois:
+    kind: folders
+    folders:
+      - annual_reports                        # legacy crawl_annual_reports location
+      - incois_reports/AnnualReports
+      - incois_reports/Others
+      - incois_reports/TechnicalReports
+      - incois_reports/ResearchPublications
+      - scanned_ocr                           # ocr_pdfs.py output (scanned INCOIS PDFs -> .txt)
+    description: >
+      Public INCOIS reports downloaded by crawl_incois_reports.py
+      (special nested section structure preserved). Duplicate files that
+      exist in both annual_reports and incois_reports/AnnualReports are
+      harmless: content-hash ids dedupe them.
+
+  moes:
+    kind: folders
+    folders: [moes_reports/knowledge]
+    description: >
+      MoES knowledge JSONs extracted by crawl_moes_reports.py (CCPS portal).
+      Root-level moes_reports/*.pdf are crawler downloads only; the
+      ingestible form is the knowledge/*.json extraction.
+
+# ── Automatic source-directory discovery ────────────────────────────────────
+# `ingest all` and `ingest <name>` fall back to discovery when <name> is not
+# registered above: any FIRST-LEVEL directory under the data root that isn't
+# claimed by a registered source, isn't in exclude_dirs, isn't hidden, and
+# directly contains ingestible files (pdf/txt/md/json/jsonl) is ingestible as
+# a `folders` source named after the directory. Registered sources keep their
+# explicit (possibly nested) folder lists — discovery never flattens them.
+discovery:
+  enabled: true
+  exclude_dirs:
+    - processed        # claimed by parliament (records kind)
+    - enriched         # claimed by parliament (records kind)
+    - raw              # Phase-1 scraper intermediate — never ingested directly
+    - finetune         # training data, not a retrieval source
+    - user-knowledge   # separate curated exact-match store (not corpus)
