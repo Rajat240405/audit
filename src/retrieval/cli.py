@@ -48,7 +48,7 @@ def _apply_cli_plan(llm_client: LLMClient, llm_model: str, mode: str) -> Executi
         console.print(f"[yellow][exec] warning: {w}[/yellow]")
     return plan
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
-from src.utils.app_paths import data_dir, index_dir as default_index_dir
+from src.utils.app_paths import corpus_path, data_dir, index_dir as default_index_dir
 from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
 
 console = Console()
@@ -108,19 +108,27 @@ def get_pipeline(
     index_path = Path(index_dir) if index_dir else default_index_dir()
     data_path = Path(data_file) if data_file else None
 
-    # Find latest data file if no explicit path is given.
-    # Priority: enriched (if available) → processed (current Phase 1 output).
-    # The processed/ dir is the canonical corpus produced by `ingest`; the
-    # legacy enriched/ dir is gitignored and may not exist on fresh clones.
+    # Find the data file if no explicit path is given.
+    # Priority (Phase 3 safety fix): the CANONICAL merged corpus
+    # (data/corpus_reports.jsonl — every source appends there: parliament,
+    # inbox uploads, hierarchical trees) → legacy Phase-1 discovery
+    # (enriched/ then processed/, parliament-pipeline subsets). Building
+    # from the subset silently dropped non-parliament records whenever the
+    # canonical corpus was present; an explicit --data always wins.
     if not data_path:
-        for subdir in ("enriched", "processed"):
-            candidates = sorted((data_dir() / subdir).glob("*.jsonl"), reverse=True)
-            if candidates:
-                data_path = candidates[0]
-                break
+        canonical = corpus_path()
+        if canonical.exists():
+            data_path = canonical
+        else:
+            for subdir in ("enriched", "processed"):
+                candidates = sorted((data_dir() / subdir).glob("*.jsonl"), reverse=True)
+                if candidates:
+                    data_path = candidates[0]
+                    break
         if not data_path:
             raise FileNotFoundError(
-                "No Phase 1 data found under data/enriched or data/processed. "
+                "No corpus found: data/corpus_reports.jsonl is missing and no "
+                "Phase 1 data exists under data/enriched or data/processed. "
                 "Run `ingest` first or pass --data <path>."
             )
 

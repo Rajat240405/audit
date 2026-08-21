@@ -62,19 +62,33 @@ def _make_record(
     document_type: str = "parliamentary_qa",
     qa_id: str | None = None,
     ministry: str | None = None,
+    default_ministry: str | None = _DEFAULT_MINISTRY,
+    org: str | None = None,
+    source: str | None = None,
 ) -> QARecord | None:
+    """Build a record. Additive context kwargs (org/source/default_ministry)
+    extend the legacy behavior without changing it: callers that pass nothing
+    get exactly the historical stamps (ministry=_DEFAULT_MINISTRY, org=None).
+
+    ``default_ministry=None`` suppresses the legacy EARTH SCIENCES fallback —
+    used by hierarchical/discovered sources whose ministry is genuinely
+    unknown (Earth Sciences was a temporary scope, never a global default for
+    new sources).
+    """
     q = _clean(question_text)
     a = _clean(answer_text)
     if len(q) < 5 or len(a) < 5:
         return None
     meta = QARecordMetadata(
-        ministry=ministry or _DEFAULT_MINISTRY,
+        ministry=ministry or default_ministry,
         document_type=document_type,
         subject=subject or q[:120],
         date=date,
         source_url=source_url,
         question_type="unknown",
         answer_status="answered",
+        org=org,
+        source=source,
     )
     try:
         return QARecord(
@@ -91,14 +105,18 @@ def _make_record(
 
 
 # ── Format 1: QA dataset [{Question, Answer}] ──────────────────────────────
-def _qa_from_item(item: dict) -> QARecord | None:
+def _qa_from_item(item: dict, *, org=None, source=None, ministry=None,
+                  default_ministry=_DEFAULT_MINISTRY) -> QARecord | None:
     """Build an audit_qa record from a {Question, Answer} dict."""
     q = item.get("Question") or item.get("question") or item.get("question_text") or ""
     a = item.get("Answer") or item.get("answer") or item.get("answer_text") or ""
-    return _make_record(q, a, document_type="audit_qa")
+    return _make_record(q, a, document_type="audit_qa", org=org, source=source,
+                        ministry=ministry, default_ministry=default_ministry)
 
 
-def convert_qa_dataset(path: Path, out: list[QARecord], seen: set[str]) -> int:
+def convert_qa_dataset(path: Path, out: list[QARecord], seen: set[str], *,
+                       org=None, source=None, ministry=None,
+                       default_ministry=_DEFAULT_MINISTRY) -> int:
     """Convert a QA file — either a JSON array [{Question,Answer}] (the
     scientist's FINAL_audit_qa_dataset.json) or a JSONL of QA pairs (inbox
     files). Both go through the same _make_record so ids are deterministic."""
@@ -115,7 +133,8 @@ def convert_qa_dataset(path: Path, out: list[QARecord], seen: set[str]) -> int:
             except Exception:  # noqa: BLE001
                 continue
             if isinstance(item, dict):
-                rec = _qa_from_item(item)
+                rec = _qa_from_item(item, org=org, source=source, ministry=ministry,
+                                    default_ministry=default_ministry)
                 if rec and rec.question_id not in seen:
                     seen.add(rec.question_id)
                     out.append(rec)
@@ -126,7 +145,8 @@ def convert_qa_dataset(path: Path, out: list[QARecord], seen: set[str]) -> int:
     if isinstance(data, dict):
         data = data.get("data") or data.get("qa") or data.get("questions") or []
     for item in data:
-        rec = _qa_from_item(item)
+        rec = _qa_from_item(item, org=org, source=source, ministry=ministry,
+                            default_ministry=default_ministry)
         if rec and rec.question_id not in seen:
             seen.add(rec.question_id)
             out.append(rec)
@@ -135,7 +155,9 @@ def convert_qa_dataset(path: Path, out: list[QARecord], seen: set[str]) -> int:
 
 
 # ── Format 2: Knowledge_Base knowledge_extraction JSON ─────────────────────
-def convert_knowledge_json(path: Path, out: list[QARecord], seen: set[str]) -> int:
+def convert_knowledge_json(path: Path, out: list[QARecord], seen: set[str], *,
+                           org=None, source=None, ministry=None,
+                           default_ministry=_DEFAULT_MINISTRY) -> int:
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except Exception as e:  # noqa: BLE001
@@ -176,6 +198,7 @@ def convert_knowledge_json(path: Path, out: list[QARecord], seen: set[str]) -> i
         source_url=ref_str or None,
         date=str(date) if date else None,
         document_type="document",
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)
@@ -185,7 +208,9 @@ def convert_knowledge_json(path: Path, out: list[QARecord], seen: set[str]) -> i
 
 
 # ── Format 3: {title, category, content} document JSON ─────────────────────
-def convert_document_json(path: Path, out: list[QARecord], seen: set[str]) -> int:
+def convert_document_json(path: Path, out: list[QARecord], seen: set[str], *,
+                          org=None, source=None, ministry=None,
+                          default_ministry=_DEFAULT_MINISTRY) -> int:
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except Exception as e:  # noqa: BLE001
@@ -194,12 +219,16 @@ def convert_document_json(path: Path, out: list[QARecord], seen: set[str]) -> in
     if isinstance(data, list):
         n = 0
         for item in data:
-            n += convert_document_dict(item, path, out, seen)
+            n += convert_document_dict(item, path, out, seen, org=org, source=source,
+                                       ministry=ministry, default_ministry=default_ministry)
         return n
-    return convert_document_dict(data, path, out, seen)
+    return convert_document_dict(data, path, out, seen, org=org, source=source,
+                                 ministry=ministry, default_ministry=default_ministry)
 
 
-def convert_document_dict(data: dict, path: Path, out: list[QARecord], seen: set[str]) -> int:
+def convert_document_dict(data: dict, path: Path, out: list[QARecord], seen: set[str], *,
+                          org=None, source=None, ministry=None,
+                          default_ministry=_DEFAULT_MINISTRY) -> int:
     title = data.get("title") or data.get("file_name") or path.stem
     content = data.get("content") or data.get("text") or data.get("summary") or ""
     if not content:
@@ -214,6 +243,7 @@ def convert_document_dict(data: dict, path: Path, out: list[QARecord], seen: set
         source_url=url,
         date=data.get("date") or None,
         document_type="document",
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)
@@ -224,7 +254,8 @@ def convert_document_dict(data: dict, path: Path, out: list[QARecord], seen: set
 
 # ── Format 4: scanned text / PDF files ─────────────────────────────────────
 def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
-                      doc_type: str = "document") -> int:
+                      doc_type: str = "document", *, org=None, source=None,
+                      ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
     text = path.read_text(encoding="utf-8", errors="ignore")
     if len(text.strip()) < 10:
         return 0  # only empty/whitespace guard — short notes are valid
@@ -234,6 +265,7 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
         subject=path.stem,
         source_url=str(path),
         document_type=doc_type,
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)
@@ -243,7 +275,8 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
 
 
 def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
-                      doc_type: str = "document") -> int:
+                      doc_type: str = "document", *, org=None, source=None,
+                      ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
     try:
         from pypdf import PdfReader  # local import — optional dep
     except ImportError:
@@ -268,6 +301,7 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         subject=path.stem,
         source_url=str(path),
         document_type=doc_type,
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)

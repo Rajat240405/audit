@@ -12,6 +12,13 @@ How it knows what's new: a manifest file (data/sync_manifest.json) stores
 {url: sha256} for every PDF already downloaded. Anything on the source page
 that's not in the manifest (or whose hash changed) is "new".
 
+Corpus safety (Phase 3): the ingest step writes its conversion to a scratch
+file and MERGES it into the canonical data/corpus_reports.jsonl (id-union:
+sync re-conversions refresh their own records; records from every other
+source — parliament pipeline, inbox uploads, hierarchical trees — are always
+preserved). The sync can never shrink the canonical corpus; wholesale
+replacement stays explicit (run ingest_all --out ... yourself).
+
 Internal/private documents are NEVER auto-scraped — scientists put those in
 data/inbox/ and run ingest_inbox.py (or the UI Ingest button).
 
@@ -42,6 +49,8 @@ import httpx
 # discover() helper from the crawler and wrap them here (was: a 3rd copy of
 # the same page/pattern config -> drift whenever the site changed).
 from src.scripts.crawl_incois_reports import SECTIONS, discover as _crawl_discover
+from src.models.qa_record import QARecord
+from src.utils.atomic_io import write_text_atomic
 
 
 def discover_incois() -> dict[str, str]:
@@ -150,6 +159,99 @@ def download(url: str, dest: Path) -> bool:
         return False
 
 
+def merge_scratch_into_corpus(scratch: Path, corpus: Path) -> dict:
+    """Safely merge a freshly-generated sync corpus into the CANONICAL corpus.
+
+    Phase-3 ingestion-safety fix (audit F.1): previously the sync ingest step
+    ran `ingest_all --out data/corpus_reports.jsonl`, which REWRITES the file
+    from only the sync-managed folders — silently dropping every record the
+    sync pipeline did not produce (parliament Q&A from data/processed, inbox
+    uploads, hierarchical tree uploads). Append/merge mode must never shrink
+    the canonical corpus.
+
+    Semantics (id-union, order-stable, atomic):
+      * every EXISTING canonical line survives — foreign records (any id the
+        sync output doesn't contain) are preserved verbatim;
+      * an id the sync pipeline re-generated takes the FRESH copy (converter
+        improvements keep flowing through — the legacy rewrite behavior for
+        sync-managed records, without the collateral damage);
+      * new sync ids append at the end;
+      * unparseable historical lines are preserved verbatim (never silently
+        dropped);
+      * invariant guard: every existing question_id must be present in the
+        result — a violation raises instead of writing (replacement of the
+        canonical corpus stays EXPLICIT: run ingest_all --out yourself).
+    """
+    stats = {"existing": 0, "updated": 0, "added": 0, "preserved_raw": 0,
+             "total": 0, "skipped": False}
+    if not scratch.exists():
+        # ingest_all exits(1) without writing when its folders produce nothing
+        log("  merge: no sync output produced — canonical corpus untouched")
+        stats["skipped"] = True
+        return stats
+
+    final: list[str] = []
+    pos_by_id: dict[str, int] = {}
+    if corpus.exists():
+        for line in corpus.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            stats["existing"] += 1
+            try:
+                qid = json.loads(line).get("question_id")
+            except Exception:  # noqa: BLE001
+                qid = None
+            if qid and qid not in pos_by_id:
+                pos_by_id[qid] = len(final)
+            elif qid is None:
+                stats["preserved_raw"] += 1
+            final.append(line)
+
+    for line in scratch.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = QARecord.model_validate_json(line)
+            qid = rec.question_id
+        except Exception:  # noqa: BLE001 — never trust scratch blindly
+            log(f"  merge: skipped malformed sync line ({line[:60]}...)")
+            continue
+        if qid in pos_by_id:
+            if final[pos_by_id[qid]] != line:
+                stats["updated"] += 1
+            final[pos_by_id[qid]] = line
+        else:
+            pos_by_id[qid] = len(final)
+            final.append(line)
+            stats["added"] += 1
+
+    # non-shrink invariant (by unique id, not raw line count)
+    merged_ids = {qid for qid in pos_by_id}
+    existing_ids = set()
+    if corpus.exists():
+        for line in corpus.read_text(encoding="utf-8").splitlines():
+            try:
+                qid = json.loads(line.strip()).get("question_id")
+            except Exception:  # noqa: BLE001
+                continue
+            if qid:
+                existing_ids.add(qid)
+    missing = existing_ids - merged_ids
+    if missing:
+        raise RuntimeError(
+            f"Refusing to write canonical corpus: merge would DROP "
+            f"{len(missing)} existing record(s) (e.g. {sorted(missing)[:3]}). "
+            "Append mode never shrinks the corpus; replacement must be explicit."
+        )
+
+    corpus.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(corpus, "\n".join(final) + "\n")
+    stats["total"] = len(final)
+    return stats
+
+
 def _server_running(port: int = 4000) -> bool:
     """Cheap liveness probe: is the FastAPI server up on :port?"""
     try:
@@ -221,7 +323,14 @@ def main() -> None:
     run("-m", "src.scripts.ocr_pdfs", "--folder", str(DOWNLOAD_DIR / "AnnualReports"),
         "--output", str(OCR_DIR))
 
-    # Ingest: convert + merge into corpus + rebuild index
+    # Ingest: convert the sync-managed folders, then MERGE into the canonical
+    # corpus — never rewrite it (Phase-3 safety fix, audit F.1). ingest_all
+    # writes a SCRATCH file; merge_scratch_into_corpus does an id-union that
+    # preserves foreign records (parliament, inbox, tree uploads) while sync
+    # re-conversions still refresh their own records. Explicit replacement of
+    # the canonical corpus remains possible only by running ingest_all
+    # --out data/corpus_reports.jsonl directly (operator intent).
+    scratch = CORPUS.with_name(".sync_ingest_scratch.jsonl")
     run("-m", "src.scripts.ingest_all",
         "--annual", str(DOWNLOAD_DIR / "AnnualReports"),
         "--reports", str(DOWNLOAD_DIR / "Others"),
@@ -230,7 +339,15 @@ def main() -> None:
         "--documents", str(MOES_DIR / "knowledge"),
         "--scanned", str(OCR_DIR),
         "--parliament", "data/does_not_exist",
-        "--out", str(CORPUS))
+        "--out", str(scratch))
+    stats = merge_scratch_into_corpus(scratch, CORPUS)
+    if stats["skipped"]:
+        log("Nothing merged — corpus unchanged.")
+    else:
+        log(f"Corpus merge: {stats['existing']} existing preserved "
+            f"({stats['preserved_raw']} raw), {stats['updated']} refreshed, "
+            f"{stats['added']} new -> {stats['total']} total")
+    scratch.unlink(missing_ok=True)
 
     # Rebuild index (embeddings) so newly synced docs are queryable.
     # If the server is running on :4000 it holds the index in memory — rebuild

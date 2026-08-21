@@ -56,15 +56,33 @@ export async function setExecutionMode(mode: ExecutionMode): Promise<void> {
   void mode;
 }
 
+export interface IngestFileVerdict {
+  name: string;
+  verdict: "new" | "duplicate" | "failed" | "skipped_duplicate_pdf" | string;
+  records?: number;
+  message?: string;
+}
+
 export interface IngestStatus {
   running: boolean;
   pending: number;
+  /** Phase 3: targeted uploads staged into the hierarchy, awaiting ingest */
+  pending_uploads?: number;
+  staged_uploads?: string[];
   last: {
     at: string;
     ok: number;
     failed: number;
     records: number;
     message: string;
+    /** additive Phase-3 fields (present on runs that processed uploads) */
+    received?: number;
+    new_documents?: number;
+    duplicates?: number;
+    failed_documents?: number;
+    records_added?: number;
+    records_embedded?: number;
+    files?: IngestFileVerdict[];
   } | null;
   inbox: string;
 }
@@ -82,6 +100,80 @@ export async function triggerIngest(): Promise<{ status: string }> {
 
 export async function uploadDocument(file: File): Promise<{ status: string; file: string; size: number }> {
   const res = await fetch(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail ?? `Upload failed (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+// ── Phase 3: hierarchical ingest targets (Ministry → Org → Document type) ──
+// EVERYTHING below is server-discovered (GET /api/ingest/targets reads
+// config/sources.yaml + data/ tree) — the frontend hardcodes no orgs/types.
+
+export interface IngestCategoryTarget {
+  document_type: string;
+  label: string;
+  category_dir: string;
+  path: string;
+  exists: boolean;
+  files: number;
+  file_names: string[];
+  truncated: boolean;
+}
+
+export interface IngestOrgTarget {
+  slug: string;
+  label: string;
+  dir: string | null;
+  categories: IngestCategoryTarget[];
+}
+
+export interface IngestSourceTarget {
+  name: string;
+  label: string;
+  description?: string;
+  hierarchical: boolean;
+  discovered?: boolean;
+  ministry?: string | null;
+  /** whether documents may be uploaded into this source from the UI */
+  upload?: boolean;
+  orgs: IngestOrgTarget[];
+}
+
+export interface IngestTargets {
+  version: number;
+  category_map: Record<string, string>;
+  document_types: string[];
+  data_root: string;
+  sources: IngestSourceTarget[];
+}
+
+export async function fetchIngestTargets(): Promise<IngestTargets> {
+  return apiFetch<IngestTargets>("/api/ingest/targets");
+}
+
+export interface TargetedUploadResult {
+  status: string;
+  file: string;
+  size: number;
+  target: { source: string; org: string | null; document_type: string | null; path: string };
+  pending_uploads?: number;
+  message?: string;
+}
+
+export async function uploadToTarget(
+  file: File,
+  target: { source: string; org?: string; document_type?: string },
+): Promise<TargetedUploadResult> {
+  const params = new URLSearchParams({ filename: file.name, source: target.source });
+  if (target.org) params.set("org", target.org);
+  if (target.document_type) params.set("document_type", target.document_type);
+  const res = await fetch(`/api/ingest/upload?${params.toString()}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: file,

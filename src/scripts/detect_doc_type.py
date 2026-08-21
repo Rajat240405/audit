@@ -2,11 +2,13 @@
 Smart document-type detection for ingested files.
 
 Order of signals (first match wins):
-  1. FOLDER name hint   — the folder the file lives in
-     (annual_reports, ResearchPublications, TechnicalReports, Others, ...)
-  2. FILENAME pattern   — AR_* / TR_* / RP_* / Report_* / MoES
-  3. CONTENT header     — first page/first ~800 chars: "ANNUAL REPORT",
-     "TECHNICAL REPORT", "RESEARCH PUBLICATION", etc.
+  1. CONTENT header     — first page/first ~800 chars: "ANNUAL REPORT",
+     "TECHNICAL REPORT", "RESEARCH PUBLICATION", etc. (most reliable)
+  2. CATEGORY HINT      — registry category_map result from a hierarchical
+     source path (e.g. data/moes/incois/audit_reports/x.pdf -> audit_report).
+     Config-driven; only present for hierarchical sources (Phase 1).
+  3. FOLDER name hint   — the folder the file lives in (legacy flat sources)
+  4. FILENAME pattern   — AR_* / TR_* / RP_* / Report_* / MoES
 
 Returns one of: annual_report | technical_report | research_publication |
 general_report | audit_qa | document (default).
@@ -17,7 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def detect_doc_type(path: Path, text: str = "", folder_hint: str | None = None) -> str:
+def detect_doc_type(path: Path, text: str = "", folder_hint: str | None = None,
+                    category_hint: str | None = None) -> str:
     name = path.name.lower()
     folder = (folder_hint or path.parent.name).lower()
 
@@ -30,6 +33,13 @@ def detect_doc_type(path: Path, text: str = "", folder_hint: str | None = None) 
         return "technical_report"
     if "research publication" in head or "journal of" in head:
         return "research_publication"
+
+    # ── 1.5. Registry/path category hint (hierarchical sources). Sits below
+    #    content (a wrongly-filed doc still self-declares) but above legacy
+    #    folder tokens — the registry's category_map is explicit config, the
+    #    tokens below are heuristics. ──
+    if category_hint:
+        return category_hint
 
     # ── 2. Folder hint (strong — scientist put it in this folder) ──
     if "annual" in folder:

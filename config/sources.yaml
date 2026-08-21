@@ -1,24 +1,33 @@
 # Source-aware ingestion registry — consumed by `python -m src.scripts.ingest`.
 #
-# This file is DATA, not code: adding a ministry/source here (or simply
-# dropping a new folder under data/ — see `discovery:`) registers it for
-# ingestion WITHOUT touching the ingestion engine
-# (src/scripts/ingest.py reuses src/scripts/ingest_folder.py verbatim).
+# This file is DATA, not code: a new ministry/organization is a config entry
+# (or just a new folder under data/ — see `discovery:`), never a change to the
+# ingestion engine (src/scripts/ingest.py reuses src/scripts/ingest_folder.py).
 #
-# Paths are relative to the resolved data root (APP_DATA_DIR or <repo>/data)
-# unless absolute. Every folder listed for a `folders` source is ingested
-# through the SAME engine as `ingest_folder --folder <path>`: smart document
-# type detection, deterministic content-hash dedup, append-only corpus writes
-# to data/corpus_reports.jsonl.
-#
-# kind: folders — convert every file in each folder (PDF/txt/md/json/jsonl)
-#                 via the shared converters (detect_doc_type driven).
-# kind: records — merge already-validated QARecord JSONL files (*.jsonl in
-#                 record_dirs, declaration order wins on id conflicts). Used
-#                 for the Phase-1 parliament pipeline output, whose ids
-#                 (e.g. "18-4-3035") must be preserved, not re-hashed.
+# Hierarchy convention (Phase 1):
+#   data/<source>/[<org-segment>/]<category-segment>/<files>
+# The walker (ingest.py) resolves identity from the path:
+#   moes/incois/annual_reports/x.pdf  ->  source=moes, org=incois,
+#                                         document_type=annual_report
+# Segments before the FIRST category_map match form the org (first segment
+# wins); a root whose files sit directly inside uses default_org + the
+# engine's legacy content/filename detection. Stamped metadata reaches the
+# retrieval layer via doc_map (org is filterable; source is provenance;
+# document_type drives the category axis via org_tree).
 
 version: 1
+
+# ── Hierarchy defaults (global; per-source may override) ────────────────────
+# Leaf directory name -> document_type. Case-insensitive. Values reuse the
+# EXISTING document_type vocabulary so the query-side maps keep working
+# (research_papers -> research_publication, NOT a new type). "audit_report"
+# is the only new value (mapped to the "audit" category in org_tree).
+hierarchy:
+  category_map:
+    annual_reports:  annual_report
+    audit_reports:   audit_report
+    research_papers: research_publication
+    other:           document
 
 sources:
 
@@ -27,9 +36,9 @@ sources:
     folders: [inbox]
     move_processed: true          # files move to inbox/processed — frontend UI contract
     description: >
-      Frontend uploads and manual drop-ins (Settings -> "Upload & Ingest"
-      lands here). Server /api/ingest ingests this same folder; keep these
-      semantics in lockstep with src/retrieval/frontend/server.py.
+      Frontend uploads and manual drop-ins (Settings -> "Upload & Ingest").
+      Server /api/ingest ingests this same folder; keep these semantics in
+      lockstep with src/retrieval/frontend/server.py.
 
   parliament:
     kind: records
@@ -42,36 +51,64 @@ sources:
       Scraping itself stays in the Phase-1 pipeline — this source only
       pulls its OUTPUT into the canonical corpus.
 
+  # ── Hierarchical sources ── ministry root, org subtree ────────────────────
+  moes:
+    kind: folders
+    folders: [moes]
+    hierarchical: true
+    ministry: EARTH SCIENCES
+    default_org: moes_hq          # files directly under data/moes/ (or an
+                                  # unmapped org segment) land on the HQ org
+    org_map:                      # directory segment -> ORG_TREE slug (config!)
+      ministry: moes_hq
+      incois: incois
+      imd: imd
+      iitm: iitm
+      niot: niot
+    description: >
+      Ministry of Earth Sciences knowledge tree:
+        data/moes/{ministry,incois,imd,iitm,...}/{annual_reports,
+        audit_reports,research_papers,other}/<files>
+      New orgs need at most one org_map line here (directory convention works
+      even without it — an unmapped segment becomes the org slug verbatim,
+      lowercased).
+
+  # ── Flat legacy sources (kept; supersede by moving files into the tree) ───
   incois:
     kind: folders
+    org: incois                   # flat source WITH explicit org stamp
+    ministry: EARTH SCIENCES
     folders:
       - annual_reports                        # legacy crawl_annual_reports location
       - incois_reports/AnnualReports
       - incois_reports/Others
       - incois_reports/TechnicalReports
       - incois_reports/ResearchPublications
-      - scanned_ocr                           # ocr_pdfs.py output (scanned INCOIS PDFs -> .txt)
+      - scanned_ocr                           # ocr_pdfs.py output (scanned PDFs -> .txt)
     description: >
-      Public INCOIS reports downloaded by crawl_incois_reports.py
-      (special nested section structure preserved). Duplicate files that
-      exist in both annual_reports and incois_reports/AnnualReports are
-      harmless: content-hash ids dedupe them.
+      Legacy flat INCOIS crawler layout (crawl_incois_reports sections +
+      scanned OCR). Identical files under the new moes/incois tree and here
+      dedupe by content hash — safe to run both during migration.
 
-  moes:
+  moes_reports:
     kind: folders
+    org: moes_hq
+    ministry: EARTH SCIENCES
     folders: [moes_reports/knowledge]
     description: >
-      MoES knowledge JSONs extracted by crawl_moes_reports.py (CCPS portal).
-      Root-level moes_reports/*.pdf are crawler downloads only; the
-      ingestible form is the knowledge/*.json extraction.
+      Legacy MoES CCPS knowledge JSONs (crawl_moes_reports). Root-level
+      moes_reports/*.pdf are crawler downloads only; the ingestible form is
+      the knowledge/*.json extraction.
 
 # ── Automatic source-directory discovery ────────────────────────────────────
 # `ingest all` and `ingest <name>` fall back to discovery when <name> is not
 # registered above: any FIRST-LEVEL directory under the data root that isn't
-# claimed by a registered source, isn't in exclude_dirs, isn't hidden, and
-# directly contains ingestible files (pdf/txt/md/json/jsonl) is ingestible as
-# a `folders` source named after the directory. Registered sources keep their
-# explicit (possibly nested) folder lists — discovery never flattens them.
+# claimed by a registered source (a hierarchical root claims its whole
+# subtree), isn't in exclude_dirs, isn't hidden, and contains ingestible
+# files (pdf/txt/md/json/jsonl — checked recursively) is ingestible as a
+# HIERARCHICAL source named after the directory (default_org = dir name,
+# ministry unknown -> metadata.ministry stays None rather than mislabeling
+# it; Earth Sciences was a temporary scope, never a default for new sources).
 discovery:
   enabled: true
   exclude_dirs:

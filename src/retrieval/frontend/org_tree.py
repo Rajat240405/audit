@@ -78,6 +78,7 @@ _DT_CATEGORY: dict[str, str] = {
     "bibliometrics": "scientific",
     "technical_report": "technical",
     "general_report": "general",
+    "audit_report": "audit",
     "demands_for_grants": "budget",
     "performance_budget": "budget",
     "gazette_notification": "gazette",

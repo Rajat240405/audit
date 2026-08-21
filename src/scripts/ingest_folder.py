@@ -43,6 +43,7 @@ from src.scripts.convert_sirs_knowledge import (
     convert_document_json,
     convert_text_file,
     convert_pdf_file,
+    _DEFAULT_MINISTRY,
 )
 from src.scripts.detect_doc_type import detect_doc_type, readable_type
 
@@ -110,11 +111,32 @@ def _peek_text(path: Path) -> str:
     return ""
 
 
-def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool) -> int:
+def _ctx_kwargs(meta_context: dict | None) -> dict:
+    """Convert a per-source meta_context into converter kwargs.
+
+    meta_context is None for legacy flat callers (server inbox ingest,
+    ingest_folder --folder): the kwargs then equal the converter defaults —
+    byte-identical records to before. Hierarchical sources (src/scripts/
+    ingest.py) pass {org, source, ministry, default_ministry, doc_type_hint}.
+    """
+    ctx = meta_context or {}
+    return {
+        "org": ctx.get("org"),
+        "source": ctx.get("source"),
+        "ministry": ctx.get("ministry"),
+        "default_ministry": ctx["default_ministry"] if "default_ministry" in ctx
+                            else _DEFAULT_MINISTRY,
+    }
+
+
+def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool,
+                         meta_context: dict | None = None) -> int:
     """Convert one file using smart type detection. Returns records added."""
+    ctx = _ctx_kwargs(meta_context)
     if path.suffix.lower() == ".jsonl":
-        # QA pairs jsonl — always audit_qa (folder/content don't override)
-        return convert_qa_dataset(path, out, seen)
+        # QA pairs jsonl — always audit_qa (folder/content don't override);
+        # org/source/ministry context still propagates for provenance.
+        return convert_qa_dataset(path, out, seen, **ctx)
 
     if path.suffix.lower() == ".json":
         try:
@@ -124,24 +146,29 @@ def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool
         if isinstance(data, list):
             # QA array or document list
             if data and isinstance(data[0], dict) and ("Question" in data[0] or "question" in data[0]):
-                return convert_qa_dataset(path, out, seen)
-            return convert_document_json(path, out, seen)
+                return convert_qa_dataset(path, out, seen, **ctx)
+            return convert_document_json(path, out, seen, **ctx)
         if isinstance(data, dict):
             if "knowledge_extraction" in data:
-                return convert_knowledge_json(path, out, seen)
+                return convert_knowledge_json(path, out, seen, **ctx)
             if data.get("content") or data.get("title"):
-                return convert_document_json(path, out, seen)
+                return convert_document_json(path, out, seen, **ctx)
             if any(k in data for k in ("data", "qa", "questions")):
-                return convert_qa_dataset(path, out, seen)
+                return convert_qa_dataset(path, out, seen, **ctx)
         return 0
 
-    # PDF / TXT / MD — smart type detection
+    # PDF / TXT / MD — smart type detection (category hint from the source
+    # registry path, e.g. moes/incois/annual_reports/ -> annual_report, sits
+    # below content but above legacy folder/filename heuristics).
     text_peek = _peek_text(path) if path.suffix.lower() in (".pdf", ".txt", ".md") else ""
-    doc_type = detect_doc_type(path, text_peek)
+    doc_type = detect_doc_type(
+        path, text_peek,
+        category_hint=(meta_context or {}).get("doc_type_hint"),
+    )
     if path.suffix.lower() == ".pdf":
-        n = convert_pdf_file(path, out, seen, doc_type=doc_type)
+        n = convert_pdf_file(path, out, seen, doc_type=doc_type, **ctx)
     else:
-        n = convert_text_file(path, out, seen, doc_type=doc_type)
+        n = convert_text_file(path, out, seen, doc_type=doc_type, **ctx)
     if n > 0 and move_after:
         proc = path.parent / "processed"
         proc.mkdir(parents=True, exist_ok=True)
@@ -149,16 +176,36 @@ def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool
     return n
 
 
-def ingest_folder(folder: str, move_processed: bool = False) -> dict:
-    """Convert every file in a folder, append new records to the corpus."""
+def ingest_folder(folder: str, move_processed: bool = False,
+                  meta_context: dict | None = None,
+                  only_files: set[str] | None = None) -> dict:
+    """Convert every file in a folder, append new records to the corpus.
+
+    ``meta_context`` is an additive per-source identity for hierarchical
+    ingestion (src/scripts/ingest.py): {org, source, ministry,
+    default_ministry, doc_type_hint}. None (all legacy callers) produces
+    byte-identical records to before.
+
+    ``only_files`` (additive, Phase 3) scopes the run to a subset of file
+    NAMES — the frontend upload flow ingests exactly the files it just
+    staged instead of re-converting the whole leaf. None (default) keeps the
+    whole-folder scan unchanged. The .txt-next-to-.pdf sibling skip rule
+    always considers the FULL folder (a staged .txt is skipped when its PDF
+    is on disk even outside the subset).
+    """
     p = Path(folder)
     if not p.exists():
         log(f"[ingest_folder] folder not found: {folder}")
         return {"files": 0, "added": 0, "failed": 0}
 
-    files = sorted(f for f in p.iterdir() if f.is_file())
+    all_files = sorted(f for f in p.iterdir() if f.is_file())
+    if only_files is not None:
+        files = [f for f in all_files if f.name in only_files]
+    else:
+        files = all_files
     if not files:
-        log(f"[ingest_folder] no files in {folder}")
+        scope = f" (filter matched 0 of {len(all_files)} on disk)" if only_files is not None else ""
+        log(f"[ingest_folder] no files in {folder}{scope}")
         return {"files": 0, "added": 0, "failed": 0}
 
     log(f"[ingest_folder] scanning {folder}: {len(files)} file(s)")
@@ -186,14 +233,16 @@ def ingest_folder(folder: str, move_processed: bool = False) -> dict:
     def _stem(f: Path) -> str:
         name = f.name
         return name.rsplit(".", 1)[0] if "." in name else name
-    pdf_stems = {_stem(f) for f in files if f.suffix.lower() == ".pdf"}
+    # the sibling-skip rule consults the FULL folder (see docstring), while
+    # conversion below is scoped to `files` (== all_files unless only_files)
+    pdf_stems = {_stem(f) for f in all_files if f.suffix.lower() == ".pdf"}
     for f in files:
         if f.suffix.lower() == ".txt" and _stem(f) in pdf_stems:
             log(f"  skip {f.name} (duplicate of its .pdf)")
             continue
         try:
             before = len(out)
-            n = convert_one_detected(f, out, seen, move_processed)
+            n = convert_one_detected(f, out, seen, move_processed, meta_context)
             if n > 0:
                 ok += 1
                 # log the ACTUAL record type(s) added by this file
@@ -232,28 +281,49 @@ def _index_exists() -> bool:
     ))
 
 
+def _incremental_child_code() -> str:
+    """The child-process program for the incremental index update.
+
+    MUST be a real multi-line script: semicolon-joining is only legal between
+    SIMPLE statements — ``n = p.add_records(recs); if n: ...`` is a
+    SyntaxError at compile time (this exact regression shipped and was masked
+    by the old auto-fallback to a full rebuild). The step sequence itself is
+    unchanged: load index -> load corpus -> add_records (embeds ONLY ids not
+    already indexed) -> save iff anything was added -> report INCR_ADDED.
+    Paths go through repr(), which always yields a valid string literal.
+    """
+    return (
+        "from src.retrieval.hybrid.pipeline import HybridRAGPipeline\n"
+        "from src.data.loader import DataLoader\n"
+        f"p = HybridRAGPipeline()\n"
+        f"p.load({str(INDEX_DIR)!r})\n"
+        f"recs = DataLoader.load_jsonl({str(CORPUS)!r})\n"
+        "n = p.add_records(recs)\n"
+        f"if n: p.save({str(INDEX_DIR)!r})\n"
+        "print(f'INCR_ADDED={n}')\n"
+    )
+
+
 def incremental_update() -> None:
     """Load the existing index, embed ONLY new records, add, save.
 
     This is the fast path — no full re-embed of the whole corpus. Only
     records whose id isn't in the index get embeddings (bge-m3), added to
-    FAISS, and BM25 is rebuilt (text-only, fast)."""
+    FAISS, and BM25 is rebuilt (text-only, fast).
+
+    Failure policy: a failed child run NEVER falls back to a full rebuild.
+    The corpus is untouched either way (append happened before this step), so
+    the safe recovery is to re-run the command (dedup makes that a no-op for
+    already-appended records) or to pass --full-rebuild explicitly. Raises
+    RuntimeError on failure so the CLI exits non-zero.
+    """
     log("incremental index update (embeddings for NEW records only)...")
     import os as _os
 
     env = dict(_os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
-    code = (
-        "from src.retrieval.hybrid.pipeline import HybridRAGPipeline; "
-        "from src.data.loader import DataLoader; "
-        f"p = HybridRAGPipeline(); p.load({str(INDEX_DIR)!r}); "
-        f"recs = DataLoader.load_jsonl({str(CORPUS)!r}); "
-        "n = p.add_records(recs); "
-        f"if n: p.save({str(INDEX_DIR)!r}); "
-        "print(f'INCR_ADDED={n}')"
-    )
     r = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", _incremental_child_code()],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=env, timeout=3600,
     )
@@ -261,9 +331,14 @@ def incremental_update() -> None:
     tail = out[-800:].replace("\n", " | ")
     log(tail)
     if r.returncode != 0:
-        log("incremental update FAILED — falling back to full rebuild")
-        rebuild_index()
-        return
+        log("incremental update FAILED — index NOT updated; "
+            "no automatic full rebuild (use --full-rebuild explicitly)")
+        raise RuntimeError(
+            "incremental index update failed (see sync.log tail above). "
+            "Corpus is intact (append-only); the index was left unchanged. "
+            "Re-run the command (dedup makes re-runs safe) or rebuild with "
+            "--full-rebuild."
+        )
     if "INCR_ADDED=" in out:
         added = out.split("INCR_ADDED=")[-1].split()[0]
         log(f"incremental update OK — {added} new record(s) embedded and added")
@@ -325,10 +400,14 @@ def main() -> None:
         total_added += res["added"]
 
     if total_added > 0 and not args.no_rebuild:
-        if args.full_rebuild or not _index_exists():
-            rebuild_index()
-        else:
-            incremental_update()
+        try:
+            if args.full_rebuild or not _index_exists():
+                rebuild_index()
+            else:
+                incremental_update()
+        except RuntimeError as e:
+            log(f"[ingest_folder] ERROR: {e}")
+            sys.exit(3)
     elif total_added == 0:
         log("nothing new ingested — no index update needed")
     else:

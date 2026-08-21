@@ -81,6 +81,26 @@ class QARecordMetadata(BaseModel):
         description="The Member of Parliament raising the question",
         examples=["Dr. Shashi Tharoor", "Shri Sunil Kumar Singh"],
     )
+
+    # Hierarchical source identity (Phase 1). Stamped at ingest from the
+    # source registry / path context; query-side derive_org/derive_category
+    # already treat explicit values as authoritative, so these fields win
+    # over text heuristics wherever present and legacy records (None) keep
+    # their derived behavior. Record ids are content hashes — these fields
+    # never affect dedup.
+    org: str | None = Field(
+        default=None,
+        description="Producing organization slug in ORG_TREE vocabulary "
+                    "(e.g. 'incois', 'imd', 'moes_hq', 'isro').",
+        examples=["incois", "imd", "moes_hq"],
+    )
+
+    source: str | None = Field(
+        default=None,
+        description="Name of the ingestion-registry source that brought this "
+                    "record in (provenance/audit trail).",
+        examples=["moes", "parliament", "inbox"],
+    )
     date: str | None = Field(
         default=None,
         description="Date the question was asked (or answered session date)",

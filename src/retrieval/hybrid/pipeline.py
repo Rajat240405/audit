@@ -431,6 +431,10 @@ class HybridRAGPipeline:
                 return None
             from src.retrieval.frontend.org_tree import derive_org
             return derive_org({
+                # Explicit ingest-time stamp first (Phase 1 hierarchical
+                # sources); derive_org treats it as authoritative and the
+                # heuristics below remain the fallback for legacy records.
+                "org": getattr(rec.metadata, "org", None),
                 "document_type": rec.metadata.document_type,
                 "subject": rec.metadata.subject,
                 "source_url": rec.metadata.source_url,

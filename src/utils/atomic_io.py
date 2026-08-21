@@ -33,29 +33,37 @@ def copy_file_atomic(src: str | Path, dest: str | Path) -> None:
 
 
 def append_jsonl_atomic(corpus: str | Path, new_lines: Iterable[str]) -> int:
-    """Rewrite JSONL as existing lines + new lines via a temp file, then replace.
+    """Append JSONL lines via a temp file, then atomically replace.
 
-    Returns the number of new lines written. Existing file is unchanged if
-    the write fails before replace.
+    BYTE-PRESERVING append (Windows/CRLF fix): the existing file content is
+    read as raw bytes and never re-encoded — so an existing corpus keeps its
+    exact bytes (LF or CRLF endings, whatever tool produced them) and only
+    the new LF-terminated lines are added. Previously this read in text mode,
+    which normalized CRLF → LF in memory and rewrote the entire file on every
+    append (an unnecessary full rewrite; it also broke byte-level prefix
+    stability for a CRLF corpus). All corpus readers use universal-newline
+    text mode / ``splitlines()``, so a mixed-ending file parses identically.
+
+    Existing file is unchanged if the write fails before replace.
+    Returns the number of new lines written.
     """
     corpus = Path(corpus)
     corpus.parent.mkdir(parents=True, exist_ok=True)
-    existing = ""
+    buf = bytearray()
     if corpus.exists():
-        existing = corpus.read_text(encoding="utf-8")
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
+        buf += corpus.read_bytes()  # exact bytes — no newline normalization
+        if buf and not buf.endswith(b"\n"):
+            buf += b"\n"
     added = 0
-    parts = [existing] if existing else []
     for line in new_lines:
         line = line.rstrip("\n")
         if not line:
             continue
-        parts.append(line + "\n")
+        buf += line.encode("utf-8") + b"\n"
         added += 1
     if added == 0:
         return 0
-    write_text_atomic(corpus, "".join(parts))
+    write_bytes_atomic(corpus, bytes(buf))
     return added
 
 

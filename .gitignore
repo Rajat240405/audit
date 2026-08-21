@@ -1,16 +1,21 @@
 # ==========================
-# Python
+# Python & Bytecode
 # ==========================
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 
-# Virtual environments
+# ==========================
+# Virtual Environments
+# ==========================
 .venv/
 .venv-ml/
 venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 
 # ==========================
 # Node / Frontend
@@ -25,33 +30,52 @@ frontend/.turbo/
 frontend/.next/
 frontend/.svelte-kit/
 frontend/vite.svg
+frontend/.eslintcache
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+# Package manager caches
+.pnpm-store/
+.npm/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
 
 # ==========================
-# IDE
+# IDEs & Editors
 # ==========================
 .vscode/
 .idea/
 *.code-workspace
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
 
 # ==========================
-# OS
+# Operating System
 # ==========================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 desktop.ini
+.directory
 
 # ==========================
-# Pytest / Coverage
+# Pytest / Coverage / Linters
 # ==========================
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
 .cache/
-
-# ==========================
-# Type checkers / Linters
-# ==========================
 .mypy_cache/
 .ruff_cache/
 .pyre/
@@ -59,34 +83,53 @@ htmlcov/
 .nox/
 
 # ==========================
-# Jupyter
+# Jupyter Notebooks
 # ==========================
 .ipynb_checkpoints/
 *.ipynb
 
 # ==========================
-# Logs
+# Logs & Runtime
 # ==========================
 *.log
 logs/
+runtime/
+*.pid
+*.lock
+*.sock
+*.tmp
+*.bak
+*.backup
+*.save
 
 # ==========================
-# Environment
+# Environment & Secrets
 # ==========================
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.cert
 
 # ==========================
-# HuggingFace / Model cache
+# HuggingFace & Model Weights
 # ==========================
 .huggingface/
 hf_cache/
 .cache/huggingface/
 models/
+checkpoints/
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.tflite
 
 # ==========================
-# Generated data
+# Generated Data & Corpus
 # ==========================
 data/raw/
 data/processed/
@@ -102,75 +145,87 @@ data/incois_reports/
 data/moes_reports/
 data/scanned_ocr/
 data/test_drop/
+data/test_ministry/
+data/test_*/
+data/temp/
+data/tmp/
+data/uploads/
 data/user-knowledge/
+data/corpus/
 src/scripts/data/
 
 # Large generated files in data/
 data/*.jsonl
 data/*.csv
 data/*.log
+data/*.txt
+data/*.json
 
 # Keep the data folder structure
 !data/.gitkeep
 
 # ==========================
-# Generated retrieval indexes
+# Generated Retrieval Indexes & Storage
 # ==========================
 storage/
 faiss/
 indexes/
+chroma/
+lancedb/
+*.faiss
+*.index
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.pkl
+*.pickle
 
-# If you want folder preserved
+# Preserve storage directory placeholder
 !storage/.gitkeep
 
 # ==========================
-# Evaluation results
+# Evaluation & Benchmark Results
 # ==========================
 evaluation_results/
+benchmark_results/
 
 # ==========================
-# Temporary / test artifacts
+# Temporary & Test Artifacts
 # ==========================
 generation_prompt_debug.txt
-smoke_test.md
+*_debug.txt
+*_debug.json
+debug_*.txt
+debug_*.json
+smoke_test.*
 test.pdf
 test_up.txt
 test_upload.*
+test_*.pdf
+test_*.txt
 
 # ==========================
-# Build artifacts
+# Build Artifacts
 # ==========================
 build/
 dist/
 coverage/
 *.egg-info/
-*.tsbuildinfo
-*.tsbuildinfo.*
-
-# Package manager caches
-.pnpm-store/
-.npm/
-.yarn/
-.yarn/cache/
-.yarn/unplugged/
-.yarn/build-state.yml
-.yarn/install-state.gz
+.eggs/
 
 # ==========================
-# Runtime files
-# ==========================
-*.pid
-*.tmp
-*.bak
-
-# ==========================
-# Container images & Archives
+# Container Images & Archives
 # ==========================
 *.sif
 *.tar
 *.tar.gz
+*.tgz
+*.zip
+*.7z
+*.gz
 
 # ==========================
-# Scripts
+# HPC Shell Scripts (uncomment if local-only)
 # ==========================
 *.sh

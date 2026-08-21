@@ -2351,17 +2351,34 @@ def save_knowledge(payload: dict, request: Request):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ingest API — scientists / sir can add internal documents via the UI
+#
+# Phase 3: the UI can nowTARGET a hierarchical source/org/document_type
+# (POST /api/ingest/upload) in addition to the flat inbox (POST /api/upload).
+# BOTH flows converge on the shared ingestion service
+# (src/scripts/ingest_service.py) which drives the SAME engine the CLI uses
+# (src/scripts/ingest_folder.py) — there is no separate "frontend pipeline".
+# ONE background job processes targeted uploads + the inbox, then updates the
+# index exactly once (in-process incremental add_records — embed only NEW
+# records; same semantics as the engine's incremental_update() subprocess).
 # ─────────────────────────────────────────────────────────────────────────────
 _INGEST_STATE: dict = {
     "running": False,
-    "last": None,          # {"at": iso, "ok": n, "failed": n, "records": n, "message": str}
+    "last": None,          # {"at", "ok", "failed", "records", "message", + Phase-3 fields}
     "pending": 0,
+    # Targeted uploads staged into the hierarchy and waiting for the next
+    # ingest job. Entries are plain dicts (see /api/ingest/upload).
+    "pending_uploads": [],
 }
+
+# Upload size policy — ONE limit for /api/upload and /api/ingest/upload
+# (mirrors src.scripts.ingest_service.MAX_UPLOAD_BYTES; kept here so the
+# endpoint module stays self-contained and tests can pin parity).
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
 @app.get("/api/ingest/status")
 def ingest_status():
-    """How many files are waiting in the inbox + whether ingest is running."""
+    """Inbox queue + running state (+ staged targeted uploads, Phase 3)."""
     inbox = inbox_dir()
     pending = 0
     if inbox.exists():
@@ -2370,9 +2387,165 @@ def ingest_status():
     return {
         "running": _INGEST_STATE["running"],
         "pending": pending,
+        "pending_uploads": len(_INGEST_STATE["pending_uploads"]),
+        "staged_uploads": [u["file"] for u in _INGEST_STATE["pending_uploads"]],
         "last": _INGEST_STATE["last"],
         "inbox": str(inbox),
     }
+
+
+def _validated_upload_name(raw_filename: str | None) -> str:
+    """Upload filename validation shared by /api/upload and /api/ingest/upload."""
+    filename = (raw_filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename query param required")
+    name = os.path.basename(filename)  # strip any path traversal
+    if not name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    ext = Path(name).suffix.lower()
+    if ext not in (".pdf", ".txt", ".md", ".json", ".jsonl"):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type {ext}")
+    return name
+
+
+async def _read_capped_body(request: Request) -> bytes:
+    """Read the request body with the 200 MB policy enforced twice (header
+    first — a 2GB file would OOM the worker on HPC shared nodes — then the
+    actual read). Shared by both upload endpoints."""
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
+    body = await request.body()
+    if len(body) < 10:
+        raise HTTPException(status_code=400, detail="File is empty")
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
+    return body
+
+
+def _run_ingest_job() -> None:
+    """ONE ingest pass: targeted hierarchy uploads (Phase 3) + the inbox,
+    then a single index update and a live-pipeline swap.
+
+    Convergence: both flows go through src.scripts.ingest_service, which
+    drives the same engine functions the CLI uses — corpus conversion/dedup
+    via ingest_folder.ingest_folder, embeddings via HybridRAGPipeline.
+    add_records (only NEW records embedded; nothing-added ⇒ index untouched).
+    """
+    from src.scripts import ingest_service as _svc
+    from src.scripts.ingest_folder import ingest_folder as _ingest_folder
+    import src.scripts.ingest_folder as _ingest_folder_mod
+
+    _INGEST_STATE["running"] = True
+    upload_files: list[dict] = []
+    try:
+        # pin the converter to APP_* / project-root paths (never CWD)
+        _ingest_folder_mod.CORPUS = corpus_path()
+        _ingest_folder_mod.LOG = data_dir() / "sync.log"
+        _ingest_folder_mod.INDEX_DIR = str(resolve_index_dir())
+        _ingest_folder_mod.CORPUS.parent.mkdir(parents=True, exist_ok=True)
+
+        # ── 1. Targeted uploads (staged into the hierarchy by /api/ingest/upload)
+        staged = _INGEST_STATE["pending_uploads"]
+        _INGEST_STATE["pending_uploads"] = []
+        groups: dict[tuple, list[str]] = {}
+        targets: dict[tuple, dict] = {}
+        for item in staged:
+            key = (item["folder"], json.dumps(item["meta_context"], sort_keys=True),
+                   bool(item["move_processed"]))
+            groups.setdefault(key, []).append(item["file"])
+            targets[key] = item
+        up_received = up_new = up_dup = up_failed = up_records = 0
+        for key, names in groups.items():
+            item = targets[key]
+            target = _svc.UploadTarget(
+                source=item["source"], org=item.get("org"),
+                document_type=item.get("document_type"),
+                folder=Path(item["folder"]), rel_path=item.get("path") or "",
+                meta_context=item["meta_context"],
+                move_processed=bool(item["move_processed"]),
+                hierarchical=bool(item.get("hierarchical", True)),
+            )
+            stats = _svc.ingest_uploaded_files(target, names)
+            up_received += stats["received"]
+            up_new += stats["new"]
+            up_dup += stats["duplicates"]
+            up_failed += stats["failed"]
+            up_records += stats["records_added"]
+            upload_files.extend(stats["files"])
+
+        # ── 2. Inbox (legacy flat flow — unchanged semantics) ──────────────
+        inbox = inbox_dir()
+        inbox.mkdir(parents=True, exist_ok=True)
+        conv = _ingest_folder(str(inbox), move_processed=True)
+        print(f"[ingest] inbox conversion: {conv}")
+        ok = conv.get("files", 0)
+        added_count = conv.get("added", 0)
+        failed = conv.get("failed", 0)
+
+        # ── 3. ONE index update: embed only NEW records, swap live ─────────
+        _ingest_embedded = 0  # how many new vectors went into the index
+        try:
+            n, new_pipe = _svc.update_index_in_process()
+            _ingest_embedded = int(n or 0)
+            if new_pipe is not None:
+                pipeline.swap(new_pipe)
+                _SOURCES_CACHE.update({"data": None, "key": None})
+            print(f"[ingest] embeddings done: {_ingest_embedded} new vector(s) in live index")
+        except Exception as e:  # noqa: BLE001
+            print(f"[ingest] index rebuild failed: {e}")
+            _INGEST_STATE["last"] = {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "ok": 0, "failed": 0, "records": 0,
+                "message": f"Corpus updated but index rebuild failed: {e}. Restart server to reload.",
+            }
+            return
+
+        ok_total = ok + up_new
+        failed_total = failed + up_failed
+        records_total = added_count + up_records
+        msg_parts = []
+        if up_received:
+            msg_parts.append(
+                f"Targeted uploads: {up_received} received — {up_new} new, "
+                f"{up_dup} duplicate(s) skipped, {up_failed} failed "
+                f"({up_records} record(s) added)"
+            )
+        msg_parts.append(
+            f"Inbox: {ok} file(s) ingested, {added_count} record(s) added"
+        )
+        msg_parts.append(f"{_ingest_embedded} new record(s) embedded & indexed.")
+        _INGEST_STATE["last"] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "ok": ok_total, "failed": failed_total, "records": records_total,
+            "message": " ".join(msg_parts),
+            # ── additive Phase-3 detail (safe: old keys unchanged) ──
+            "received": up_received,
+            "new_documents": up_new,
+            "duplicates": up_dup,
+            "failed_documents": up_failed,
+            "records_added": records_total,
+            "records_embedded": _ingest_embedded,
+            "files": upload_files,
+        }
+    except Exception as e:  # noqa: BLE001
+        _INGEST_STATE["last"] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "ok": 0, "failed": 0, "records": 0,
+            "message": f"Ingest failed: {e}",
+        }
+    finally:
+        _INGEST_STATE["running"] = False
+
+
+# Legacy alias — pre-Phase-3 name kept so external references don't break.
+_run_inbox_ingest = _run_ingest_job
 
 
 def _run_inbox_ingest() -> None:
@@ -2470,11 +2643,11 @@ def _serve_mode_blocked():
 
 @app.post("/api/ingest")
 def ingest_trigger(payload: dict):
-    """Trigger ingestion of new files in data/inbox (background thread)."""
+    """Trigger ingestion of staged uploads + new files in data/inbox (background thread)."""
     _serve_mode_blocked()  # no-op unless APP_MODE=serve
     if _INGEST_STATE["running"]:
         return {"status": "busy"}
-    _threading.Thread(target=_run_inbox_ingest, daemon=True).start()
+    _threading.Thread(target=_run_ingest_job, daemon=True).start()
     return {"status": "started"}
 
 
@@ -2487,36 +2660,8 @@ async def upload_document(request: Request):
     Returns the saved file info; then call POST /api/ingest to process.
     """
     _serve_mode_blocked()  # no-op unless APP_MODE=serve
-    filename = request.query_params.get("filename", "").strip()
-    if not filename:
-        raise HTTPException(status_code=400, detail="filename query param required")
-    name = os.path.basename(filename)  # strip any path traversal
-    if not name:
-        raise HTTPException(status_code=400, detail="invalid filename")
-
-    ext = Path(name).suffix.lower()
-    if ext not in (".pdf", ".txt", ".md", ".json", ".jsonl"):
-        raise HTTPException(status_code=400, detail=f"Unsupported file type {ext}")
-
-    # Size guard BEFORE reading the body into RAM — a 2GB file would OOM the
-    # worker (HPC shared nodes). Reject over-large uploads up front via the
-    # Content-Length header, then cap the actual read as a second check.
-    MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
-    cl = request.headers.get("content-length")
-    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
-        )
-
-    body = await request.body()
-    if len(body) < 10:
-        raise HTTPException(status_code=400, detail="File is empty")
-    if len(body) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
-        )
+    name = _validated_upload_name(request.query_params.get("filename"))
+    body = await _read_capped_body(request)
 
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
@@ -2524,6 +2669,78 @@ async def upload_document(request: Request):
     dest.write_bytes(body)
     print(f"[upload] saved {name} ({len(body)} bytes) -> {dest}")
     return {"status": "saved", "file": name, "size": len(body)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — hierarchical upload targets (Ministry → Organization → DocType)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/ingest/targets")
+def ingest_targets():
+    """The upload hierarchy for the frontend — discovered from the SAME
+    registry the CLI uses (config/sources.yaml ∪ data/ discovery). No
+    organization/document-type is hardcoded anywhere in the frontend: add
+    data/isro/ and it appears here automatically."""
+    from src.scripts import ingest_service as _svc
+
+    return _svc.discover_ingest_tree()
+
+
+@app.post("/api/ingest/upload")
+async def ingest_upload(request: Request):
+    """Upload a document into a HIERARCHICAL target (Phase 3).
+
+    Raw body (octet-stream); query params select the target:
+        filename=report.pdf  (required)
+        source=moes          (required — registered or discovered source)
+        org=incois           (required for hierarchical sources)
+        document_type=annual_report  (required for hierarchical sources)
+
+    The file is staged INTO the source tree (data/<source>/<org>/<category>/)
+    — the physical path convention — then the next POST /api/ingest converts,
+    dedups, embeds and indexes it through the same engine the CLI uses.
+    Duplicate content uploads add nothing (content-hash ids).
+    """
+    _serve_mode_blocked()  # no-op unless APP_MODE=serve
+    from src.scripts import ingest_service as _svc
+
+    q = request.query_params
+    name = _validated_upload_name(q.get("filename"))
+    body = await _read_capped_body(request)
+
+    try:
+        target = _svc.resolve_upload_target(
+            q.get("source"), q.get("org"), q.get("document_type")
+        )
+    except _svc.UploadValidationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    dest = target.folder / name
+    dest.write_bytes(body)
+    entry = {
+        "file": name,
+        "size": len(body),
+        "source": target.source,
+        "org": target.org,
+        "document_type": target.document_type,
+        "path": target.rel_path,
+        "folder": str(target.folder),
+        "meta_context": target.meta_context,
+        "move_processed": target.move_processed,
+        "hierarchical": target.hierarchical,
+    }
+    _INGEST_STATE["pending_uploads"].append(entry)
+    print(f"[upload] staged {name} ({len(body)} bytes) -> {dest} "
+          f"[source={target.source} org={target.org} type={target.document_type}]")
+    return {
+        "status": "saved",
+        "file": name,
+        "size": len(body),
+        "target": {"source": target.source, "org": target.org,
+                   "document_type": target.document_type, "path": target.rel_path},
+        "pending_uploads": len(_INGEST_STATE["pending_uploads"]),
+        "message": "Staged into the knowledge tree — run Ingest to convert, embed & index.",
+    }
 
 
 @app.get("/api/graph/build-status")
