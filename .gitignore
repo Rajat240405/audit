@@ -5,9 +5,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
+*.dll
+*.dylib
 
 # ==========================
-# Virtual Environments
+# Virtual Environments & Conda
 # ==========================
 .venv/
 .venv-ml/
@@ -16,6 +19,8 @@ env/
 ENV/
 env.bak/
 venv.bak/
+.conda/
+conda-bld/
 
 # ==========================
 # Node / Frontend
@@ -67,6 +72,7 @@ ehthumbs.db
 Thumbs.db
 desktop.ini
 .directory
+$RECYCLE.BIN/
 
 # ==========================
 # Pytest / Coverage / Linters
@@ -81,6 +87,7 @@ htmlcov/
 .pyre/
 .tox/
 .nox/
+.hypothesis/
 
 # ==========================
 # Jupyter Notebooks
@@ -111,15 +118,23 @@ runtime/
 *.pem
 *.key
 *.cert
+*.crt
+*.pfx
+*.p12
 
 # ==========================
-# HuggingFace & Model Weights
+# HuggingFace, Model Weights & Training
 # ==========================
 .huggingface/
 hf_cache/
 .cache/huggingface/
 models/
 checkpoints/
+adapters/
+wandb/
+.wandb/
+runs/
+lightning_logs/
 *.gguf
 *.bin
 *.safetensors
@@ -127,6 +142,9 @@ checkpoints/
 *.pth
 *.onnx
 *.tflite
+*.h5
+*.keras
+*.engine
 
 # ==========================
 # Generated Data & Corpus
@@ -180,6 +198,8 @@ lancedb/
 *.parquet
 *.pkl
 *.pickle
+*.duckdb
+*.lance
 
 # Preserve storage directory placeholder
 !storage/.gitkeep
@@ -206,13 +226,14 @@ test_*.pdf
 test_*.txt
 
 # ==========================
-# Build Artifacts
+# Build Artifacts & Docker Overrides
 # ==========================
 build/
 dist/
 coverage/
 *.egg-info/
 .eggs/
+docker-compose.override.yml
 
 # ==========================
 # Container Images & Archives
@@ -224,8 +245,13 @@ coverage/
 *.zip
 *.7z
 *.gz
+.singularity/
 
 # ==========================
-# HPC Shell Scripts (uncomment if local-only)
+# HPC & SLURM Job Logs / Scripts
 # ==========================
+slurm-*.out
+slurm-*.err
+*.out
+*.err
 *.sh

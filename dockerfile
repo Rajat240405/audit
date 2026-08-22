@@ -79,4 +79,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health/live || exit 1
 
 # workers=1 is set inside start_server() — do not override with --workers.
-CMD ["python", "-m", "src.retrieval.frontend.server"]
+# Phase-4 startup launcher: APP_MODE=serve starts WITHOUT ingest (default);
+# APP_MODE=ingest runs the incremental ingestion pipeline first, then serves
+# (python -m src.scripts.startup --help). Duplicate-process guard included.
+CMD ["python", "-m", "src.scripts.startup"]

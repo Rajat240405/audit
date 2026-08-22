@@ -21,6 +21,9 @@ services:
       APP_DATA_DIR: /data
       APP_INDEX_DIR: /storage/hybrid_rag
       APP_MODEL_DIR: /models
+      # Phase-4 startup modes (src/scripts/startup.py — the image CMD):
+      #   serve  = startup WITHOUT ingest (no corpus/index/embedding work)
+      #   ingest = startup WITH incremental ingest of all sources, then serve
       APP_MODE: serve
       # OpenAI-compatible path to host Ollama (not native /api/chat).
       # HPC: VLLM_BASE_URL=http://<vllm-host>:8001  — VLLM_MODEL optional:
