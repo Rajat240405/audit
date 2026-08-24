@@ -1,0 +1,40 @@
+# Parliamentary Q&A crawler — Rajya Sabha module (design: investigation_scraping_architecture/
+# rs_moes_validation/RS_Crawler_Design.md). Endpoints frozen by live validation 2026-08-23.
+house: rajya-sabha
+
+rsdoc_base_url: https://rsdoc.nic.in
+
+# Ministry corpus (decision D1/D5): MoES + separately-labelled predecessor.
+ministries:
+  - code: 95
+    slug: earth-sciences
+    label: Ministry of Earth Sciences
+  - code: 23
+    slug: ocean-development
+    label: Ocean Development (predecessor of MoES)
+
+# Session window (server lists 174..271; data exists 184..271 for our ministries).
+sessions:
+  min: 174
+  max:
+  exclude: []
+
+http:
+  timeout_seconds: 60
+  request_delay_seconds: 1.0
+  retries: 2
+  retry_backoff_seconds: 1.0
+
+# Resolved policy defaults (design §12). All default-false flags are
+# post-processing hooks that never require a re-crawl.
+policy:
+  extract_fallback: true        # REC-P1: inline-first, English-PDF extract fallback
+  append_doc_annexures: false   # REC-P1: never append doc text to inline answers
+  hindi_legacy_text: false      # REC-2: Kruti-Dev/OCR post-process hook (not v1)
+  extract_legacy_text: false    # REC-3: DOC/DOCX/HTML kept raw (extractors later)
+
+retry_failed_slots: true        # re-attempt failed/missing document slots each run
+
+backfill:
+  enabled: false                # eParlib back-fill is an operator-network hook (design §9)
+  eparlib_base_url: https://eparlib.sansad.in/

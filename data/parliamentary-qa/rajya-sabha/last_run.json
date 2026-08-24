@@ -1,0 +1,72 @@
+{
+ "crawler": "crawl_parliamentary_qa/rs-1.0",
+ "house": "rajya-sabha",
+ "started_at": "2026-08-24T06:13:18Z",
+ "finished_at": "2026-08-24T06:15:45Z",
+ "options": {
+  "sessions": [
+   271
+  ],
+  "ministry_slugs": [
+   "earth-sciences",
+   "ocean-development"
+  ],
+  "fetch_documents": true,
+  "dry_run": false,
+  "retry_failed": true
+ },
+ "config": "E:\\audit2\\config\\crawlers\\parliamentary_qa.yaml",
+ "root": "E:\\audit2\\data\\parliamentary-qa\\rajya-sabha",
+ "http_requests": 52,
+ "ministries": [
+  {
+   "code": 95,
+   "slug": "earth-sciences",
+   "label": "Ministry of Earth Sciences"
+  },
+  {
+   "code": 23,
+   "slug": "ocean-development",
+   "label": "Ocean Development (predecessor of MoES)"
+  }
+ ],
+ "other_sources": [
+  {
+   "kind": "short-notice-questions",
+   "detail": "sansad api_rs SNQ corpus: 0 records for configured ministries (verified 2026-08-23) \u2014 not crawled"
+  }
+ ],
+ "sessions": [
+  {
+   "session": 271,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 25,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 25,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 25,
+   "docs": {
+    "good": 50,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  }
+ ],
+ "doc_totals": {
+  "good": 50,
+  "partial": 0,
+  "broken": 0,
+  "missing": 0
+ },
+ "failures": 0
+}
