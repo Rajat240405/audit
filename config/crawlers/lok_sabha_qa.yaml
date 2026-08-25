@@ -1,0 +1,77 @@
+# Parliamentary Q&A crawler — Lok Sabha module (design + validation:
+# investigation_scraping_architecture/ls_scraper_plan/REPORT.md; endpoint
+# contracts frozen by live probing 2026-08-25).
+house: lok-sabha
+
+# ── Modern-era listing API (Lok Sabha >= eras.api_ls_min_loksabha) ───────────
+# GET <base_url>/question/qetFilteredQuestionsAns?loksabhaNo=N&ministryCode=C
+#   &pageNo=<1-based>&pageSize=<=500>
+# Headers REQUIRED: Referer + browser UA (anonymous 403 otherwise — validated).
+api_ls:
+  base_url: https://sansad.in/api_ls
+  referer: https://sansad.in/ls/questions/questions-and-answers
+  page_size: 500
+
+# ── Legacy-era inventory (Lok Sabha < boundary): elibrary DSpace 7 ──────────
+# GET <base_url>/server/api/discover/search/objects
+#   ?f.ministry=<elibrary_label>,equals&f.loksabhanumber=N,equals
+#   &size=<=100>&page=<0-based>          (anonymous 200 — validated)
+elibrary:
+  base_url: https://elibrary.sansad.in
+  search_page_size: 100
+
+# Era boundary (validated: DSpace LS15/EARTH SCIENCES count matches the frozen
+# workbook exactly at 259; api_ls serves LS16+).
+eras:
+  api_ls_min_loksabha: 16
+
+# Ministry corpus. One api_ls ministry code spans ministry renames across
+# eras (23 = EARTH SCIENCES and its pre-2006 name OCEAN DEVELOPMENT), so
+# row_labels route each returned row to its configured ministry; elibrary
+# labels are exact DSpace f.ministry facet labels.
+#
+# OCEAN DEVELOPMENT is deliberately NOT in the default scope: its 69 frozen-
+# workbook rows carry blank document links and are unrecoverable per operator
+# directive (they are also DSpace-visible — 69 LS-14 items — so re-enabling
+# IS possible later). To scope it in deliberately, append:
+#   - slug: ocean-development
+#     label: Ocean Development (predecessor of MoES)
+#     api_ministry_code: 23
+#     row_labels: [OCEAN DEVELOPMENT]
+#     elibrary_labels: [OCEAN DEVELOPMENT]
+ministries:
+  - slug: earth-sciences
+    label: Ministry of Earth Sciences
+    api_ministry_code: 23
+    row_labels: [EARTH SCIENCES]
+    elibrary_labels: [EARTH SCIENCES]
+
+# Crawl windows (within the official calendar / discovered sessions).
+loksabhas:
+  min: 13
+  max:
+  exclude: []
+sessions:
+  min:
+  max:
+  exclude: []
+
+http:
+  timeout_seconds: 60
+  request_delay_seconds: 1.0
+  retries: 2
+  retry_backoff_seconds: 1.0
+  # sansad.in api_ls answers 403 to non-browser clients (live-validated).
+  # Keep this a plausible browser UA; the honest crawler identity stays in
+  # the RS/RSUA conventions for endpoints that allow it.
+  user_agent: >-
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+    (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36
+
+retry_failed_slots: true       # re-attempt transient-failed slots each run
+                               # (blank-link slots are NEVER retried — parked
+                               # as document-not-published by design)
+
+policy:
+  extract_fallback: true       # inline-first → English-document extraction
+  annex_suffix_retry: true     # AU2973_ciCkhd.pdf → AU2973.pdf on non-200

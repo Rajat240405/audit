@@ -51,6 +51,30 @@ sources:
       files take precedence over processed on duplicate question_id.
       Scraping itself stays in the Phase-1 pipeline — this source only
       pulls its OUTPUT into the canonical corpus.
+      RETIRES AT THE LOK SABHA CUTOVER: once the lok_sabha staged corpus is
+      validated, this block is removed in the same operator step that
+      rebuilds the corpus (ids 8-12-0102 vs ls-8-12-0102 must never
+      co-live — see ls_scraper_plan/REPORT.md §7, risk 6).
+
+  lok_sabha:
+    kind: records
+    record_dirs: [parliamentary-qa/lok-sabha]
+    recursive: true               # one qa.jsonl per lok-<n>/session-<m>/
+    description: >
+      Staged Lok Sabha Q&A produced by the LS crawler
+      (python -m src.scraping.ls.pipeline -> parliamentary-qa/
+      lok-sabha/lok-<n>/session-<m>/qa.jsonl). The records-kind merge
+      recurses into the composite (loksabha × session) layout via the same
+      generic `recursive` capability rajya_sabha uses — no LS special-casing
+      in the engine; ids are preserved (ls-<lok>-<ses>-<qno>), and the rich
+      staged metadata (house/loksabha/ministry/subject/doc URLs) rides into
+      the corpus untouched. Rows whose official answer document is still
+      missing (empty question/answer text) are skipped WITH a logged count —
+      content is never faked. `parliamentary-qa` is also in
+      discovery.exclude_dirs so automatic discovery never half-ingests the
+      staging tree as a folder source. NOTE: do NOT run this against a
+      corpus that `parliament` already filled — the cutover is a one-step
+      swap (remove `parliament`, rebuild) per REPORT.md §7.
 
   rajya_sabha:
     kind: records
@@ -236,9 +260,10 @@ discovery:
   exclude_dirs:
     - processed        # claimed by parliament (records kind)
     - enriched         # claimed by parliament (records kind)
-    - parliamentary-qa # claimed by rajya_sabha (records kind, recursive) —
-                       # discovery must never half-ingest individual session
-                       # folders as folder source(s)
+    - parliamentary-qa # claimed by rajya_sabha + lok_sabha (records kind,
+                       # recursive, disjoint house subtrees) — discovery must
+                       # never half-ingest individual session folders as
+                       # folder source(s)
     - raw              # Phase-1 scraper intermediate — never ingested directly
     - finetune         # training data, not a retrieval source
     - user-knowledge   # separate curated exact-match store (not corpus)
