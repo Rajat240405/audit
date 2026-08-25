@@ -5,10 +5,15 @@
 #   press-release    → whole category (incl. "PARLIAMENT QUESTION:" documents; never
 #                      discarded for looking parliamentary — cross-source dedupe is a
 #                      later, reviewed integration concern)
+#   central-documents → ONLY the approved Annual Report scope (scopes below): posts
+#   whose central-documents child term matches a declared family pattern, plus
+#   posts whose attachment content provably IS an Annual Report (fallback for
+#   uncategorized uploads — same name coverage rule, evaluated on the resolved
+#   attachment). Everything else under central-documents stays fail-closed-out.
 # OUT (fail-closed; not valid --categories choices): guidelines, orders-and-notices,
-#   publications, acts-and-policy, gazette-notifications, central-documents,
-#   and every other reports child-category (ncaer-reports, account-at-glance,
-#   achievements, general-report).
+#   publications, acts-and-policy, gazette-notifications categories, and every other
+#   reports child-category (ncaer-reports, account-at-glance, achievements,
+#   general-report).
 #
 # Families are resolved against the LIVE taxonomy (child terms of `reports`) by
 # substring match on slug/name — never hardcoded term ids. A family that matches
@@ -69,8 +74,21 @@ categories:
       demands-for-grants:
         match: ["demand"]         # demand-for-grants / demands-for-grants variants
   press-release: {}               # whole category, no family subdivision
+  central-documents: {}           # scoped via central_documents.scopes ONLY
 
-# RESERVED — central-documents (2,471 posts) is NOT implemented in v1.
-# Fail-closed: setting enabled: true makes the config loader raise (exit 2).
+# central-documents scope (fail-closed): the category walks but posts are
+# accepted ONLY through the declared scopes. `annual-reports` is the first
+# (and currently only) approved scope; its `covers` name patterns gate BOTH
+# the taxonomy match and the attachment-content fallback — and the
+# media-title stamping (a media title is claimed ONLY when covered, else the
+# post title is kept — never mislabeled). Unlike reports families, a scope
+# matching ZERO live child terms — or a MISSING central-documents tree node —
+# is tolerated (NOT an abort): live probing 2026-08-25 found the taxonomy
+# tree has no central-documents entry at all (the listing category exists
+# without one; Annual Reports exist only as central_documents attachments),
+# so per-record content evidence is the arbiter. Adding another family here
+# requires the same review as any scope change.
 central_documents:
-  enabled: false
+  scopes:
+    annual-reports:
+      covers: ["annual report", "annual-report"]

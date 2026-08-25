@@ -177,9 +177,16 @@ def category_run(
     attach: AttachmentMap,
     run_date: str,
     scraped_at: str,
+    central_attachment_resolver=None,
 ) -> dict[str, Any]:
     cfg_families = ((ctx.cfg.get("categories") or {}).get(category) or {}).get("families")
-    parent_id = normalize.parent_term_id(terms, category)
+    # the central-documents category may exist WITHOUT any taxonomy node
+    # upstream (live-verified 2026-08-25: the tree carries no central term),
+    # so only reports-style categories may treat a missing root as run-fatal
+    if category == normalize.CENTRAL_DOCUMENTS_PARENT_SLUG:
+        parent_id = normalize.top_term_id(terms, category)
+    else:
+        parent_id = normalize.parent_term_id(terms, category)
     cat_dir = ctx.root / category
     prior = load_manifest(cat_dir)
     prior_records = {r["id"]: r for r in (prior or {}).get("records") or []}
@@ -213,38 +220,68 @@ def category_run(
     summary["discovered"] = len(posts)
 
     # ── normalize + scope partition ───────────────────────────────────────────
+    central_scope_cfg: dict[str, Any] = (
+        (ctx.cfg.get("central_documents") or {}).get("scopes") or {}
+    )
+    central_scope_families = (
+        normalize.resolve_central_family_terms(terms, central_scope_cfg)
+        if category == normalize.CENTRAL_DOCUMENTS_PARENT_SLUG else None
+    )
     in_scope: list[dict[str, Any]] = []
     scoped_out: list[dict[str, Any]] = []
     for post in posts:
         children = normalize.child_terms_of(post, parent_id)
         child_ids = [int(t.get("term_id") or 0) for t in children]
         family = None
-        if cfg_families:
-            family = normalize.post_family(child_ids, fam_terms or {})
-            reason = None
+        if central_scope_families is not None:
+            # central-documents: ONLY the approved scopes pass — first by
+            # taxonomy, else by attachment-content evidence (pure; the
+            # resolver callable supplies the REST result when needed).
+            family = normalize.post_central_family(
+                post, central_scope_families, central_scope_cfg)
+            if family is None and central_attachment_resolver is not None:
+                family = normalize.post_central_family(
+                    post, central_scope_families, central_scope_cfg,
+                    resolved_attachment=central_attachment_resolver(post))
             if family is None:
-                reason = "excluded-reports-family"
-            elif active_families is not None and family not in active_families:
-                reason = "family-not-requested"
-            if reason:
                 scoped_out.append({
                     "id": f"moes-web-{int(post['ID'])}",
                     "slug": post.get("post_name"),
                     "children": [t.get("slug") for t in children],
-                    "reason": reason,
+                    "reason": "excluded-central-documents-family",
                 })
                 continue
-        rec = normalize.normalize_post(
-            post, category=category, family=family, child_terms=children,
-            listing_url=f"{ctx.api._ep['listing']}?document_category={category}",
-            scraped_at=scraped_at,
-        )
+            rec = normalize.normalize_central_record(
+                post, category_slug=category, family=family,
+                listing_url=f"{ctx.api._ep['listing']}?document_category={category}",
+                scraped_at=scraped_at, scope_cfg=central_scope_cfg)
+        else:
+            if cfg_families:
+                family = normalize.post_family(child_ids, fam_terms or {})
+                reason = None
+                if family is None:
+                    reason = "excluded-reports-family"
+                elif active_families is not None and family not in active_families:
+                    reason = "family-not-requested"
+                if reason:
+                    scoped_out.append({
+                        "id": f"moes-web-{int(post['ID'])}",
+                        "slug": post.get("post_name"),
+                        "children": [t.get("slug") for t in children],
+                        "reason": reason,
+                    })
+                    continue
+            rec = normalize.normalize_post(
+                post, category=category, family=family, child_terms=children,
+                listing_url=f"{ctx.api._ep['listing']}?document_category={category}",
+                scraped_at=scraped_at,
+            )
         in_scope.append(rec)
 
     summary["in_scope"] = len(in_scope)
     summary["scoped_out"] = sorted(scoped_out, key=lambda s: str(s["id"]))
     summary["pq_titled"] = sum(1 for r in in_scope if r["is_parliament_question"])
-    if cfg_families:
+    if cfg_families or central_scope_families is not None:
         fam_stats: dict[str, dict[str, int]] = {}
         for r in in_scope:
             fs = fam_stats.setdefault(r["family"], {"posts": 0, "file_rows": 0})
@@ -478,12 +515,41 @@ def run(ctx: CrawlContext) -> dict[str, Any]:
     attach = AttachmentMap(ctx.root)
     attach.mark_loaded()
 
+    # central-documents scope resolution (fail-closed): taxonomy-driven family
+    # terms + one bounded REST probe per scope-unknown post, whose result is
+    # fed back into the pure scoper (attachment-content fallback for
+    # uncategorized uploads; a resolver outage fails closed to scoped-out).
+    # Memoized per run (listing order = deterministic); a plain dry-run gets
+    # NO resolver at all — it stays listing+taxonomy read-only, and posts
+    # that need REST evidence then fail closed to scoped-out (use
+    # --resolve-attachments for a full probe).
+    central_att_cache: dict[int, dict[str, Any] | None] = {}
+
+    def _central_attachment(post: dict[str, Any]) -> dict[str, Any] | None:
+        """attachment_post(aid) of the post's first ACF file row; None on any
+        failure or when no id exists (deterministic — never fabricated)."""
+        aid = normalize.first_file_attachment_id(post)
+        if aid is None:
+            return None
+        if aid not in central_att_cache:
+            try:
+                central_att_cache[aid] = ctx.api.attachment_post(aid)
+            except (HttpApiError, HttpTransportError):
+                central_att_cache[aid] = None
+        return central_att_cache[aid]
+
+    central_resolver = (
+        None if (ctx.opts.dry_run and not ctx.opts.resolve_attachments)
+        else _central_attachment
+    )
+
     pq_stats: dict[str, int] = {}
     for category in categories:
         summary = category_run(
             ctx, category, terms=terms, fam_terms=fam_terms,
             active_families=active_families if category == "reports" else None,
-            attach=attach, run_date=run_date, scraped_at=scraped_at)
+            attach=attach, run_date=run_date, scraped_at=scraped_at,
+            central_attachment_resolver=central_resolver)
         report["categories"].append(summary)
         if summary.get("failures") or summary.get("failed"):
             report["failures"] = True

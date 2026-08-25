@@ -6,21 +6,27 @@ Stages ministry-owned documents from www.moes.gov.in into::
     ├── reports/<family>/<post-slug>/      (record.json + documents/)
     │   families: annual-reports, monthly-reports, demands-for-grants  (ONLY)
     ├── press-release/<post-slug>/
+    ├── central-documents/annual-reports/<post-slug>/   (approved scope ONLY)
     ├── attachment-map.json                (attachment-id → resolved pdf-links cache)
     └── last_run.json                      (run artefact)
 
-Scope guards (fail-closed, user-approved 2026-08-24): ONLY ``reports`` (the
-three families above, resolved from the LIVE taxonomy) and ``press-release``
-are valid ``--categories`` choices. ``guidelines``, ``orders-and-notices``,
-``publications``, ``acts-and-policy``, ``gazette-notifications`` and
-``central-documents`` are OUT of v1 — the config loader rejects them too.
-Press-release documents titled "PARLIAMENT QUESTION: …" are KEPT (never
-discarded as parliamentary duplicates; cross-source dedupe is a later,
-reviewed integration step).
+Scope guards (fail-closed, user-approved 2026-08-24): ``reports`` (the three
+families above, resolved from the LIVE taxonomy), ``press-release`` and
+``central-documents`` are valid ``--categories`` choices — but central walks
+ONLY through the approved ``central_documents.scopes`` (currently the
+``annual-reports`` family): a central post is accepted only when its
+central-documents child term matches, or its attachment is a provable
+``central_documents`` PDF post whose title/terms the scope covers. Every
+other central family (guidelines/acts/policies/notifications/…) stays
+excluded. ``guidelines``, ``orders-and-notices``, ``publications``,
+``acts-and-policy`` and ``gazette-notifications`` are OUT of v1 — the config
+loader rejects them too. Press-release documents titled "PARLIAMENT
+QUESTION: …" are KEPT (never discarded as parliamentary duplicates;
+cross-source dedupe is a later, reviewed integration step).
 
 Usage (run on a machine with internet; HPC ingests staged corpora offline)::
 
-    # full v1 scope (reports families + press-release)
+    # full v1 scope (reports families + press-release + central annual reports)
     python -m src.scripts.crawl_moes_website
 
     # inventory only — no writes, no document downloads

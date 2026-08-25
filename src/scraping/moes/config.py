@@ -4,13 +4,21 @@ The frozen ``src/scraping/config.py`` is Rajya-Sabha-specific (HOUSE/ministry
 shape); MoES gets its own loader here. Guards enshrined from the approved
 boundary review:
 
-- ONLY ``reports`` and ``press-release`` may appear under ``categories:`` —
-  any other key fails closed at load time (exit 2 path).
-- ``central_documents.enabled: true`` fails closed at load time ("not
-  implemented in v1").
+- ONLY the v1 categories may appear under ``categories:`` — any other key
+  fails closed at load time (exit 2 path).
+- ``central-documents`` walks ONLY through ``central_documents.scopes``
+  (currently the single approved ``annual-reports`` family). The legacy
+  ``central_documents.enabled`` switch is gone: any ``enabled: true`` STILL
+  fails closed (a stale v1 config can never silently widen scope).
 - Reports families must be a non-empty mapping of family → match patterns;
   a family resolving to zero live taxonomy terms fails closed at run time
-  (see ``normalize.resolve_family_terms``).
+  (see ``normalize.resolve_family_terms``). Central scopes resolve against
+  the live tree too (``normalize.resolve_central_family_terms``) but
+  TOLERATE zero/absent child terms: live probing (2026-08-25) found the
+  upstream taxonomy tree has NO central-documents node at all (the listing
+  category exists without one — Annual Reports surface only as
+  central_documents attachments), so per-record content evidence is the
+  arbiter and stays fail-closed.
 """
 
 from __future__ import annotations
@@ -24,8 +32,9 @@ from src.utils import app_paths
 
 DEFAULT_CONFIG = app_paths.config_path("crawlers", "moes_website.yaml")
 
-#: the only categories implemented in v1 (CLI choices + config allowlist)
-V1_CATEGORIES = ("reports", "press-release")
+#: the only categories implemented in v1 (CLI choices + config allowlist);
+#: central-documents is scoped EXCLUSIVELY through central_documents.scopes
+V1_CATEGORIES = ("reports", "press-release", "central-documents")
 
 
 class MoesConfigError(ValueError):
@@ -48,9 +57,25 @@ def validate_config(cfg: dict[str, Any]) -> None:
     central = cfg.get("central_documents") or {}
     if central.get("enabled"):
         raise MoesConfigError(
-            "central-documents is NOT implemented in v1 (fail-closed); "
-            "re-enabling it requires its own reviewed plan"
+            "central_documents.enabled is NOT a valid switch for the "
+            "fail-closed central-documents scope: scope is declared via "
+            "central_documents.scopes only — the legacy v1 blanket switch "
+            "stays invalid so a stale config can never silently widen scope"
         )
+    scopes = central.get("scopes") or {}
+    if "central-documents" in (cfg.get("categories") or {}) and (
+            not isinstance(scopes, dict) or not scopes):
+        raise MoesConfigError(
+            "central-documents requires central_documents.scopes — a "
+            "non-empty mapping of family → {covers: [name patterns]} "
+            "(the category alone never widens scope)"
+        )
+    for fam, fcfg in scopes.items():
+        covers = (fcfg or {}).get("covers")
+        if not isinstance(covers, list) or not [c for c in covers if str(c).strip()]:
+            raise MoesConfigError(
+                f"central_documents.scopes.{fam}.covers must be a non-empty list"
+            )
 
     categories = cfg.get("categories")
     if not isinstance(categories, dict) or not categories:
