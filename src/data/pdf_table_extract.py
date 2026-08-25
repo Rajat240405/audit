@@ -84,6 +84,52 @@ def extract_pdf_text(data: bytes) -> str | None:
         doc.close()
 
 
+def _extract_pdf_text_pypdf(data: bytes) -> str:
+    """The legacy flat extraction, byte-compatible with what the folder
+    converters produced before the table-aware integration: pages joined by
+    a blank line, empty pages dropped. pypdf is a hard dependency
+    (pyproject); ImportError propagates to the caller's exception path.
+    """
+    import io
+
+    from pypdf import PdfReader  # local import — module stays import-light
+
+    reader = PdfReader(io.BytesIO(data))
+    pages = [(p.extract_text() or "") for p in reader.pages]
+    return "\n\n".join(p for p in pages if p.strip())
+
+
+def extract_pdf_text_with_fallback(data: bytes) -> str:
+    """THE shared "PDF bytes → text" entry for the folder/ingest converters
+    (audit IW-7): table-aware PyMuPDF extraction first, the legacy pypdf path
+    automatically when PyMuPDF is unavailable or fails on the document.
+
+    Returns "" when neither engine yields text (scanned/image-only) so the
+    caller's existing OCR fallback applies exactly as before. Never raises
+    for an unopenable document — bulk ingestion must degrade, not die.
+
+    This is the SAME single stack the scrape paths use
+    (``extract_pdf_text``) plus the pypdf fallback the converters already
+    had — not a second extraction implementation.
+    """
+    text: str | None
+    try:
+        text = extract_pdf_text(data)
+    except ImportError:
+        text = None
+    except Exception:  # noqa: BLE001 — corrupt/oddball PDF: degrade to pypdf
+        text = None
+    if text and text.strip():
+        return text
+    try:
+        return _extract_pdf_text_pypdf(data)
+    except ImportError:
+        return text or ""
+    except Exception:  # noqa: BLE001 — both engines failed
+        return text or ""
+
+
+
 def _page_text(page) -> str:
     lines = _page_lines(page)
     if not lines:

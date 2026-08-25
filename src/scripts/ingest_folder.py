@@ -76,7 +76,13 @@ def log(msg: str) -> None:
 
 
 def _peek_text(path: Path) -> str:
-    """Small text sample for content-based type detection (PDF first pages)."""
+    """Small text sample for content-based type detection (PDF first pages).
+
+    Deliberately a cheap 3-page pypdf sampler, NOT the corpus extractor:
+    detection only needs the document header, and the actual record text is
+    produced later by the table-aware shared stack
+    (src/data/pdf_table_extract.extract_pdf_text_with_fallback — audit IW-7).
+    """
     if path.suffix.lower() in (".txt", ".md"):
         try:
             return path.read_text(encoding="utf-8", errors="ignore")[:800]
@@ -178,7 +184,8 @@ def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool
 
 def ingest_folder(folder: str, move_processed: bool = False,
                   meta_context: dict | None = None,
-                  only_files: set[str] | None = None) -> dict:
+                  only_files: set[str] | None = None,
+                  exclude_files: set[str] | None = None) -> dict:
     """Convert every file in a folder, append new records to the corpus.
 
     ``meta_context`` is an additive per-source identity for hierarchical
@@ -192,13 +199,23 @@ def ingest_folder(folder: str, move_processed: bool = False,
     whole-folder scan unchanged. The .txt-next-to-.pdf sibling skip rule
     always considers the FULL folder (a staged .txt is skipped when its PDF
     is on disk even outside the subset).
+
+    ``exclude_files`` (additive, source-registry driven) is a set of exact
+    file NAMES that must never be converted — crawler sidecar/metadata files
+    (e.g. record.json, manifest.json) that live next to real documents in a
+    staged corpus. Matching is case-insensitive; excluded files are not
+    scanned, not converted, never moved. None (default) = legacy behavior.
     """
     p = Path(folder)
     if not p.exists():
         log(f"[ingest_folder] folder not found: {folder}")
         return {"files": 0, "added": 0, "failed": 0}
 
-    all_files = sorted(f for f in p.iterdir() if f.is_file())
+    excluded = {n.lower() for n in (exclude_files or set())}
+    all_files = sorted(
+        f for f in p.iterdir()
+        if f.is_file() and f.name.lower() not in excluded
+    )
     if only_files is not None:
         files = [f for f in all_files if f.name in only_files]
     else:
@@ -274,11 +291,15 @@ def ingest_folder(folder: str, move_processed: bool = False,
 
 
 def _index_exists() -> bool:
-    """True if a loadable index is saved (all marker files present)."""
-    idx = Path(INDEX_DIR)
-    return all((idx / f).exists() for f in (
-        "vector_store.index", "bm25_index.pkl", "doc_map.json", "pipeline_metadata.json",
-    ))
+    """True if a loadable index is saved (all marker files present).
+
+    The marker set is NOT defined here: the single canonical contract lives
+    in src/retrieval/hybrid/artifacts.py (audit IW-11) and is shared with the
+    ``retrieve`` CLI and the ingest service.
+    """
+    from src.retrieval.hybrid.artifacts import index_is_complete
+
+    return index_is_complete(INDEX_DIR)
 
 
 def _incremental_child_code() -> str:

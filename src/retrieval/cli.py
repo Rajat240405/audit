@@ -47,6 +47,7 @@ def _apply_cli_plan(llm_client: LLMClient, llm_model: str, mode: str) -> Executi
     for w in plan.warnings:
         console.print(f"[yellow][exec] warning: {w}[/yellow]")
     return plan
+from src.retrieval.hybrid.artifacts import INDEX_MARKER_FILES, index_is_complete
 from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 from src.utils.app_paths import corpus_path, data_dir, index_dir as default_index_dir
 from src.utils.project_scope import resolve_effective_ministry_filter, filter_records_by_ministry
@@ -59,29 +60,20 @@ console = Console()
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Files written by HybridRAGPipeline.save() that constitute a complete,
-# loadable index. Used to distinguish "a real index exists" from "the
-# directory exists but is empty/partial" (e.g. after a manual cleanup).
-_INDEX_MARKER_FILES = (
-    "pipeline_metadata.json",
-    "doc_map.json",
-    "vector_store.index",
-    "vector_store.ids",
-    "bm25_index.pkl",
-    "bm25_index.json",
-)
+# loadable index. The definition lives in ONE place —
+# src/retrieval/hybrid/artifacts.py (audit IW-11): every caller (this CLI,
+# the ingestion engine, the ingest service) shares it, so a partial index
+# directory can never pass one check while failing another.
+_INDEX_MARKER_FILES = INDEX_MARKER_FILES
 
 
 def _index_is_built(index_path: Path) -> bool:
     """Return True only if a complete, loadable pipeline was saved at index_path.
 
-    Merely checking ``index_path.exists()`` is not enough: the directory can
-    exist while being empty or partially populated (e.g. ``storage/hybrid_rag``
-    created but the index files deleted). A clean build must not attempt to
-    ``load()`` in that state.
+    Kept as the module-local seam used by get_pipeline()/tests; the contract
+    itself is ``artifacts.index_is_complete``.
     """
-    if not index_path.exists() or not index_path.is_dir():
-        return False
-    return all((index_path / name).exists() for name in _INDEX_MARKER_FILES)
+    return index_is_complete(index_path)
 
 
 def get_pipeline(

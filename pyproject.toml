@@ -70,10 +70,17 @@ dev = [
 ]
 
 [project.scripts]
-ingest = "src.data.ingestion_pipeline:cli"
+# Canonical ingestion CLI = the source-registry engine (same as
+# `python -m src.scripts.ingest`). The legacy Lok Sabha restaging pipeline
+# keeps its own name (audit §4/§5 — do not extend it).
+ingest = "src.scripts.ingest:main"
+ingest-phase1 = "src.data.ingestion_pipeline:cli"
 retrieve = "src.retrieval.cli:cli"
 evaluate = "src.retrieval.evaluation.cli:evaluate_cli"
-graph = "src.retrieval.graph.cli:graph_cli"
+# NOTE (audit §8): the legacy `graph` console entry was removed — it pointed
+# at a symbol that never existed (src.retrieval.graph.cli:graph_cli) and was
+# broken since it was committed. The NetworkX graph code stays importable
+# (src.retrieval.graph.store/.retriever); the Neo4j GraphRAG CLI is below.
 graphrag = "src.graphrag.cli:cli"
 
 [build-system]

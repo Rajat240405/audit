@@ -36,13 +36,14 @@ guarantees the record is appended exactly once.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import src.scripts.ingest as _registry
 import src.scripts.ingest_folder as _engine
 from src.utils.app_paths import corpus_path, data_dir, index_dir
 from src.utils.atomic_io import write_bytes_atomic  # noqa: F401  (re-used by callers)
+from src.utils.labels import slug_label
 
 # Engine's documented document_type vocabulary (detect_doc_type docstring,
 # convert_sirs_knowledge converters) plus the Phase-1 additive value. The
@@ -93,9 +94,11 @@ class UploadTarget:
 
 def _label(slug: str) -> str:
     """Deterministic display label for a slug (no config surface added):
-    short slugs read as acronyms (incois -> INCOIS, moes_hq -> MOES HQ)."""
-    words = slug.replace("_", " ")
-    return words.upper() if len(slug) <= 7 else words.title()
+    short slugs read as acronyms (incois -> INCOIS, moes_hq -> MOES HQ).
+
+    Implementation lives in src.utils.labels (shared with the Phase-5
+    config-driven source tree); alias kept for local readability."""
+    return slug_label(slug)
 
 
 def _doc_type_label(doc_type: str) -> str:
@@ -486,8 +489,9 @@ def ingest_uploaded_files(
 #    engine's incremental_update() subprocess; SAME add_records semantics)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_INDEX_MARKERS = ("vector_store.index", "bm25_index.pkl", "doc_map.json",
-                  "pipeline_metadata.json")
+# The index-completeness contract is canonical and shared (audit IW-11):
+# src/retrieval/hybrid/artifacts.py — never re-declare marker lists here.
+from src.retrieval.hybrid.artifacts import index_is_complete as _index_is_complete
 
 
 def update_index_in_process(pipeline_factory=None):
@@ -510,7 +514,7 @@ def update_index_in_process(pipeline_factory=None):
 
         pipeline_factory = HybridRAGPipeline
     records = DataLoader.load_jsonl(corpus)
-    if all((idx / f).exists() for f in _INDEX_MARKERS):
+    if _index_is_complete(idx):
         pipe = pipeline_factory()
         pipe.load(str(idx))
         n = int(pipe.add_records(records) or 0)

@@ -18,17 +18,12 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
-import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from src.retrieval.hybrid.pipeline import HybridRAGPipeline
-from src.retrieval.graph.store import GraphStore
-from src.retrieval.graph.retriever import GraphRetriever
 from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
 from src.generation.policy import resolve_execution
@@ -44,15 +39,22 @@ from src.generation.vllm_discovery import (
     refresh_vllm_discovery,
     resolve_served_family,
 )
+from src.retrieval.graph.retriever import GraphRetriever
+from src.retrieval.graph.store import GraphStore
+from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 from src.utils.app_paths import (
     corpus_path,
     data_dir,
     ensure_data_dirs,
-    graph_dir as resolve_graph_dir,
     inbox_dir,
-    index_dir as resolve_index_dir,
     project_root,
     user_knowledge_dir,
+)
+from src.utils.app_paths import (
+    graph_dir as resolve_graph_dir,
+)
+from src.utils.app_paths import (
+    index_dir as resolve_index_dir,
 )
 
 app = FastAPI(
@@ -392,7 +394,7 @@ graph_retriever = GraphRetriever(store=graph_store)
 #                                     fallback (the app still boots while the
 #                                     server is down; per-request refresh
 #                                     retries discovery before generation).
-def _boot_served_family(provider: str) -> Optional[ModelFamily]:
+def _boot_served_family(provider: str) -> ModelFamily | None:
     if provider not in ("vllm", "openai_compatible"):
         return None
     try:
@@ -461,7 +463,7 @@ edit_llm_client = LLMClient(
 class ProviderSwitchRequest(BaseModel):
     provider: str
     model: str # Now serves as the model family ID (e.g. "qwen3")
-    api_key: Optional[str] = None
+    api_key: str | None = None
 
 
 class ChatStreamRequest(BaseModel):
@@ -469,10 +471,10 @@ class ChatStreamRequest(BaseModel):
     mode: str = "fast"            # Execution Mode: "fast" or "deep"
     retrieval_mode: str = "hybrid"  # Retrieval Mode: "hybrid" or "graph"
     top_k: int = 5
-    draft_style: Optional[str] = None  # e.g. formal / concise / executive
-    doc_types: Optional[list[str]] = None  # source filter: parliament / annual_report / ...
-    orgs: Optional[list[str]] = None          # source filter: expanded org slugs (tree rule already applied)
-    doc_categories: Optional[list[str]] = None  # source filter: annual / monthly / budget / ...
+    draft_style: str | None = None  # e.g. formal / concise / executive
+    doc_types: list[str] | None = None  # source filter: parliament / annual_report / ...
+    orgs: list[str] | None = None          # source filter: expanded org slugs (tree rule already applied)
+    doc_categories: list[str] | None = None  # source filter: annual / monthly / budget / ...
 
 
 class ChatRequest(ChatStreamRequest):
@@ -487,23 +489,23 @@ class ChatRequest(ChatStreamRequest):
 
 class SourceItem(BaseModel):
     doc_id: str
-    ministry: Optional[str] = None
-    subject: Optional[str] = None
-    date: Optional[str] = None  # R1: raw record date stamp, when the record carries one
-    document_type: Optional[str] = None
+    ministry: str | None = None
+    subject: str | None = None
+    date: str | None = None  # R1: raw record date stamp, when the record carries one
+    document_type: str | None = None
     score: float
     question: str
     answer: str
     # Retrieval trace — per-component scores (hybrid path only; None for graph path)
-    dense_score: Optional[float] = None
-    bm25_score: Optional[float] = None
-    rrf_score: Optional[float] = None
-    rerank_score: Optional[float] = None
+    dense_score: float | None = None
+    bm25_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
 
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: List[SourceItem]
+    sources: list[SourceItem]
     retrieval_latency_ms: float
     generation_latency_ms: float
     prompt_tokens: int
@@ -519,9 +521,9 @@ class ChatResponse(BaseModel):
     resolved_model: str
     context_window: int
     prompt_budget: int
-    network_latency_ms: Optional[float] = None
+    network_latency_ms: float | None = None
     # Retrieval trace: per-component scores per hit + stage timings (ms)
-    trace: Optional[dict] = None
+    trace: dict | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -537,7 +539,7 @@ def is_semantic_synthesis_query(query: str) -> bool:
     import re
     query_clean = re.sub(r"[^\w\s]", " ", query.lower()).strip()
     words = set(query_clean.split())
-    
+
     synthesis_triggers = {
         "summarize", "summarise", "explain", "compare", "reason", "why", "synthesize",
         "synthesise", "how", "relation", "contrast", "summary", "analyze", "analyse",
@@ -554,18 +556,18 @@ def is_metadata_query(query: str) -> bool:
     import re
     query_clean = re.sub(r"[^\w\s]", " ", query.lower()).strip()
     words = set(query_clean.split())
-    
+
     metadata_triggers = {
-        "list", "find", "lookup", "show", "get", "statistics", "stats", "mps", 
+        "list", "find", "lookup", "show", "get", "statistics", "stats", "mps",
         "members", "session", "date", "document", "question", "questions"
     }
-    
+
     # Also check multi-word phrase triggers
     has_phrase = any(phrase in query_clean for phrase in ["who asked", "which ministry", "what subjects", "where is"])
-    
+
     has_metadata_trigger = bool(words.intersection(metadata_triggers)) or has_phrase
     has_synthesis_trigger = is_semantic_synthesis_query(query)
-    
+
     return has_metadata_trigger and not has_synthesis_trigger
 
 
@@ -578,19 +580,19 @@ def extract_informative_summary(answer_text: str, subject_text: str) -> str:
     import re
     # 1. Standardize whitespace and remove newlines for clean regex matching
     text = re.sub(r'\s+', ' ', answer_text).strip()
-    
+
     # 2. Remove ANSWER/REPLY heading
     text = re.sub(r'(?i)^ANSWER\s*[:\-]?\s*', '', text).strip()
     text = re.sub(r'(?i)^REPLY\s*[:\-]?\s*', '', text).strip()
-    
+
     # 3. Remove MINISTER signatures and departments
     text = re.sub(r'(?i)^MINISTER\s+OF\s+STATE\s*\([^)]*\)\s*(?:IN\s+THE\s+MINISTRY\s+OF\s+[\w\s&,]+)?\s*', '', text).strip()
     text = re.sub(r'(?i)^(?:THE\s+HON’BLE\s+)?MINISTER\s+OF\s+[\w\s&,]+\s*\([^)]*\)\s*', '', text).strip()
     text = re.sub(r'(?i)^(?:THE\s+HON’BLE\s+)?MINISTER\s+OF\s+[\w\s&,]+\s*', '', text).strip()
-    
+
     # 4. Remove leading list indices like (a) to (c) or (a) & (b) or (a)
     text = re.sub(r'(?i)^\([a-g]\)\s*(?:to|&|and)?\s*(?:\([a-g]\))?\s*[:\-\.]?\s*', '', text).strip()
-    
+
     # 5. Remove any residual leading punctuation/dashes
     text = re.sub(r'^[\s\-\:\.\*]+', '', text).strip()
 
@@ -860,7 +862,7 @@ async def chat_endpoint(request: ChatRequest):
     generator.context_budget_ratio = 0.80
 
     t_ret_start = time.perf_counter()
-    sources: List[SourceItem] = []
+    sources: list[SourceItem] = []
 
     # ── Path Selection Matrix ──
     is_graph_result = (ret_mode == "graph" and not is_semantic_synthesis_query(query))
@@ -869,7 +871,7 @@ async def chat_endpoint(request: ChatRequest):
         # ── PATH A: DETERMINISTIC METADATA QUERY PATH ──
         results = graph_retriever.retrieve(query, top_k=5)
         ret_latency = (time.perf_counter() - t_ret_start) * 1000
-        
+
         # Format Retrieved Results into Source Items
         for r in results:
             sources.append(SourceItem(
@@ -884,11 +886,11 @@ async def chat_endpoint(request: ChatRequest):
         if results:
             header = "### 🕸️ GraphRAG: Document Explorer\n"
             header += "The following real parliamentary document cards were resolved directly from the metadata graph relationships:\n\n"
-            
+
             cards = []
             for r in results:
                 summary = extract_informative_summary(r.answer, r.metadata.get("subject", ""))
-                
+
                 card = (
                     f"#### 📄 **Document: {r.doc_id}**\n"
                     f"* 🏢 **Ministry**: {r.metadata.get('ministry') or '-'}\n"
@@ -898,14 +900,14 @@ async def chat_endpoint(request: ChatRequest):
                     f"* 💡 **Summary**: {summary}\n"
                 )
                 cards.append(card)
-            
+
             answer = header + "\n---\n".join(cards)
         else:
             answer = (
                 "### 🕸️ GraphRAG: Document Explorer\n\n"
                 "No matching parliamentary metadata relationships were resolved for your query in the graph."
             )
-            
+
         comp_tok = len(answer) // 4
 
         return ChatResponse(
@@ -973,12 +975,12 @@ async def chat_endpoint(request: ChatRequest):
             sources = _filter_to_admitted(sources, admitted)
 
         t_gen_start = time.perf_counter()
-        
+
         api_key = _active_api_key()
         llm_available = llm_client.check_health(api_key=api_key)
 
         network_latency_ms = 0.0
-        gen_error: Optional[str] = None
+        gen_error: str | None = None
 
         if llm_available and results:
             try:
@@ -2186,7 +2188,7 @@ def _indexed_records():
 @app.get("/api/sources")
 def sources_catalogue():
     """Facets from the active searchable index (doc_map), not the raw corpus."""
-    from src.retrieval.frontend.org_tree import build_sources_catalogue
+    from src.retrieval.frontend.org_tree import build_sources_catalogue, config_stamp
 
     records = _indexed_records()
     inst = getattr(pipeline, "_instance", None)
@@ -2195,6 +2197,7 @@ def sources_catalogue():
         id(inst) if inst is not None else 0,
         len(records),
         doc_map_path.stat().st_mtime if doc_map_path.exists() else 0,
+        config_stamp()[1],  # sources.yaml edits (labels/tree) refresh the cache too
     )
     if _SOURCES_CACHE["key"] == key and _SOURCES_CACHE["data"] is not None:
         return _SOURCES_CACHE["data"]
@@ -2438,9 +2441,9 @@ def _run_ingest_job() -> None:
     via ingest_folder.ingest_folder, embeddings via HybridRAGPipeline.
     add_records (only NEW records embedded; nothing-added ⇒ index untouched).
     """
+    import src.scripts.ingest_folder as _ingest_folder_mod
     from src.scripts import ingest_service as _svc
     from src.scripts.ingest_folder import ingest_folder as _ingest_folder
-    import src.scripts.ingest_folder as _ingest_folder_mod
 
     _INGEST_STATE["running"] = True
     upload_files: list[dict] = []
@@ -2547,87 +2550,6 @@ def _run_ingest_job() -> None:
 # Legacy alias — pre-Phase-3 name kept so external references don't break.
 _run_inbox_ingest = _run_ingest_job
 
-
-def _run_inbox_ingest() -> None:
-    """Append inbox files to the corpus, then rebuild + swap the live index."""
-    _INGEST_STATE["running"] = True
-    try:
-        # 1. Convert inbox files IN-PROCESS (same tested ingest_folder path).
-        #    No subprocess: conversion errors show up directly, and there is
-        #    no cwd/env ambiguity between where uploads land and where the
-        #    converter looks.
-        from src.scripts.ingest_folder import ingest_folder as _ingest_folder
-        import src.scripts.ingest_folder as _ingest_folder_mod
-
-        # pin the converter to APP_* / project-root paths (never CWD)
-        _ingest_folder_mod.CORPUS = corpus_path()
-        _ingest_folder_mod.LOG = data_dir() / "sync.log"
-        _ingest_folder_mod.INDEX_DIR = str(resolve_index_dir())
-        _ingest_folder_mod.CORPUS.parent.mkdir(parents=True, exist_ok=True)
-
-        inbox = inbox_dir()
-        inbox.mkdir(parents=True, exist_ok=True)
-        conv = _ingest_folder(str(inbox), move_processed=True)
-        print(f"[ingest] conversion: {conv}")
-        ok = conv.get("files", 0)
-        added_count = conv.get("added", 0)
-        failed = conv.get("failed", 0)
-        # 2. INCREMENTALLY update the index (embed only NEW records) and swap
-        #    the live pipeline — no full re-embed of the whole corpus.
-        try:
-            from src.data.loader import DataLoader
-            from src.retrieval.hybrid.pipeline import HybridRAGPipeline
-            import os as _os2
-
-            corpus = corpus_path()
-            idx_dir = resolve_index_dir()
-            _ingest_embedded = 0  # how many new vectors went into the index
-            if corpus.exists():
-                records = DataLoader.load_jsonl(corpus)
-                _env2 = dict(_os2.environ)
-                _env2["PYTHONIOENCODING"] = "utf-8"
-                if all((idx_dir / f).exists() for f in (
-                        "vector_store.index", "bm25_index.pkl", "doc_map.json", "pipeline_metadata.json")):
-                    # existing index -> incremental (fast)
-                    new_pipe = HybridRAGPipeline()
-                    new_pipe.load(str(idx_dir))
-                    n = new_pipe.add_records(records)
-                    _ingest_embedded = int(n or 0)
-                    if n:
-                        new_pipe.save(str(idx_dir))
-                    print(f"[ingest] incremental update: {n} new record(s) embedded+added")
-                else:
-                    # no index yet -> full build
-                    new_pipe = HybridRAGPipeline(records=records)
-                    new_pipe.save(str(idx_dir))
-                    _ingest_embedded = len(records)
-                    print(f"[ingest] full build with {len(records):,} records")
-                pipeline.swap(new_pipe)
-                _SOURCES_CACHE.update({"data": None, "key": None})
-                print(f"[ingest] embeddings done: {_ingest_embedded} new vector(s) in live index")
-        except Exception as e:  # noqa: BLE001
-            print(f"[ingest] index rebuild failed: {e}")
-            _INGEST_STATE["last"] = {
-                "at": datetime.now().isoformat(timespec="seconds"),
-                "ok": 0, "failed": 0, "records": 0,
-                "message": f"Corpus updated but index rebuild failed: {e}. Restart server to reload.",
-            }
-            return
-
-        _INGEST_STATE["last"] = {
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "ok": ok, "failed": failed, "records": added_count,
-            "message": f"{ok} file(s) ingested, {added_count} record(s) added, "
-                       f"{_ingest_embedded} new record(s) embedded & indexed.",
-        }
-    except Exception as e:  # noqa: BLE001
-        _INGEST_STATE["last"] = {
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "ok": 0, "failed": 0, "records": 0,
-            "message": f"Ingest failed: {e}",
-        }
-    finally:
-        _INGEST_STATE["running"] = False
 
 
 def _serve_mode_blocked():

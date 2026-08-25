@@ -36,5 +36,10 @@ policy:
 retry_failed_slots: true        # re-attempt failed/missing document slots each run
 
 backfill:
-  enabled: false                # eParlib back-fill is an operator-network hook (design §9)
+  # eParlib back-fill (design §9, audit §7 — implemented in
+  # src/scraping/rs/backfill.py; operator runbook in RUNNING.md). Shipped
+  # ENABLED so the mechanism is ready to execute on the operator machine
+  # (only there are rsdoc.nic.in + eparlib.sansad.in reachable; the CLI
+  # refuses the run with a clear pointer wherever this is set false).
+  enabled: true
   eparlib_base_url: https://eparlib.sansad.in/

@@ -107,6 +107,19 @@ class SourceSpec:
     org_map: dict = field(default_factory=dict)     # dir segment -> org slug
     ministry: str | None = None         # explicit ministry stamp (else default rules)
     subpath: str | None = None          # CLI subpath selector (moes/incois)
+    # ── Records merge (audit IW-3) ──
+    recursive: bool = False             # records: recurse record_dirs (e.g.
+                                        # parliamentary-qa/rajya-sabha/session-*/)
+    # ── File-name sidecar exclusion (audit IW-4) ──
+    exclude_files: list[str] = field(default_factory=list)  # exact names,
+                                        # case-insensitive (crawler sidecars:
+                                        # record.json / manifest.json / ...)
+    # ── Presentation opt-out (Phase-5 integration) ──
+    present_in_tree: bool = True        # hierarchical sources normally become
+                                        # a ministry node in /api/sources; set
+                                        # false when the source's records belong
+                                        # to an EXISTING ministry's orgs instead
+                                        # (e.g. moes_website -> moes/moes_hq).
 
 
 @dataclass
@@ -116,6 +129,7 @@ class LeafJob:
     org: str | None
     doc_type_hint: str | None
     meta_context: dict
+    exclude_files: tuple[str, ...] = ()
 
 
 # Fallback used ONLY if config/sources.yaml is unreadable — must stay equal to
@@ -124,6 +138,7 @@ _BUILTIN_CATEGORY_MAP: dict[str, str] = {
     "annual_reports": "annual_report",
     "audit_reports": "audit_report",
     "research_papers": "research_publication",
+    "press_release": "press_release",
     "other": "document",
 }
 
@@ -160,9 +175,26 @@ _BUILTIN_SOURCES: dict[str, dict] = {
         "folders": ["moes_reports/knowledge"],
         "description": "Legacy MoES CCPS knowledge JSONs.",
     },
+    "rajya_sabha": {
+        "kind": "records", "record_dirs": ["parliamentary-qa/rajya-sabha"],
+        "recursive": True,
+        "description": "Staged Rajya Sabha Q&A (crawl_parliamentary_qa; "
+                       "session-*/qa.jsonl merged recursively, ids preserved).",
+    },
+    "moes_website": {
+        "kind": "folders", "folders": [".moes-website"], "hierarchical": True,
+        "ministry": "EARTH SCIENCES", "default_org": "moes_hq",
+        "org_map": {"reports": "moes_hq"},
+        "exclude_files": ["record.json", "manifest.json",
+                          "attachment-map.json", "last_run.json"],
+        "present_in_tree": False,
+        "description": "MoES website staging corpus (crawl_moes_website; "
+                       "documents under <category>/<post>/documents/).",
+    },
 }
 
-_BUILTIN_DISCOVERY_EXCLUDES = ["processed", "enriched", "raw", "finetune", "user-knowledge"]
+_BUILTIN_DISCOVERY_EXCLUDES = ["processed", "enriched", "raw", "finetune", "user-knowledge",
+                               "parliamentary-qa"]
 
 
 def _default_config_file() -> Path:
@@ -186,6 +218,9 @@ def _spec_from_dict(name: str, raw: dict) -> SourceSpec:
         org_map={_normalize_segment(str(k)): str(v)
                  for k, v in (raw.get("org_map") or {}).items()},
         ministry=(str(raw["ministry"]) if raw.get("ministry") else None),
+        recursive=bool(raw.get("recursive", False)),
+        exclude_files=[str(f) for f in (raw.get("exclude_files") or [])],
+        present_in_tree=bool(raw.get("present_in_tree", True)),
     )
 
 
@@ -404,7 +439,8 @@ def expand_source(spec: SourceSpec, category_map: dict[str, str]) -> list[LeafJo
             folder = _data_path(rel)
             jobs.append(LeafJob(folder=folder, org=spec.org,
                                 doc_type_hint=None,
-                                meta_context=flat_ctx or {}))
+                                meta_context=flat_ctx or {},
+                                exclude_files=tuple(spec.exclude_files)))
         return jobs
 
     for rel in spec.folders:
@@ -433,7 +469,8 @@ def expand_source(spec: SourceSpec, category_map: dict[str, str]) -> list[LeafJo
             rel_parts = current.relative_to(root).parts
             org, hint = resolve_path_context(rel_parts, spec, category_map)
             jobs.append(LeafJob(folder=current, org=org, doc_type_hint=hint,
-                                meta_context=_ctx(org, hint)))
+                                meta_context=_ctx(org, hint),
+                                exclude_files=tuple(spec.exclude_files)))
     return jobs
 
 
@@ -475,20 +512,30 @@ def _seed_seen_from_corpus() -> set[str]:
 
 
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
-                      source: str | None = None) -> int:
-    """Merge ready-made QARecord JSONL (Phase-1 parliament output) into `out`.
+                      source: str | None = None, recursive: bool = False) -> int:
+    """Merge ready-made QARecord JSONL (Phase-1 parliament output, staged
+    crawler corpora) into `out`.
 
-    Ids are PRESERVED (not re-hashed): these records were produced by the
-    Phase-1 ingestion pipeline with parliament-id semantics (e.g. 18-4-3035).
-    Declaration order wins on duplicate ids (config lists enriched before
-    processed — the richer copy survives). `source` is stamped as provenance.
+    Ids are PRESERVED (not re-hashed): these records were produced upstream
+    with stable id semantics (e.g. 18-4-3035 from the Phase-1 pipeline,
+    rs-<ses>-<qno> from the Rajya Sabha staging crawler). Declaration order
+    wins on duplicate ids (config lists enriched before processed — the
+    richer copy survives). `source` is stamped as provenance.
+
+    ``recursive`` (audit IW-3) descends into nested record layouts — the RS
+    staging corpus keeps one qa.jsonl per session-<n>/ directory. File order
+    is always sorted (deterministic); the mechanism is generic — any
+    records-kind source may opt in per-registry-entry, it is not an
+    RS-specific special case.
     """
     added = 0
+    skipped = 0
     for rel in dirs:
         d = _data_path(rel)
         if not d.exists():
             continue
-        for f in sorted(d.glob("*.jsonl")):
+        files = sorted(d.rglob("*.jsonl")) if recursive else sorted(d.glob("*.jsonl"))
+        for f in files:
             try:
                 for line in f.open(encoding="utf-8"):
                     line = line.strip()
@@ -496,7 +543,8 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                         continue
                     try:
                         rec = QARecord.model_validate_json(line)
-                    except Exception:  # noqa: BLE001 — skip malformed lines
+                    except Exception:  # noqa: BLE001 — count malformed/incomplete rows
+                        skipped += 1
                         continue
                     if rec.question_id not in seen:
                         seen.add(rec.question_id)
@@ -506,6 +554,17 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                         added += 1
             except OSError as e:
                 _engine.log(f"  [warn] {f}: {e}")
+    if skipped:
+        # Honest residual accounting (audit principle): rows failing QARecord
+        # validation (e.g. RS records whose official answer document is still
+        # missing, leaving answer_text empty) are NOT silently half-ingested
+        # — the count is surfaced and the runbook points at the backfill
+        # mechanism; placeholder content is never synthesized.
+        _engine.log(
+            f"  [warn] records merge: skipped {skipped} row(s) failing QARecord "
+            "validation (e.g. empty answer_text — recover the official document "
+            "via the backfill runbook; content is never faked)"
+        )
     return added
 
 
@@ -515,7 +574,8 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
     if spec.kind == "records":
         out: list[QARecord] = []
         seen = _seed_seen_from_corpus()
-        added = merge_record_dirs(spec.record_dirs, out, seen, source=spec.name)
+        added = merge_record_dirs(spec.record_dirs, out, seen, source=spec.name,
+                                  recursive=spec.recursive)
         if out:
             lines = [rec.model_dump_json() for rec in out]
             append_jsonl_atomic(corpus_path(), lines)
@@ -542,6 +602,7 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
             str(job.folder),
             move_processed=move,
             meta_context=job.meta_context or None,
+            exclude_files=set(job.exclude_files) or None,
         )
         total += res.get("added", 0)
         files += res.get("files", 0)
@@ -586,8 +647,9 @@ def run_embed_phase(action: str) -> None:
     elif action == "incremental":
         _engine.incremental_update()
     elif action == "defer":
-        _engine.log("--no-rebuild given; index NOT updated (run `python -m src.scripts.ingest all --ingest` "
-                    "without --no-rebuild or `retrieve build --rebuild` later)")
+        _engine.log("--no-rebuild given; index NOT updated (run "
+                    "`python -m src.scripts.ingest all --ingest` without "
+                    "--no-rebuild or `retrieve build --rebuild` later)")
     else:
         _engine.log("nothing new ingested — no index update needed")
 
@@ -660,7 +722,8 @@ def main() -> None:
     ap.add_argument("--list", dest="list_sources", action="store_true",
                     help="list registered + discovered sources and exit")
     ap.add_argument("--config", default=None,
-                    help="override sources config (default: config/sources.yaml or $INGEST_SOURCES_CONFIG)")
+                    help="override sources config (default: config/sources.yaml "
+                         "or $INGEST_SOURCES_CONFIG)")
     ap.add_argument("--move-processed", action="store_true",
                     help="force moving ingested files to <folder>/processed (inbox default)")
     ap.add_argument("--no-rebuild", action="store_true",

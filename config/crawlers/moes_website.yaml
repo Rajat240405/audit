@@ -1,0 +1,76 @@
+# MoES website crawler (staging-only) — v1 approved scope.
+#
+# IN SCOPE (user-approved 2026-08-24):
+#   reports          → ONLY families: annual-reports, monthly-reports, demands-for-grants
+#   press-release    → whole category (incl. "PARLIAMENT QUESTION:" documents; never
+#                      discarded for looking parliamentary — cross-source dedupe is a
+#                      later, reviewed integration concern)
+# OUT (fail-closed; not valid --categories choices): guidelines, orders-and-notices,
+#   publications, acts-and-policy, gazette-notifications, central-documents,
+#   and every other reports child-category (ncaer-reports, account-at-glance,
+#   achievements, general-report).
+#
+# Families are resolved against the LIVE taxonomy (child terms of `reports`) by
+# substring match on slug/name — never hardcoded term ids. A family that matches
+# zero live terms aborts with a config error (scope drift can never widen silently).
+
+source: moes-website
+site: "https://www.moes.gov.in"
+
+# Staging root: app_paths.data_dir() / output_subdir  (override with --root).
+# dot-dir on purpose: neither claimed by the registered hierarchical `moes`
+# source nor picked up by ingest discovery (d.name.startswith(".") is skipped).
+output_subdir: ".moes-website"
+
+endpoints:
+  counts:   "/cms/wp-json/count-posts/all"
+  taxonomy: "/cms/wp-json/taxonomy/documents_category"
+  listing:  "/cms/wp-json/document/documents"        # ?document_category=<slug>&limit&page
+  # ACF attachment-id resolution. Live-verified 2026-08-24: the wp/v2/media
+  # collection omits EVERY attached item (0/247 v1 ids visible) and media/<id>,
+  # include=, slug= are all dead; the working contract is the generic post
+  # fetcher: GET post-page/post?id=<attachment_id> -> acf_data.pdf /
+  # pdf_hindi / pdf_both objects with direct /static/uploads/ URLs.
+  attachment_post: "/cms/wp-json/post-page/post?id="
+  robots:   "/robots.txt"
+
+http:
+  timeout_seconds: 60
+  request_delay_seconds: 1.0        # after EVERY request
+  retries: 2                        # transport errors only
+  retry_backoff_seconds: 1.0        # linear: 1s, 2s
+  too_many_requests_backoff_seconds: 30   # single 429 backoff, then slot fails
+  # Akamai posture (verified 2026-08-24): plain UAs are 403-blocked; this
+  # browser-like header set is REQUIRED. Rotate here without code changes.
+  user_agent: >-
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+    (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36
+  extra_headers:
+    Referer: "https://www.moes.gov.in/"
+    apikey: "4bW5t13453pa"                  # hardcoded in the site's public JS bundle
+    Content-Type: "application/json"
+
+listing:
+  page_size: 100
+
+# Which files of a resolved attachment to download:
+# acf.pdf -> english, acf.pdf_hindi -> hindi, acf.pdf_both -> single bilingual
+# (always fetched when present). Both languages on by default (RS parity);
+# sizes: v1 eng ~426MB + hin ~371MB (measured live 2026-08-24).
+download_languages: ["english", "hindi"]
+
+categories:
+  reports:
+    families:                     # config order = deterministic family order
+      annual-reports:
+        match: ["annual-report"]
+      monthly-reports:
+        match: ["monthly-report"]
+      demands-for-grants:
+        match: ["demand"]         # demand-for-grants / demands-for-grants variants
+  press-release: {}               # whole category, no family subdivision
+
+# RESERVED — central-documents (2,471 posts) is NOT implemented in v1.
+# Fail-closed: setting enabled: true makes the config loader raise (exit 2).
+central_documents:
+  enabled: false

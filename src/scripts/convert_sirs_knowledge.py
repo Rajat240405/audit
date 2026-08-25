@@ -7,7 +7,8 @@ Handles the formats found on the INCOIS audit machine:
                                                 key_facts, entities, tabular_data_summary}}
   3. UserKnowledge/*.json & KnowledgeBase(UserAdded)/*.json
                                            -> {title, category, source_url, file_name, content}
-  4. KnowledgeBase(Scanned)/*.txt|*.pdf   -> raw text files (and PDFs -> text via pypdf)
+  4. KnowledgeBase(Scanned)/*.txt|*.pdf   -> raw text files (PDFs -> text via the shared
+                                                table-aware extractor; pypdf fallback)
 
 Output: one JSONL file in QARecord format, validated by the project's own
 QARecord model, ready for `retrieve build --data <out> --rebuild`.
@@ -277,14 +278,13 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
 def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
                       doc_type: str = "document", *, org=None, source=None,
                       ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
+    # THE canonical PDF→text for folder ingestion (audit IW-7): table-aware
+    # PyMuPDF first (borderless-table reconstruction), legacy pypdf as the
+    # built-in fallback — one shared stack, not a second implementation.
+    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
+
     try:
-        from pypdf import PdfReader  # local import — optional dep
-    except ImportError:
-        return 0
-    try:
-        reader = PdfReader(str(path))
-        pages = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n\n".join(p for p in pages if p.strip())
+        text = extract_pdf_text_with_fallback(path.read_bytes())
     except Exception as e:  # noqa: BLE001
         print(f"  [skip pdf] {path.name}: {e}")
         return 0
@@ -345,16 +345,12 @@ def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     "INCOIS Annual Report 2023-24". Long-doc chunking at index time splits
     the huge text (~200 pages) into searchable chunks.
     """
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return 0
+    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
+
     m = re.search(r"(?:AR_|Report_|report_)?(\d{4}(?:-\d{2})?)", path.stem)
     year = m.group(1) if m else path.stem
     try:
-        reader = PdfReader(str(path))
-        pages = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n\n".join(p for p in pages if p.strip())
+        text = extract_pdf_text_with_fallback(path.read_bytes())
     except Exception as e:  # noqa: BLE001
         print(f"  [skip annual] {path.name}: {e}")
         return 0
@@ -382,10 +378,6 @@ def convert_report_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     into one document record with a descriptive title parsed from the
     filename (e.g. TR_ESSO-INCOIS-OMARS-TR-01(2025) -> 'INCOIS Technical
     Report OMARS-TR-01 (2025)')."""
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return 0
     stem = path.stem
     # normalize the noisy filename into a readable title
     cleaned = re.sub(r"_\d{14}$", "", stem)          # strip timestamp suffix
@@ -404,10 +396,10 @@ def convert_report_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     else:
         title = f"INCOIS Document {cleaned}"
         doc_type = "document"
+    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
+
     try:
-        reader = PdfReader(str(path))
-        pages = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n\n".join(p for p in pages if p.strip())
+        text = extract_pdf_text_with_fallback(path.read_bytes())
     except Exception as e:  # noqa: BLE001
         print(f"  [skip report] {path.name}: {e}")
         return 0

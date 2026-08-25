@@ -27,6 +27,7 @@ hierarchy:
     annual_reports:  annual_report
     audit_reports:   audit_report
     research_papers: research_publication
+    press_release:   press_release
     other:           document
 
 sources:
@@ -50,6 +51,23 @@ sources:
       files take precedence over processed on duplicate question_id.
       Scraping itself stays in the Phase-1 pipeline — this source only
       pulls its OUTPUT into the canonical corpus.
+
+  rajya_sabha:
+    kind: records
+    record_dirs: [parliamentary-qa/rajya-sabha]
+    recursive: true               # one qa.jsonl per session-<n>/ directory
+    description: >
+      Staged Rajya Sabha Q&A produced by the RS crawler
+      (src/scripts/crawl_parliamentary_qa.py -> parliamentary-qa/
+      rajya-sabha/session-<n>/qa.jsonl). The records-kind merge recurses
+      into the session layout (generic capability — no RS special-casing in
+      the engine), ids are preserved (rs-<session>-<qno>), and the rich
+      staged metadata (house=qslno/ministry/doc URLs) rides into the
+      corpus untouched. Rows whose official answer document is still
+      missing (empty answer_text) are skipped WITH a logged count — the
+      eParlib backfill runbook recovers them; content is never faked.
+      `parliamentary-qa` is also in discovery.exclude_dirs so automatic
+      discovery never half-ingests the staging tree as a folder source.
 
   # ── Hierarchical sources ── ministry root, org subtree ────────────────────
   moes:
@@ -100,6 +118,110 @@ sources:
       moes_reports/*.pdf are crawler downloads only; the ingestible form is
       the knowledge/*.json extraction.
 
+  moes_website:
+    kind: folders
+    folders: [.moes-website]
+    hierarchical: true
+    ministry: EARTH SCIENCES
+    default_org: moes_hq
+    org_map:
+      reports: moes_hq            # reports/annual-reports/<slug>/documents/
+    exclude_files:                # crawler sidecars living next to documents —
+      - record.json               # generic file-name exclusion (exact names,
+      - manifest.json             # case-insensitive), NOT MoES-specific code
+      - attachment-map.json       # in the engine: without it record.json would
+      - last_run.json             # be converted into ~215 junk stub records.
+    present_in_tree: false        # records belong to EXISTING moes orgs
+                                  # (annual_reports/press_release -> moes_hq);
+                                  # hidden so the tree gains no empty
+                                  # "Moes Website" ministry node.
+    description: >
+      MoES website staging corpus written by the dedicated website crawler
+      (src/scripts/crawl_moes_website.py -> data/.moes-website/). Layout:
+      reports/annual-reports/<post>/documents/<file.pdf> and
+      press-release/<post>/documents/<file.pdf>. The first category_map hit
+      resolves document_type (annual_report / press_release); org resolves
+      through org_map/default_org to moes_hq. Crawling and ingestion stay
+      separate stages: the crawler only writes staging bytes, this source
+      only pulls its OUTPUT into the canonical corpus (the engine never
+      mutates the staging tree — move_processed is false for hierarchical
+      sources). The dot-dir name also keeps automatic discovery away.
+
+# ── Presentation layer (filter tree + labels; consumed by org_tree.py) ──────
+# Identity and DISPLAY knowledge for the retrieval source filter — what the
+# backend catalogue exposes and the frontend renders. COUNTS NEVER LIVE HERE:
+# build_sources_catalogue() always counts the actual indexed corpus.
+#
+#   ministries:        filter-tree nodes. Org entries take the short form
+#                      `slug: "Display Name"` or the extended form shown below.
+#                      This block is MERGED with hierarchical sources from the
+#                      registry above: a NEW hierarchical source (e.g.
+#                      rajat_reports) appears in the tree automatically with a
+#                      deterministic label (slug -> "Rajat Reports"); entries
+#                      here only override/prettify labels and category hints.
+#                      Ministries that have no registry source yet (sansad,
+#                      moa, mof) are declared here directly.
+#   categories:        doc_category -> UI label (optional; unknown categories
+#                      get a deterministic label from the slug).
+#   doctype_categories: document_type -> doc_category (the cadence axis used
+#                      by the facets). New document_types added to
+#                      hierarchy.category_map above should get a line here;
+#                      unmapped types fall back to "misc" as before.
+presentation:
+  ministries:
+    sansad:
+      name: "Sansad (Parliament Q&A)"
+      orgs:
+        sansad: {name: "Parliamentary Questions", categories: [parliamentary]}
+    moes:
+      name: "Ministry of Earth Sciences"
+      orgs:
+        incois:   {name: "INCOIS",  categories: [annual, scientific, technical, general]}
+        imd:      {name: "IMD",     categories: [annual, monthly, scientific]}
+        iitm:     {name: "IITM",    categories: [annual, scientific]}
+        niot:     {name: "NIOT",    categories: [annual, research]}
+        moes_hq:  {name: "MoES HQ", categories: [annual, monthly, budget, policy, gazette, news, scientific, misc]}
+    moa:
+      name: "Ministry of Agriculture & Farmers Welfare"
+      orgs:
+        moa_hq: {name: "MoA HQ", categories: [annual, monthly, budget, policy]}
+    mof:
+      name: "Ministry of Finance"
+      orgs:
+        mof_hq: {name: "MoF HQ", categories: [annual, budget, policy]}
+  categories:
+    parliamentary: Parliamentary Questions
+    annual: Annual Reports
+    monthly: Monthly Reports
+    quarterly: Quarterly Reports
+    scientific: Scientific / Research
+    technical: Technical Reports
+    general: General Reports
+    audit: Audit Reports
+    budget: Budget / Grants
+    policy: Policy Documents
+    gazette: Gazettes / Notices
+    news: Newsletters / News
+    misc: Misc
+  doctype_categories:
+    parliamentary_qa: parliamentary
+    annual_report: annual
+    monthly_report: monthly
+    research_publication: scientific
+    publication: scientific
+    bibliometrics: scientific
+    technical_report: technical
+    general_report: general
+    audit_report: audit
+    demands_for_grants: budget
+    performance_budget: budget
+    gazette_notification: gazette
+    order_notice: gazette
+    newsletter: news
+    press_release: news           # MoES website press-release/ tree (IW-4)
+    download: misc
+    document: misc
+
 # ── Automatic source-directory discovery ────────────────────────────────────
 # `ingest all` and `ingest <name>` fall back to discovery when <name> is not
 # registered above: any FIRST-LEVEL directory under the data root that isn't
@@ -114,6 +236,9 @@ discovery:
   exclude_dirs:
     - processed        # claimed by parliament (records kind)
     - enriched         # claimed by parliament (records kind)
+    - parliamentary-qa # claimed by rajya_sabha (records kind, recursive) —
+                       # discovery must never half-ingest individual session
+                       # folders as folder source(s)
     - raw              # Phase-1 scraper intermediate — never ingested directly
     - finetune         # training data, not a retrieval source
     - user-knowledge   # separate curated exact-match store (not corpus)

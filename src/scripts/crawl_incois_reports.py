@@ -10,6 +10,12 @@ Sections (each maps to a page that lists PDFs):
 (RTI disclosures and News PDFs are intentionally excluded — procedural/low
 value for the audit corpus.)
 
+This module is the SINGLE implementation of INCOIS section discovery +
+the download idiom (workspace cleanup, audit §4): sync_sources wraps
+SECTIONS/discover for its scan phase, and crawl_annual_reports is a thin
+compat shim over discover("annual", lang=...) + download_pdf. Do not grow
+a fourth copy of the page/pattern config anywhere.
+
 The files are PUBLIC (verified: the scientist's Report_* files are exactly
 the ones listed on general_reports.jsp, and 98% of annual report pages are
 text-extractable — no OCR). We download them on the local dev PC so HPC
@@ -28,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
 import httpx
@@ -59,14 +64,42 @@ SECTIONS: dict[str, dict] = {
 }
 
 
-def discover(section: str) -> list[str]:
-    """Return absolute PDF urls listed on the section's page."""
+def discover(section: str, lang: str | None = None) -> list[str]:
+    """Return absolute PDF urls listed on the section's page.
+
+    ``lang`` (additive; default None = legacy English behavior) fetches the
+    site's language variant via ``?lang=<Lang>`` — the annual-report page
+    swaps its PDF list under ?lang=Hindi. Only a query-string append;
+    section patterns/labels are untouched.
+    """
     cfg = SECTIONS[section]
+    page = cfg["page"] + (f"?lang={lang}" if lang else "")
     with httpx.Client(timeout=30, follow_redirects=True) as client:
-        r = client.get(BASE + cfg["page"])
+        r = client.get(BASE + page)
         r.raise_for_status()
     links = sorted(set(re.findall(cfg["pat"], r.text)))
     return [u if u.startswith("http") else BASE + u for u in links]
+
+
+def download_pdf(client: httpx.Client, url: str, dest: Path) -> tuple[str, str]:
+    """One download attempt — THE shared idiom (workspace cleanup, audit §4).
+
+    Returns (status, detail) with status in {"downloaded", "skipped",
+    "failed"}: >10KB existing file -> skipped; <10KB response or any
+    request error -> failed (detail carries the reason for logging).
+    """
+    if dest.exists() and dest.stat().st_size > 10_000:
+        return "skipped", ""
+    try:
+        r = client.get(url)
+        r.raise_for_status()
+        if len(r.content) < 10_000:
+            return "failed", "tiny"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(r.content)
+        return "downloaded", ""
+    except Exception as e:  # noqa: BLE001
+        return "failed", f"{type(e).__name__}: {str(e)[:80]}"
 
 
 def main() -> None:
@@ -109,24 +142,17 @@ def main() -> None:
                 if not fname.lower().endswith(".pdf"):
                     fname += ".pdf"
                 dest = out_dir / fname
-                if dest.exists() and dest.stat().st_size > 10_000:
-                    s += 1
-                    continue
-                try:
-                    r = client.get(url)
-                    r.raise_for_status()
-                    if len(r.content) < 10_000:
-                        print(f"   [fail] {fname} (tiny)")
-                        f += 1
-                        continue
-                    dest.write_bytes(r.content)
+                status, detail = download_pdf(client, url, dest)
+                if status == "downloaded":
                     d += 1
                     if args.extract:
                         txt = extract_pdf_text(dest)
                         if txt.strip():
                             (dest.with_suffix(".txt")).write_text(txt, encoding="utf-8")
-                except Exception as e:  # noqa: BLE001
-                    print(f"   [fail] {fname}: {type(e).__name__}: {str(e)[:80]}")
+                elif status == "skipped":
+                    s += 1
+                else:
+                    print(f"   [fail] {fname} ({detail})")
                     f += 1
             print(f"   -> {d} downloaded, {s} skipped, {f} failed")
             total_down += d

@@ -31,8 +31,15 @@ Usage (run on a machine with internet; HPC ingests the staged corpus offline):
     # list official-file artefacts pending eParlib back-fill (read-only)
     python -m src.scripts.crawl_parliamentary_qa --house rajya-sabha --print-pending-backfill
 
-Exit codes: 0 = success, 2 = usage/config error, 3 = some sessions failed
-(partial run; per-session failures are in last_run.json).
+    # eParlib back-fill (audit §7 — operator-machine hook; needs network to
+    # rsdoc.nic.in + eparlib.sansad.in; enabled in the crawler config):
+    python -m src.scripts.crawl_parliamentary_qa --house rajya-sabha --backfill \
+        [--sessions 265-271] [--dry-run]
+
+Exit codes: 0 = success (or every back-fill slot resolved), 1 = back-fill ran
+but slots remain pending (see outcomes in last_backfill.json), 2 = usage/
+config error, 3 = some sessions failed (partial run; per-session failures are
+in last_run.json).
 """
 
 from __future__ import annotations
@@ -96,7 +103,32 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep previously failed document slots as-is (no re-attempt)")
     p.add_argument("--print-pending-backfill", action="store_true",
                    help="print failed document slots awaiting eParlib back-fill and exit")
+    p.add_argument("--backfill", action="store_true",
+                   help="execute the eParlib back-fill for pending failed "
+                        "document slots (audit §7; requires network to "
+                        "rsdoc.nic.in + eparlib.sansad.in; --dry-run plans "
+                        "without writing)")
     return p
+
+
+def _print_backfill_summary(report: dict) -> None:
+    mode = "DRY-RUN plan" if report["dry_run"] else "executed"
+    print(f"== eParlib back-fill ({mode}) — root={report['root']} ==")
+    for s in report["sessions"]:
+        print(f"  session {s['session']}: recovered={s['recovered']} "
+              f"already={s['already']} planned={s['planned']} pending={s['pending']}")
+    for o in report["outcomes"]:
+        tag = o["status"]
+        extra = f" ({o['detail']})" if o.get("detail") else ""
+        note = f" — {o['note']}" if o.get("note") else ""
+        handle = f" handle={o['handle']}" if o.get("handle") else ""
+        print(f"  [{tag}] {o['id']} {o['lang']} qslno={o['qslno']}{handle}{extra}{note}")
+    print(json.dumps({"recovered": report["recovered"], "already": report["already"],
+                      "planned": report["planned"],
+                      "pending_after": report["pending_after"],
+                      "http_requests": report["http_requests"]}, indent=1))
+    if not report["dry_run"]:
+        print(f"[done] last_backfill.json written under {report['root']}")
 
 
 def main(argv: list[str] | None = None, *, transport=None, sleeper=None) -> int:
@@ -117,6 +149,28 @@ def main(argv: list[str] | None = None, *, transport=None, sleeper=None) -> int:
         print(json.dumps({"root": str(root), "pending": pending, "count": len(pending)},
                          indent=1, ensure_ascii=True))
         return 0
+
+    if args.backfill:
+        if not args.documents:
+            print("[error] --no-documents cannot be combined with --backfill "
+                  "(the back-fill downloads recovered documents).", file=sys.stderr)
+            return 2
+        if not (cfg.get("backfill") or {}).get("enabled", False):
+            print("[error] backfill.enabled is false in "
+                  f"{cfg.get('_path')} — enable it on the OPERATOR machine "
+                  "(with network to rsdoc.nic.in + eparlib.sansad.in) and "
+                  "re-run.", file=sys.stderr)
+            return 2
+        from src.scraping.rs.backfill import run_backfill
+
+        http = CrawlHttpClient(transport=transport, sleeper=sleeper, **http_kwargs(cfg))
+        try:
+            report = run_backfill(http=http, cfg=cfg, root=root,
+                                  sessions=sessions, dry_run=args.dry_run)
+        finally:
+            http.close()
+        _print_backfill_summary(report)
+        return 0 if report["pending_after"] == 0 else 1
 
     opts = RunOptions(
         sessions=sessions,

@@ -147,6 +147,58 @@ class QARecordMetadata(BaseModel):
         le=18,
     )
 
+    # ── Rajya Sabha / crawler-staged provenance (additive, audit IW-3) ──────
+    # The RS staging crawler (src/scraping/rs) already emits these keys in
+    # every qa.jsonl row; before this block existed they were silently DROPPED
+    # at QARecord load time, so identity like the house and the official-file
+    # provenance never survived into the canonical corpus. All optional with
+    # None defaults: old corpus lines, old converters and old parsers are
+    # unaffected (pydantic keeps dropping keys older code doesn't know).
+    house: str | None = Field(
+        default=None,
+        description="Parliamentary house the question belongs to "
+                    "('rajya-sabha' | 'lok-sabha' | None for non-parliament docs).",
+        examples=["rajya-sabha", "lok-sabha"],
+    )
+    qslno: int | None = Field(
+        default=None,
+        description="Upstream question serial number (rsdoc qslno) — the source "
+                    "key behind display ids like rs-265-0164.",
+    )
+    mp_code: int | str | None = Field(
+        default=None,
+        description="Upstream member code from the rsdoc record, when present.",
+    )
+    ministry_label: str | None = Field(
+        default=None,
+        description="Human-readable ministry label from the source API "
+                    "(complement of the 'ministry' slug).",
+    )
+    ministry_code: int | None = Field(
+        default=None,
+        description="Upstream ministry code (e.g. rsdoc MIN_CODE 95/23).",
+    )
+    answer_source: str | None = Field(
+        default=None,
+        description="Where answer_text came from: 'inline' (API text), "
+                    "'document-extract' (PDF fallback), 'unavailable', "
+                    "or None (non-parliament records).",
+        examples=["inline", "document-extract", "unavailable"],
+    )
+    answer_unavailable_cause: str | None = Field(
+        default=None,
+        description="Diagnostic recorded when no usable answer text exists "
+                    "(e.g. 'extract-failed', 'english-document-unavailable').",
+    )
+    eng_doc_url: str | None = Field(
+        default=None,
+        description="Official English answer-document URL (attribution).",
+    )
+    hin_doc_url: str | None = Field(
+        default=None,
+        description="Official Hindi answer-document URL (attribution).",
+    )
+
 
 class QARecord(BaseModel):
     """

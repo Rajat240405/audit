@@ -6,7 +6,11 @@ import { useAppStore } from "@/store/useAppStore";
 import { cn } from "@/utils/cn";
 import { Input } from "@/components/ui/input";
 
-/** Pretty display labels for doc categories (cadence axis). */
+/** Pretty display labels for doc categories (cadence axis).
+ *  LEGACY FALLBACK ONLY — the backend catalogue (/api/sources) now carries
+ *  config-driven labels (sources.yaml `presentation.categories`) on each
+ *  category entry; those win. This map only covers older backends that omit
+ *  the `label` field. Unknown categories fall back to the raw slug. */
 const CATEGORY_LABELS: Record<string, string> = {
   parliamentary: "Parliamentary Questions",
   annual: "Annual Reports",
@@ -127,7 +131,7 @@ export function SourceFilter() {
   const q = query.trim().toLowerCase();
   const filteredOrgs = q ? orgs.filter((o) => o.name.toLowerCase().includes(q)) : orgs;
   const filteredCats = q
-    ? cats.filter((c) => (CATEGORY_LABELS[c.category] ?? c.category).toLowerCase().includes(q))
+    ? cats.filter((c) => (c.label ?? CATEGORY_LABELS[c.category] ?? c.category).toLowerCase().includes(q))
     : cats;
 
   const appliedCount = sourceFilter.orgs.length + sourceFilter.docCategories.length;
@@ -235,7 +239,7 @@ export function SourceFilter() {
             {filteredCats.map((c) => (
               <Row
                 key={c.category}
-                label={CATEGORY_LABELS[c.category] ?? c.category}
+                label={c.label ?? CATEGORY_LABELS[c.category] ?? c.category}
                 count={c.count}
                 checked={draft.cats.has(c.category)}
                 onToggle={() => toggleCat(c.category)}

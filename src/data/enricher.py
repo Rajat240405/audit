@@ -1,6 +1,13 @@
 """
 Optional metadata enrichment for Q&A records.
 
+Classification: LEGACY-REQUIRED component of the Phase-1 Lok Sabha
+acquisition pipeline (workspace cleanup, audit §4). Runs only inside
+src/data/ingestion_pipeline.py (its output, data/enriched/, wins over
+data/processed/ in the canonical registry's `parliament` source). Keep for
+Lok Sabha restaging runs; the canonical pipeline stamps metadata from the
+source registry instead.
+
 Design Decisions
 ----------------
 1. Enrichment is strictly optional — it enhances records but the system

@@ -1,15 +1,31 @@
 """
-Data Ingestion Pipeline for Parliamentary Q&A.
+Data Ingestion Pipeline for Parliamentary Q&A (Lok Sabha).
 
-Ties together: Scraping → Validation → Deduplication → Enrichment → Output.
+Classification: LEGACY-REQUIRED acquisition pathway (workspace cleanup,
+audit §4/§5). Do not extend; do not delete. This is the Phase-1 LOAD-SIDE
+pipeline for Lok Sabha Q&A only:
 
-Phase 1 Deliverable:
-- Clean, validated knowledge base at data/processed/
-- Comprehensive statistics report
-- Enrichment applied (optional metadata)
+    strategy=archive (RealArchiveScraper: validated LS dataset + official
+    sansad.in/DSpace documents)  ->  validate (validator.py)
+    ->  enrich (enricher.py)  ->  data/processed/ (+ data/enriched/)
 
-This pipeline is designed to be run as a standalone CLI tool
-and also importable as a Python module.
+Boundary with the canonical architecture (already modular — keep it):
+
+    * ACQUISITION + VALIDATION own this file; the canonical corpus never
+      calls into it.
+    * Its OUTPUT (data/processed, data/enriched) is pulled into the
+      canonical corpus by the registry's ``parliament`` records source
+      (`python -m src.scripts.ingest parliament` — ids preserved, enriched
+      wins on id conflicts). Re-run the present CLI only to RESTAGE Lok
+      Sabha output, never as an ingestion shortcut into the corpus.
+    * Rajya Sabha is a DIFFERENT path entirely (src/scraping/rs ->
+      parliamentary-qa/rajya-sabha staging -> `ingest rajya_sabha`).
+    * The ``live``/``auto``/``httpx``/``playwright`` strategies are dormant
+      (see LiveLoksabhaScraper — never used for any shipped corpus).
+
+Original Phase-1 description: ties together Scraping → Validation →
+Deduplication → Enrichment → Output; designed as a standalone CLI tool and
+importable module.
 """
 
 from __future__ import annotations

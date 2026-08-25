@@ -37,6 +37,7 @@ import json
 import random
 import re
 import time
+import warnings
 import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -175,9 +176,33 @@ class Scraper(ABC):
 
 class LiveLoksabhaScraper(Scraper):
     """
-    Crawls live Lok Sabha Q&A records directly from sansad.in.
-    Uses robust selector patterns and direct API polling if accessible.
+    DORMANT (workspace cleanup, audit §5): never used for any shipped
+    corpus. This pre-archive-era class crawls the live sansad.in Q&A list
+    pages with guessed CSS selectors; production acquisition moved to
+    :class:`RealArchiveScraper` (strategy=archive), and deduplicated
+    parliamentary crawling now belongs to the src/scraping architecture
+    (session-staged, fixture-replayable, manifest-audited). It is kept for
+    reference only — instantiating it emits a DeprecationWarning.
+
+    If a live Lok Sabha crawler is ever genuinely required, the concrete
+    recommendation (audit §5) is to model it on the RS crawler
+    (src/scraping/rs: client/normalize/pipeline/manifest with deterministic
+    replay fixtures), NOT to revive this selector-guessing class.
+
+    Original intent: crawl live Lok Sabha Q&A records directly from
+    sansad.in using selector fallbacks and API polling.
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        warnings.warn(
+            "LiveLoksabhaScraper is dormant (audit §5): it was never used "
+            "for any shipped corpus. Production Lok Sabha acquisition is "
+            "strategy=archive (RealArchiveScraper); future live crawling "
+            "should follow the src/scraping/rs architecture, not this class.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
 
     def scrape_all(self, max_records: int = 3500) -> Iterator[QARecord]:
         self.stats.started_at = datetime.utcnow()

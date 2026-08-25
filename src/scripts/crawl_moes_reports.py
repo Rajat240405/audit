@@ -1,6 +1,22 @@
 """
 Crawl MoES reports/documents from the public CCPS portal.
 
+Classification: LEGACY-REQUIRED (workspace cleanup, audit §4). Do not
+extend; do not delete — its staging layout is a registered ingestion source
+(``config/sources.yaml`` → ``moes_reports`` → ``moes_reports/knowledge``)
+and its knowledge JSONs may still be re-converted on the operator machine.
+
+Ownership boundary (one responsibility per path):
+  * moes.gov.in website content (annual/monthly reports, demands-for-grants,
+    press releases) is owned by the DEDICATED website crawler
+    (``src/scripts/crawl_moes_website.py`` → ``data/.moes-website/`` →
+    ``python -m src.scripts.ingest moes_website``);
+  * sync_sources.py no longer scans this portal either (its MoES leg is
+    retired — it raced this crawler for the same documents);
+  * THIS crawler remains the acquisition path only for the legacy CCPS
+    mirror tree (data/moes_reports/), until an explicit operator migration
+    supersedes it.
+
 Source: https://ccps.digifootprint.gov.in (WordPress REST API — public).
 This is a cleaned, structured port of the scientist's crawl_moes_reports.py:
 it walks the media + posts endpoints, collects PDF URLs, downloads the PDFs

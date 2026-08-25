@@ -15,8 +15,12 @@ scraper:
   max_pages: 350  # ~3500 Q&A pairs at ~10 per page
   questions_per_page: 10
 
-  # Strategy selection
-  strategy: "auto"  # "playwright", "httpx", "mock", "local"
+  # Strategy selection. NOTE (audit §5): this value is NOT read by the
+  # pipeline — the CLI --strategy option decides (default: "archive", the
+  # production path). "auto"/"httpx"/"playwright" are dormant aliases of
+  # "live" (LiveLoksabhaScraper — deprecated, never used for any shipped
+  # corpus). Options: archive | live | mock | local
+  strategy: "archive"
 
   # User agent
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

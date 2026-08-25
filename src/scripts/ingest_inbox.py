@@ -1,45 +1,59 @@
 """
-Manual ingest for INTERNAL / user-provided documents (sir's files, scientists'
-documents). These are NEVER auto-scraped — someone puts files into the inbox
-folder and triggers ingest.
+COMPAT SHIM — manual ingest for INTERNAL / user-provided documents.
 
-Workflow:
-    1. Scientist/sir copies files into  data/inbox/   (PDF, txt, json, jsonl)
-    2. Run this script (or click the UI "Ingest" button):
+Status: DEPRECATED compatibility wrapper (workspace cleanup, audit §4).
+This script is retained so historical muscle memory (`--check` / `--run`)
+keeps working, but ALL conversion/append/move semantics now delegate to the
+ONE canonical engine (`src/scripts/ingest_folder.py::ingest_folder`) — the
+same implementation behind `python -m src.scripts.ingest inbox` and the
+frontend /api/ingest. Previously this file carried a second, diverging copy
+of the detect→convert→dedup→append flow (own converter dispatch, own
+non-atomic corpus append, own processed-move); that duplication is gone.
+
+Canonical replacement (index-aware):
+    python -m src.scripts.ingest inbox        # same engine + optional
+                                              # incremental index update
+
+Workflow (unchanged contract):
+    1. Drop files into  data/inbox/  (PDF, txt, json, jsonl)
+    2. Run this script (or the UI "Ingest" button):
          python -m src.scripts.ingest_inbox --run
-    3. Anything new in inbox is converted (PDF -> text/OCR, QA jsonl ->
-       records, knowledge JSON -> records, document JSON -> records), appended
-       to the corpus (deduped), and the index is rebuilt.
-    4. Processed files move to  data/inbox/processed/  (so they aren't
-       re-ingested next time).
+    3. New files are converted by the engine (table-aware PDF extraction,
+       OCR fallback for scanned PDFs, QA/knowledge/document JSON and jsonl),
+       appended to the corpus with deterministic dedup, and ingested files
+       move to  data/inbox/processed/.
+    4. The index is NOT rebuilt here (same as the historical script) — the
+       message at the end points at the canonical index-aware command.
 
 Modes:
     --check : list what's pending in the inbox (no changes)
     --run   : ingest everything pending
 
-Supported files in the inbox (auto-detected by extension + content):
-    *.pdf             -> text extract, OCR fallback if scanned
-    *.txt / *.md      -> document record
-    *.jsonl           -> QA pairs {Question,Answer} or QARecord lines
-    *.json            -> {title,content} document OR knowledge_extraction JSON
-                         OR {Question,Answer} array
+Behavioral note vs. the historical implementation: processed-move now
+follows CANONICAL engine semantics exactly (converted PDF/TXT/MD move to
+processed/; JSON/JSONL inputs are not moved — matching `ingest inbox` and
+the UI). Everything else (what counts as ingestible, dedup, ids) is by
+definition identical, because there is only one implementation.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 
-from src.utils.app_paths import inbox_dir, corpus_path, data_dir
+from src.utils.app_paths import data_dir, inbox_dir
 
 INBOX = inbox_dir()
 PROCESSED = INBOX / "processed"
-CORPUS = corpus_path()
 LOG = data_dir() / "sync.log"
+
+_DEPRECATION = (
+    "src.scripts.ingest_inbox is deprecated (compat shim). Use "
+    "`python -m src.scripts.ingest inbox` — same engine, plus the index update."
+)
 
 
 def log(msg: str) -> None:
@@ -54,46 +68,6 @@ def pending_files() -> list[Path]:
     if not INBOX.exists():
         return []
     return [p for p in sorted(INBOX.iterdir()) if p.is_file()]
-
-
-def convert_one(path: Path, out: list, seen: set[str]) -> int:
-    """Convert one inbox file by delegating to convert_sirs_knowledge's
-    shared converters — NO inline re-implementation (this was the source of
-    the non-deterministic hash() ids). All records get deterministic ids +
-    ministry=EARTH SCIENCES from _make_record."""
-    from src.scripts.convert_sirs_knowledge import (
-        convert_qa_dataset,
-        convert_knowledge_json,
-        convert_document_json,
-        convert_text_file,
-        convert_pdf_file,
-    )
-
-    import json as _json
-
-    if path.suffix.lower() in (".jsonl", ".json"):
-        try:
-            data = _json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-        except Exception:  # noqa: BLE001 — jsonl won't parse as a whole
-            data = None
-        if isinstance(data, list) or path.suffix.lower() == ".jsonl":
-            # QA array or jsonl of QA pairs (convert_qa_dataset handles both)
-            return convert_qa_dataset(path, out, seen)
-        if isinstance(data, dict):
-            if "knowledge_extraction" in data:
-                return convert_knowledge_json(path, out, seen)
-            if data.get("content") or data.get("title"):
-                return convert_document_json(path, out, seen)
-            # dict-shaped QA wrapper {questions: [...]}
-            if any(k in data for k in ("data", "qa", "questions")):
-                return convert_qa_dataset(path, out, seen)
-        return 0
-
-    if path.suffix.lower() in (".txt", ".md"):
-        return convert_text_file(path, out, seen)
-    if path.suffix.lower() == ".pdf":
-        return convert_pdf_file(path, out, seen)
-    return 0
 
 
 def main() -> None:
@@ -114,62 +88,22 @@ def main() -> None:
             log(f"  {p.name} ({p.stat().st_size//1024} KB)")
         return
 
-    # --run
-    log(f"=== ingest_inbox --run ({len(files)} files) ===")
-    out: list[dict] = []
-    seen: set[str] = set()
+    # --run — delegate to the canonical engine (single implementation).
+    warnings.warn(_DEPRECATION, DeprecationWarning, stacklevel=1)
+    print(f"  [deprecated] {_DEPRECATION}", file=sys.stderr)
+    log(f"=== ingest_inbox --run ({len(files)} files) — delegating to the "
+        "canonical engine (ingest_folder) ===")
 
-    # seed 'seen' with existing corpus ids so we don't duplicate
-    if CORPUS.exists():
-        for line in open(CORPUS, encoding="utf-8"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                if rec.get("question_id"):
-                    seen.add(rec["question_id"])
-            except Exception:  # noqa: BLE001
-                continue
+    from src.scripts import ingest_folder as _engine
 
-    new_ids: set[str] = set()
-    ok = fail = 0
-    for p in files:
-        try:
-            n = convert_one(p, out, seen)
-            if n > 0:
-                ok += 1
-                new_ids.add(p.name)
-                log(f"  ingested {p.name} (+{n} record(s))")
-            else:
-                fail += 1
-                log(f"  WARN {p.name}: no records extracted")
-        except Exception as e:  # noqa: BLE001
-            fail += 1
-            log(f"  ERROR {p.name}: {e}")
+    res = _engine.ingest_folder(str(INBOX), move_processed=True)
 
-    if out:
-        CORPUS.parent.mkdir(parents=True, exist_ok=True)
-        with CORPUS.open("a", encoding="utf-8") as f:
-            for rec in out:
-                # convert QARecord objects to plain dicts for JSONL
-                if hasattr(rec, "model_dump_json"):
-                    f.write(rec.model_dump_json() + "\n")
-                elif hasattr(rec, "model_dump"):
-                    f.write(json.dumps(rec.model_dump(mode="json"), ensure_ascii=False) + "\n")
-                else:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        log(f"Appended {len(out)} record(s) -> {CORPUS}")
-
-    # move successfully ingested files to processed/
-    PROCESSED.mkdir(parents=True, exist_ok=True)
-    for p in files:
-        if p.name in new_ids:
-            shutil.move(str(p), str(PROCESSED / p.name))
-
-    log(f"=== inbox done: {ok} ok, {fail} failed, {len(out)} records added ===")
-    log("NEXT: rebuild the index (server stopped): "
-        "retrieve build --data data/corpus_reports.jsonl --rebuild")
+    log(f"=== inbox done: {res.get('files', 0)} file(s) processed, "
+        f"{res.get('added', 0)} record(s) added, {res.get('failed', 0)} failed ===")
+    if res.get("added"):
+        log("NEXT (index not touched by this shim): "
+            "python -m src.scripts.ingest inbox   # incremental index update, "
+            "or use the UI Ingest button")
 
 
 if __name__ == "__main__":

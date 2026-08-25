@@ -255,3 +255,4 @@ slurm-*.err
 *.out
 *.err
 *.sh
+data/.moes-website/

@@ -222,7 +222,9 @@ export interface SourceMinistry {
 export interface SourceCatalogue {
   tree: Record<string, SourceMinistry>;
   types: Array<{ type: string; count: number }>;
-  categories: Array<{ category: string; count: number }>;
+  // label is config-driven (sources.yaml `presentation.categories`); older
+  // backends omit it — fall back to CATEGORY_LABELS/slug (see SourceFilter).
+  categories: Array<{ category: string; count: number; label?: string }>;
   total: number;
 }
 

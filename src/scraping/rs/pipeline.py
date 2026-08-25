@@ -21,16 +21,18 @@ eParlib back-fill stub and never abort anything.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from src.scraping import records as rec_utils
+from src.scraping.formats import DocFacts, SlotResult
+from src.scraping.http import CrawlHttpClient, HttpApiError, HttpTransportError
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
 from src.scraping.rs.client import RsClient
 from src.scraping.rs.documents import plan_slots, process_slot
 from src.scraping.rs.normalize import build_record, sort_key, utcnow_iso
-from src.scraping.http import CrawlHttpClient, HttpApiError, HttpTransportError
 from src.utils.atomic_io import write_bytes_atomic
 
 CRAWLER_VERSION = "rs-1.0"
@@ -106,6 +108,36 @@ def _extract_answer_fallback(pdf_body: bytes) -> str | None:
     return (text or "").strip() or None
 
 
+def apply_answer_fallback(
+    meta: dict[str, Any], rec: dict[str, Any], facts: DocFacts,
+    body: bytes | None, fallback_wanted: bool,
+) -> None:
+    """inline-first → PDF-extract fallback (REC-P1), ONE implementation shared
+    by the crawl (in-session slot processing) and the eParlib backfill
+    (audit §7) so both paths stamp identical answer_source/cause values.
+
+    Call only for an ENGLISH slot whose doc_class is good|partial on a record
+    with no usable inline answer; the function mirrors the exact branch
+    ladder: extract-disabled > legacy-format-not-extracted > extract (fill
+    answer_text) > extract-failed.
+    """
+    if not fallback_wanted:
+        meta["answer_source"] = "unavailable"
+        meta["answer_unavailable_cause"] = "extract-disabled"
+    elif facts.format != "pdf":
+        meta["answer_source"] = "unavailable"
+        meta["answer_unavailable_cause"] = "legacy-format-not-extracted"
+    else:
+        text = _extract_answer_fallback(body) if body else None
+        if text:
+            rec["answer_text"] = text
+            meta["answer_source"] = "document-extract"
+            meta.pop("answer_unavailable_cause", None)
+        else:
+            meta["answer_source"] = "unavailable"
+            meta["answer_unavailable_cause"] = "extract-failed"
+
+
 def _prior_failed_entry(old_manifest: dict[str, Any] | None, rid: str, lang: str) -> dict | None:
     if not old_manifest:
         return None
@@ -115,10 +147,14 @@ def _prior_failed_entry(old_manifest: dict[str, Any] | None, rid: str, lang: str
     return None
 
 
-def _failed_slot_entry(rid: str, slot_result, url: str | None) -> dict[str, Any]:
+def _failed_slot_entry(rid: str, slot_result, url: str | None,
+                       qslno: int | None = None) -> dict[str, Any]:
     facts = slot_result.facts
     return {
         "id": rid,
+        "qslno": qslno,                        # backfill key (audit §7): lets the
+                                               # eParlib tool re-fetch the upstream
+                                               # row without re-walking records[]
         "lang": slot_result.lang,
         "class": facts.doc_class,           # broken | missing
         "http": facts.http_status,
@@ -126,6 +162,52 @@ def _failed_slot_entry(rid: str, slot_result, url: str | None) -> dict[str, Any]
         "url": url,
         "alternate": {"source": EPARLIB_BASE, "url": None, "status": "pending"},
     }
+
+
+def _prior_recovered_document(
+    old_manifest: dict[str, Any] | None, session_dir: Path, key: str
+) -> dict[str, Any] | None:
+    """Backfill-produced document entry for ``key`` that still verifies on disk.
+
+    Returns the manifest ``documents[]`` entry to carry forward when the
+    official slot re-fails (audit §7 carry-forward), or None. Requirements:
+    the entry bears the eParlib ``backfill`` marker, its file exists under
+    the session dir, and its sha-256 matches. Ordinary good-slot entries are
+    deliberately NOT carried — a healthy slot breaking is a real upstream
+    state change and must stay visible via ``failed_slots``.
+    """
+    if not old_manifest:
+        return None
+    for entry in old_manifest.get("documents") or []:
+        if entry.get("key") != key:
+            continue
+        if (entry.get("backfill") or {}).get("source") != "eparlib":
+            return None
+        rel = entry.get("path")
+        sha = entry.get("sha256")
+        if not rel or not sha:
+            return None
+        try:
+            on_disk = hashlib.sha256((session_dir / rel).read_bytes()).hexdigest()
+        except OSError:
+            return None
+        return entry if on_disk == sha else None
+    return None
+
+
+def _facts_from_manifest_entry(entry: dict[str, Any]) -> DocFacts:
+    """Reconstruct DocFacts for a carried-forward backfill entry (audit §7)
+    so downstream summary/fallback logic sees the recovered slot exactly as
+    a fresh good download."""
+    return DocFacts(
+        doc_class=entry.get("class", "good"),
+        format=entry.get("format", "unknown"),
+        http_status=entry.get("http"),
+        bytes=int(entry.get("bytes") or 0),
+        sha256=entry.get("sha256"),
+        pages=entry.get("pages"),
+        text_chars=entry.get("text_chars"),
+    )
 
 
 def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
@@ -191,6 +273,24 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
 
                 result, body, written = process_slot(ctx.http, slot, session_dir, qslno)
                 facts = result.facts
+                backfilled: dict[str, Any] | None = None
+                if facts.doc_class in ("broken", "missing"):
+                    backfilled = _prior_recovered_document(
+                        old_manifest, session_dir, result.key)
+                    if backfilled is not None:
+                        # Backfill carry-forward (audit §7): the official URL
+                        # (still) fails, but the eParlib-recovered copy staged
+                        # for this exact key verifies on disk (sha-256 match)
+                        # — keep it instead of demoting the slot back into
+                        # failed_slots. Activates ONLY for documents bearing
+                        # the backfill marker: zero effect on a crawl that
+                        # never had a backfill.
+                        body = (session_dir / backfilled["path"]).read_bytes()
+                        facts = _facts_from_manifest_entry(backfilled)
+                        result = SlotResult(key=result.key, lang=result.lang,
+                                            url=result.url, facts=facts,
+                                            path=backfilled.get("path"))
+                        written = False
                 report.docs[facts.doc_class] += 1
                 if written:
                     report.doc_files_written += 1
@@ -203,7 +303,11 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
                 meta["documents"][slot.lang] = doc_summary
 
                 if facts.doc_class in ("broken", "missing"):
-                    failed_slots.append(_failed_slot_entry(rid, result, slot.url))
+                    failed_slots.append(_failed_slot_entry(rid, result, slot.url, qslno))
+                elif backfilled is not None:
+                    # reuse the backfill-written manifest entry verbatim —
+                    # the next no-change crawl stays byte-stable
+                    doc_manifest.append(backfilled)
                 else:
                     doc_manifest.append({"key": result.key, "id": rid, "path": result.path,
                                          **facts.as_manifest()})
@@ -214,20 +318,7 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
                     and slot.lang == "eng"
                     and facts.doc_class in ("good", "partial")
                 ):
-                    if not fallback_wanted:
-                        meta["answer_source"] = "unavailable"
-                        meta["answer_unavailable_cause"] = "extract-disabled"
-                    elif facts.format != "pdf":
-                        meta["answer_source"] = "unavailable"
-                        meta["answer_unavailable_cause"] = "legacy-format-not-extracted"
-                    else:
-                        text = _extract_answer_fallback(body) if body else None
-                        if text:
-                            rec["answer_text"] = text
-                            meta["answer_source"] = "document-extract"
-                        else:
-                            meta["answer_source"] = "unavailable"
-                            meta["answer_unavailable_cause"] = "extract-failed"
+                    apply_answer_fallback(meta, rec, facts, body, fallback_wanted)
         elif not rec["answer_text"]:
             meta["answer_source"] = "unavailable"
             meta["answer_unavailable_cause"] = "documents-disabled"

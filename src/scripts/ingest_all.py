@@ -2,10 +2,27 @@
 One-command ingestion: convert ALL of sir's knowledge formats + public
 INCOIS reports + parliamentary corpus -> ONE merged JSONL -> (optional) index.
 
-This is the "make everything ingest-ready" entry point. It reuses the
-per-format converters from convert_sirs_knowledge.py and the crawl scripts,
-then merges with the existing parliamentary processed/ corpus, dedupes, and
-optionally rebuilds the Hybrid RAG index.
+Classification: OPERATOR TOOL — explicit bulk corpus writer
+(workspace cleanup, audit §4). This is the "make everything ingest-ready"
+batch conversion entry point for machine migrations and deliberate corpus
+(re)builds. It is NOT the day-to-day ingestion path — that is
+`python -m src.scripts.ingest` (config-driven registry, incremental,
+append-only canonical corpus). The two coexist with a hard boundary:
+
+  * ingest_all WRITES the path given by --out (full overwrite semantics by
+    design — that is what an operator bulk rebuild means);
+  * the canonical CLI/engine APPEND to data/corpus_reports.jsonl and never
+    rewrite foreign records;
+  * sync_sources.py uses ingest_all with a SCRATCH --out + a safe id-union
+    merge (Phase-3 F.1 fix): even there the canonical corpus is never
+    rewritten in place;
+  * pointing --out directly AT the canonical corpus stays possible as
+    explicit operator replacement intent, and now prints a loud warning
+    naming exactly what is about to be replaced.
+
+It reuses the per-format converters from convert_sirs_knowledge.py and the
+crawl scripts, then merges with the existing parliamentary processed/
+corpus, dedupes, and optionally rebuilds the Hybrid RAG index.
 
 Usage (run on the local dev PC that has the data / internet):
     # Convert everything from sir's machine + public reports:
@@ -180,6 +197,25 @@ def main() -> None:
         sys.exit(1)
 
     out_path = Path(args.out)
+    # Explicit-replacement warning (workspace cleanup, audit §4): pointing
+    # this OPERATOR TOOL at the canonical corpus is lawful only as
+    # deliberate rebuild intent. sync_sources never does this (scratch+merge).
+    try:
+        from src.utils.app_paths import corpus_path
+
+        canonical = corpus_path()
+        if out_path.resolve() == canonical.resolve():
+            print("=" * 72)
+            print("WARNING: --out IS THE CANONICAL CORPUS "
+                  f"({canonical}).\nThis file will be REWRITTEN from the "
+                  "converted sources above only — every record not produced "
+                  "by THIS run (parliament merges, inbox uploads, "
+                  "hierarchical trees, RS staging) will be REPLACED.\nIf you "
+                  "wanted day-to-day incremental ingestion, press Ctrl-C and "
+                  "use: python -m src.scripts.ingest all")
+            print("=" * 72)
+    except Exception:  # noqa: BLE001 — the warning must never break the tool
+        pass
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for rec in out:

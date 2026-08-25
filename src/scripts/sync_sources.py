@@ -1,12 +1,41 @@
 """
-Unified SOURCE SYNC for public reports — weekly auto, manual, or check-only.
+INCOIS SOURCE SYNC for public reports — weekly auto, manual, or check-only.
+
+Classification: OPERATOR TOOL — thin orchestration over canonical
+components (workspace cleanup, audit §6). This module does NOT convert or
+ingest anything itself; each step delegates to the one implementation that
+owns that responsibility:
+
+  scan      -> SECTIONS/discover from crawl_incois_reports (single copy of
+               the INCOIS page/pattern config)
+  download  -> shared >10KB idiom; manifest {url: sha256} novelty ledger
+  OCR       -> src.scripts.ocr_pdfs (scanned annual reports)
+  convert   -> ingest_all writes a SCRATCH corpus (never the canonical file)
+  merge     -> merge_scratch_into_corpus — id-union, non-shrink invariant,
+               atomic write (Phase-3 F.1 safety; foreign records preserved)
+  index     -> src.retrieval.cli build (when the server is not holding the
+               live index)
+
+Scope change (audit §6 — the MoES leg is RETIRED): this tool used to also
+scan the MoES CCPS WordPress APIs (MOES_MEDIA/MOES_POSTS) and download
+MoES PDFs into data/moes_reports/. That responsibility is now owned
+cleanly elsewhere and the racing duplicate is removed:
+  * moes.gov.in website content -> dedicated website crawler
+    (src/scripts/crawl_moes_website.py -> data/.moes-website/ ->
+    `python -m src.scripts.ingest moes_website`);
+  * legacy CCPS knowledge mirror -> crawl_moes_reports.py ->
+    `python -m src.scripts.ingest moes_reports` (runs on demand, not here).
 
 Modes:
-  --weekly  : full sync (scan -> download new -> OCR -> convert -> ingest ->
+  --weekly  : full sync (scan -> download new -> OCR -> convert -> merge ->
               rebuild index -> log). Intended for a cron job (HPC, Sat/Sun).
   --manual  : same as weekly, run on demand (don't wait for the schedule).
   --check   : ONLY scan public sources and report what's NEW (no download,
               no ingest). Lets you see "3 new documents arrived" anytime.
+  --sections : comma subset of the INCOIS sections
+              (annual,general,tech,research); default = all four.
+              (Accepted since the pre-cleanup era; now actually filters —
+              it was previously parsed but ignored.)
 
 How it knows what's new: a manifest file (data/sync_manifest.json) stores
 {url: sha256} for every PDF already downloaded. Anything on the source page
@@ -53,10 +82,17 @@ from src.models.qa_record import QARecord
 from src.utils.atomic_io import write_text_atomic
 
 
-def discover_incois() -> dict[str, str]:
-    """{url: label} for every INCOIS report section (thin wrapper)."""
+def discover_incois(sections: list[str] | None = None) -> dict[str, str]:
+    """{url: section} for the INCOIS report sections (thin wrapper).
+
+    ``sections`` (additive, audit §6) restricts the scan to the named
+    sections; default scans all four.
+    """
     found: dict[str, str] = {}
-    for sec in SECTIONS:
+    for sec in (sections or list(SECTIONS)):
+        if sec not in SECTIONS:
+            log(f"  [warn] unknown section '{sec}' — skipped")
+            continue
         try:
             for url in _crawl_discover(sec):
                 found[url] = sec
@@ -64,13 +100,10 @@ def discover_incois() -> dict[str, str]:
             log(f"  [warn] section {sec}: {e}")
     return found
 
-MOES_MEDIA = "https://ccps.digifootprint.gov.in/wp-json/wp/v2/media"
-MOES_POSTS = "https://ccps.digifootprint.gov.in/wp-json/wp/v2/posts"
 
 MANIFEST = Path("data/sync_manifest.json")
 LOG = Path("data/sync.log")
 DOWNLOAD_DIR = Path("data/incois_reports")
-MOES_DIR = Path("data/moes_reports")
 OCR_DIR = Path("data/scanned_ocr")
 CORPUS = Path("data/corpus_reports.jsonl")
 INBOX = Path("data/inbox")
@@ -106,42 +139,13 @@ def save_manifest(mf: dict) -> None:
     MANIFEST.write_text(json.dumps(mf, indent=1), encoding="utf-8")
 
 
-def discover_moes() -> dict[str, str]:
-    """{url: 'moes'} from CCPS media + posts APIs."""
-    import re
-    import ssl
+def new_pdfs(manifest: dict, sections: list[str] | None = None) -> dict[str, str]:
+    """URLs on the INCOIS section pages that are not yet in the manifest.
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    found: dict[str, str] = {}
-    with httpx.Client(timeout=20, verify=ctx) as c:
-        for api in (MOES_MEDIA, MOES_POSTS):
-            for page in range(1, 16):
-                try:
-                    r = c.get(f"{api}?per_page=100&page={page}")
-                    if r.status_code != 200:
-                        break
-                    items = r.json()
-                    if not items:
-                        break
-                    for it in items:
-                        src = it.get("source_url") or ""
-                        if src.lower().endswith(".pdf"):
-                            found[src] = "moes"
-                        content = (it.get("content") or {}).get("rendered", "")
-                        for m in re.finditer(r'href=["\']([^"\']+\.pdf)["\']', content, re.I):
-                            found[m.group(1)] = "moes"
-                except Exception:  # noqa: BLE001
-                    break
-    return found
-
-
-def new_pdfs(manifest: dict) -> dict[str, str]:
-    """URLs in sources that are not yet in the manifest."""
-    urls = {}
-    urls.update(discover_incois())
-    urls.update(discover_moes())
+    MoES coverage was retired (audit §6): the dedicated website crawler and
+    the legacy CCPS crawler own MoES — sync no longer races them.
+    """
+    urls = discover_incois(sections)
     return {u: s for u, s in urls.items() if u not in manifest}
 
 
@@ -282,14 +286,20 @@ def main() -> None:
     group.add_argument("--manual", action="store_true", help="Full sync now")
     group.add_argument("--check", action="store_true", help="Only report what's new")
     ap.add_argument("--sections", default=None,
-                    help="Restrict sync to comma list (annual,general,tech,research,moes)")
+                    help="Restrict sync to comma list of INCOIS sections "
+                         "(annual,general,tech,research). Default: all four. "
+                         "MoES is intentionally out of scope (dedicated "
+                         "crawlers own it — see module docstring).")
     args = ap.parse_args()
+
+    sections = ([s.strip().lower() for s in args.sections.split(",") if s.strip()]
+                if args.sections else None)
 
     log(f"=== sync_sources ({'weekly' if args.weekly else 'manual' if args.manual else 'check'}) ===")
     t0 = time.time()
 
     mf = load_manifest()
-    new = new_pdfs(mf)
+    new = new_pdfs(mf, sections)
     log(f"Source scan complete. {len(new)} NEW document(s) found.")
 
     if args.check:
@@ -308,7 +318,13 @@ def main() -> None:
     for url, sec in sorted(new.items()):
         fname = url.split("/")[-1].split("?")[0]
         fname = re.sub(r'[<>:"/\\|?*]', "_", fname)  # Windows-safe
-        dest = (DOWNLOAD_DIR / sec if sec != "moes" else MOES_DIR) / fname
+        # Download into the section's LABEL dir (AnnualReports/Others/...) —
+        # the exact folders the convert leg below hands to ingest_all, and
+        # the same layout crawl_incois_reports itself writes. (Pre-cleanup
+        # this line used the section KEY ('annual', ...) as the directory,
+        # which the convert leg never read — sync downloads were invisible
+        # to ingestion. Latent bug fixed during audit §6 consolidation.)
+        dest = DOWNLOAD_DIR / SECTIONS[sec]["label"] / fname
         if download(url, dest):
             mf[url] = sha256_file(dest)
             downloaded += 1
@@ -336,7 +352,6 @@ def main() -> None:
         "--reports", str(DOWNLOAD_DIR / "Others"),
         "--reports", str(DOWNLOAD_DIR / "TechnicalReports"),
         "--reports", str(DOWNLOAD_DIR / "ResearchPublications"),
-        "--documents", str(MOES_DIR / "knowledge"),
         "--scanned", str(OCR_DIR),
         "--parliament", "data/does_not_exist",
         "--out", str(scratch))

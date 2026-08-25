@@ -1,6 +1,12 @@
 """
 Data Validator for Parliamentary Q&A records.
 
+Classification: LEGACY-REQUIRED component of the Phase-1 Lok Sabha
+acquisition pipeline (workspace cleanup, audit §4). Runs only inside
+src/data/ingestion_pipeline.py; the canonical corpus pipeline
+(src/scripts/ingest*.py) validates at QARecord load time instead. Keep for
+Lok Sabha restaging runs; not a general ingestion gate.
+
 Design Decisions
 ----------------
 1. We use Pydantic's native validation — fast, type-safe, declarative.
