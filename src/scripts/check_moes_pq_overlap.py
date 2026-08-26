@@ -649,6 +649,72 @@ def render_report(
     return "\n".join(lines) + "\n"
 
 
+def recommended_thresholds(scores: list[float]) -> dict[str, float]:
+    """Data-derived near/related thresholds from a descending best-containment
+    distribution. Deterministic heuristic:
+
+    * near_identical_threshold — midpoint of the LARGEST gap whose upper score
+      is in the "high" region (>= 0.60). This separates a tight high cluster of
+      true duplicates (near-identical) from the next cluster down. Falls back
+      to 0.90 when no high-region gap exists.
+    * related_threshold — midpoint of the LARGEST gap below the near cut
+      (separates potentially-corresponding from unique); falls back to 0.50.
+
+    Falls back to the provisional defaults when there are too few scores to
+    draw a gap (n < 3). Always returns near >= related."""
+    sorted_scores = sorted((s for s in scores if s is not None), reverse=True)
+    if len(sorted_scores) < 3:
+        return {"near_identical_threshold": 0.90, "related_threshold": 0.50}
+    def _clamp(v: float) -> float:
+        return max(0.01, min(1.0, round(v, 3)))
+
+    gaps = [
+        (sorted_scores[i] - sorted_scores[i + 1], sorted_scores[i], sorted_scores[i + 1])
+        for i in range(len(sorted_scores) - 1)
+    ]
+    if not gaps:
+        return {"near_identical_threshold": 0.90, "related_threshold": 0.50}
+
+    # near separates the tight TOP cluster (true duplicates) from the next
+    # cluster down: use the gap whose UPPER score is the highest.
+    top_gap = max(gaps, key=lambda g: g[1])
+    _, near_above, near_below = top_gap
+    near = _clamp((near_above + near_below) / 2)
+
+    # related separates the mid "corresponding" cluster from the unique tail:
+    # largest remaining gap below the near cut.
+    lower = [g for g in gaps if g != top_gap and g[2] <= near_below]
+    if lower:
+        _, rel_above, rel_below = max(lower, key=lambda g: g[0])
+        related = _clamp((rel_above + rel_below) / 2)
+    else:
+        related = 0.50
+    related = min(related, near)
+    return {"near_identical_threshold": near, "related_threshold": related}
+
+
+def write_calibrated_thresholds(path: Path, scores: list[float]) -> str:
+    """Write a YAML thresholds file (config/moes_pq_dedup.yaml shape) derived
+    from a calibration score distribution. Returns the YAML text written."""
+    import yaml
+
+    th = recommended_thresholds(scores)
+    data = {
+        "near_identical_threshold": th["near_identical_threshold"],
+        "related_threshold": th["related_threshold"],
+    }
+    text = (
+        "# MoES \u2194 Parliamentary Q&A cross-source dedup thresholds "
+        "(calibrated via\n"
+        "# check_moes_pq_overlap --calibrate --write-calibrated-thresholds).\n"
+        "# near_identical: EXACT_SHA + TEXTUALLY_NEAR_IDENTICAL are excluded at\n"
+        "# ingestion; related/unique/uncertain are preserved.\n"
+        + yaml.safe_dump(data, sort_keys=False)
+    )
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
 def render_calibration(stats: dict[str, Any]) -> str:
     scores = sorted((s for _, s in stats["record_scores"]), reverse=True)
     lines = ["CALIBRATION — per-record best containment scores (descending)", ""]
@@ -712,6 +778,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="print score distribution + gap suggestions; no classification/report",
     )
     p.add_argument(
+        "--write-calibrated-thresholds", default=None, metavar="PATH",
+        help="with --calibrate: write recommended near/related thresholds as YAML "
+             "(e.g. config/moes_pq_dedup.yaml) instead of/alongside the text",
+    )
+    p.add_argument(
         "--output", default=None,
         help="markdown report path (default: moes_pq_overlap_report.md in CWD; "
              "never inside a corpus root)",
@@ -764,6 +835,22 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.calibrate:
+        scores = [s for _, s in stats["record_scores"]]
+        if args.write_calibrated_thresholds:
+            dest = Path(args.write_calibrated_thresholds).expanduser().resolve()
+            for root in (moes_root, parl_root):
+                try:
+                    dest.relative_to(root)
+                except ValueError:
+                    continue
+                print(
+                    f"exit 2: --write-calibrated-thresholds must not be inside a corpus "
+                    f"root: {dest}",
+                    file=sys.stderr,
+                )
+                return 2
+            write_calibrated_thresholds(dest, scores)
+            print(f"(thresholds written: {dest})")
         print(render_calibration(stats), end="")
         print(DONE_LINE)
         return 0

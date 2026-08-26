@@ -4,21 +4,16 @@ The frozen ``src/scraping/config.py`` is Rajya-Sabha-specific (HOUSE/ministry
 shape); MoES gets its own loader here. Guards enshrined from the approved
 boundary review:
 
-- ONLY the v1 categories may appear under ``categories:`` — any other key
-  fails closed at load time (exit 2 path).
-- ``central-documents`` walks ONLY through ``central_documents.scopes``
-  (currently the single approved ``annual-reports`` family). The legacy
-  ``central_documents.enabled`` switch is gone: any ``enabled: true`` STILL
-  fails closed (a stale v1 config can never silently widen scope).
+- ONLY the v2 categories may appear under ``categories:`` — any other key
+  fails closed at load time (exit 2 path). v2 crawls exactly two listing
+  scopes: ``reports`` (three approved families) and ``press-release`` (the
+  whole category).
 - Reports families must be a non-empty mapping of family → match patterns;
   a family resolving to zero live taxonomy terms fails closed at run time
-  (see ``normalize.resolve_family_terms``). Central scopes resolve against
-  the live tree too (``normalize.resolve_central_family_terms``) but
-  TOLERATE zero/absent child terms: live probing (2026-08-25) found the
-  upstream taxonomy tree has NO central-documents node at all (the listing
-  category exists without one — Annual Reports surface only as
-  central_documents attachments), so per-record content evidence is the
-  arbiter and stays fail-closed.
+  (see ``normalize.resolve_family_terms``).
+- ``central_documents`` (underscore) is NOT a category: it is the backend's
+  internal attachment post_type and never appears under ``categories:``. It
+  exists only in the attachment-resolution path (client/documents).
 """
 
 from __future__ import annotations
@@ -32,9 +27,9 @@ from src.utils import app_paths
 
 DEFAULT_CONFIG = app_paths.config_path("crawlers", "moes_website.yaml")
 
-#: the only categories implemented in v1 (CLI choices + config allowlist);
-#: central-documents is scoped EXCLUSIVELY through central_documents.scopes
-V1_CATEGORIES = ("reports", "press-release", "central-documents")
+#: the only listing categories implemented in v2 (CLI choices + config
+#: allowlist). `central_documents` (attachment post_type) is not a category.
+V1_CATEGORIES = ("reports", "press-release")
 
 
 class MoesConfigError(ValueError):
@@ -54,38 +49,16 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
 
 
 def validate_config(cfg: dict[str, Any]) -> None:
-    central = cfg.get("central_documents") or {}
-    if central.get("enabled"):
-        raise MoesConfigError(
-            "central_documents.enabled is NOT a valid switch for the "
-            "fail-closed central-documents scope: scope is declared via "
-            "central_documents.scopes only — the legacy v1 blanket switch "
-            "stays invalid so a stale config can never silently widen scope"
-        )
-    scopes = central.get("scopes") or {}
-    if "central-documents" in (cfg.get("categories") or {}) and (
-            not isinstance(scopes, dict) or not scopes):
-        raise MoesConfigError(
-            "central-documents requires central_documents.scopes — a "
-            "non-empty mapping of family → {covers: [name patterns]} "
-            "(the category alone never widens scope)"
-        )
-    for fam, fcfg in scopes.items():
-        covers = (fcfg or {}).get("covers")
-        if not isinstance(covers, list) or not [c for c in covers if str(c).strip()]:
-            raise MoesConfigError(
-                f"central_documents.scopes.{fam}.covers must be a non-empty list"
-            )
-
     categories = cfg.get("categories")
     if not isinstance(categories, dict) or not categories:
         raise MoesConfigError("config must define a non-empty 'categories' mapping")
     unknown = sorted(set(categories) - set(V1_CATEGORIES))
     if unknown:
         raise MoesConfigError(
-            f"category(ies) outside the approved v1 scope {V1_CATEGORIES}: {unknown} "
+            f"category(ies) outside the approved v2 scope {V1_CATEGORIES}: {unknown} "
             f"(fail-closed — guidelines/orders-and-notices/publications/acts-and-policy/"
-            f"gazette-notifications/central-documents are all out of scope)"
+            f"gazette-notifications are all out of scope; `central_documents` is an "
+            f"attachment post_type, not a category)"
         )
     reports = categories.get("reports")
     if reports is not None:

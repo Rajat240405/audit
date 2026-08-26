@@ -39,9 +39,6 @@ from src.generation.vllm_discovery import (
     refresh_vllm_discovery,
     resolve_served_family,
 )
-from src.retrieval.graph.retriever import GraphRetriever
-from src.retrieval.graph.store import GraphStore
-from src.retrieval.hybrid.pipeline import HybridRAGPipeline
 from src.utils.app_paths import (
     corpus_path,
     data_dir,
@@ -347,6 +344,8 @@ class _LazyPipeline:
 
     @staticmethod
     def _build():
+        from src.retrieval.hybrid.pipeline import HybridRAGPipeline  # lazy: heavy
+
         p = HybridRAGPipeline()
         index_dir = resolve_index_dir()
         if index_dir.exists():
@@ -367,16 +366,41 @@ class _LazyPipeline:
         return getattr(self._get(), name)
 
 
+class _LazyGraph:
+    """Loads GraphStore/GraphRetriever on first use.
+
+    Defers importing networkx and reading/loading the graph file until the
+    first GraphRAG retrieval, so startup (even with APP_MODE=serve) never
+    touches the graph stack. Forwards all access to the built retriever."""
+
+    def __init__(self) -> None:
+        self._retriever = None
+        self._lock = _threading.Lock()
+
+    def _get(self):
+        if self._retriever is None:
+            with self._lock:
+                if self._retriever is None:
+                    from src.retrieval.graph.retriever import GraphRetriever  # lazy: networkx
+                    from src.retrieval.graph.store import GraphStore  # lazy: networkx
+
+                    store = GraphStore(storage_dir=str(graph_dir))
+                    if store.graph_file.exists():
+                        store.load()
+                    self._retriever = GraphRetriever(store=store)
+        return self._retriever
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
 index_dir = resolve_index_dir()
 graph_dir = resolve_graph_dir()
 
 # Lazy: server binds port immediately; model+index load on first query.
 pipeline = _LazyPipeline()
 
-graph_store = GraphStore(storage_dir=str(graph_dir))
-if graph_store.graph_file.exists():
-    graph_store.load()
-graph_retriever = GraphRetriever(store=graph_store)
+graph_retriever = _LazyGraph()
 
 # Resolve default starting configuration dynamically from registry. When the
 # env selects a non-Ollama provider (HPC: APP_DEFAULT_PROVIDER=vllm), the

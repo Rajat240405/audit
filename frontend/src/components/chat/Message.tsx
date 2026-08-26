@@ -59,7 +59,20 @@ export function Message({ message }: { message: ChatMessage }) {
       >
         {message.content ? (
           <div className="md-body text-sm text-foreground/90">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // Keep wide tables from overflowing the message card: wrap each
+                // table in its own horizontally-scrollable container.
+                table: ({ children }) => (
+                  <div className="overflow-x-auto">
+                    <table>{children}</table>
+                  </div>
+                ),
+              }}
+            >
+              {message.content}
+            </ReactMarkdown>
           </div>
         ) : (
           <p className="text-sm text-muted">…</p>

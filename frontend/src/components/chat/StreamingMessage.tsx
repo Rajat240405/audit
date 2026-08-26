@@ -30,7 +30,20 @@ export function StreamingMessage() {
             Generating…
           </div>
           <div className="md-body text-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // Keep wide tables from overflowing the draft panel: wrap each
+                // table in its own horizontally-scrollable container.
+                table: ({ children }) => (
+                  <div className="overflow-x-auto">
+                    <table>{children}</table>
+                  </div>
+                ),
+              }}
+            >
+              {text}
+            </ReactMarkdown>
             <span className="inline-block h-4 w-0.5 animate-pulse bg-accent align-middle" />
           </div>
         </div>

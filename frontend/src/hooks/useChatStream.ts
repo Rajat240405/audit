@@ -87,12 +87,13 @@ export function useChatStream() {
       const draft = useDraftStore.getState();
       draft.startStream();
 
-      // Model Activity: reset + auto-open so the user can watch retrieval →
-      // thinking → answer live instead of staring at a blank canvas.
+      // Model Activity: reset + record the question so the panel shows live
+      // retrieval → thinking → answer data. The panel is NOT auto-opened on
+      // send — it only appears when the user explicitly clicks Activity. Data
+      // collection continues in the background regardless of panel visibility.
       const activity = useActivityStore.getState();
       activity.reset();
       activity.setQuestion(question);
-      activity.openPanel();
 
       const abort = new AbortController();
       abortRef.current = abort;
@@ -192,16 +193,24 @@ export function useChatStream() {
           },
           onDone: () => {
             const draftState = useDraftStore.getState();
+            // Always settle the assistant message's content at completion so a
+            // partially-streamed or interruption-free run never leaves the
+            // placeholder (empty content, rendered as "…") persisted to the
+            // session/History. Commit any still-pending stream text first.
             if (draftState.isStreaming) {
               draftState.commitStream();
-              const content = draftState.content;
-              const { sources, trace, meta } = {
-                sources: draftState.sources,
-                trace: draftState.trace,
-                meta: undefined,
+            }
+            const content = useDraftStore.getState().content;
+            if (content) {
+              const { sources, trace } = {
+                sources: useDraftStore.getState().sources,
+                trace: useDraftStore.getState().trace,
               };
-              void meta;
-              sessions.updateMessage(sessionId, assistantId, { content, sources, trace: trace ?? undefined });
+              sessions.updateMessage(sessionId, assistantId, {
+                content,
+                sources,
+                trace: trace ?? undefined,
+              });
             }
             usePipelineStore.getState().finish();
             // phase done — unless an error already moved it to "error"

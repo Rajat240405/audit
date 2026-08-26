@@ -181,6 +181,12 @@ _BUILTIN_SOURCES: dict[str, dict] = {
         "description": "Staged Rajya Sabha Q&A (crawl_parliamentary_qa; "
                        "session-*/qa.jsonl merged recursively, ids preserved).",
     },
+    "lok_sabha": {
+        "kind": "records", "record_dirs": ["parliamentary-qa/lok-sabha"],
+        "recursive": True,
+        "description": "Staged Lok Sabha Q&A (src.scraping.ls.pipeline; "
+                       "lok-*/session-*/qa.jsonl merged recursively, ids preserved).",
+    },
     "moes_website": {
         "kind": "folders", "folders": [".moes-website"], "hierarchical": True,
         "ministry": "EARTH SCIENCES", "default_org": "moes_hq",
@@ -590,6 +596,15 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
     jobs = expand_source(spec, category_map or _BUILTIN_CATEGORY_MAP)
     total = files = failed = 0
     scanned = 0
+    # MoES ↔ Parliamentary Q&A cross-source dedup: only for the moes_website
+    # source, only confirmed-duplicate filenames are added to exclude_files.
+    # Empty set (safe default) preserves everything and changes nothing.
+    dedup_excludes = _moes_website_dedup_excludes() if spec.name == "moes_website" else set()
+    if dedup_excludes:
+        _engine.log(
+            f"[ingest:{spec.name}] cross-source dedup: excluding "
+            f"{len(dedup_excludes)} confirmed PQ duplicate(s) at ingestion"
+        )
     for job in jobs:
         if not job.folder.exists():
             _engine.log(f"[ingest:{spec.name}] folder not found: {job.folder} — skipped")
@@ -602,7 +617,7 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
             str(job.folder),
             move_processed=move,
             meta_context=job.meta_context or None,
-            exclude_files=set(job.exclude_files) or None,
+            exclude_files=set(job.exclude_files) | dedup_excludes or None,
         )
         total += res.get("added", 0)
         files += res.get("files", 0)
@@ -621,6 +636,34 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
 embed_incremental = _engine.incremental_update
 embed_full_rebuild = _engine.rebuild_index
 index_is_usable = _engine._index_exists
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MoES ↔ Parliamentary Q&A cross-source dedup (ingestion-only integration).
+# The crawler is untouched. Only confirmed duplicates (EXACT_SHA +
+# TEXTUALLY_NEAR_IDENTICAL at the calibrated threshold) are excluded from the
+# moes_website source; everything uncertain/unique is preserved.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_moes_dedup_cache: dict[str, object] = {}
+
+
+def _moes_website_dedup_excludes() -> set[str]:
+    """Filenames of confirmed-duplicate MoES PQ documents to exclude at ingest.
+
+    Computed once per process (cached). Safe by default: missing corpora or any
+    failure returns an empty set, so ingestion preserves everything rather than
+    risk a false exclusion. Only applies to the `moes_website` source."""
+    if "done" in _moes_dedup_cache:
+        return _moes_dedup_cache["done"]  # type: ignore[return-value]
+    try:
+        from src.scraping.moes import dedup as _moes_dedup
+
+        result = _moes_dedup.moes_website_dedup()
+        _moes_dedup_cache["done"] = result.excluded_filenames
+    except Exception:  # noqa: BLE001 — dedup is auxiliary; never fail ingestion
+        _moes_dedup_cache["done"] = set()
+    return _moes_dedup_cache["done"]  # type: ignore[return-value]
 
 
 def choose_embed_action(total_added: int, no_rebuild: bool, full_rebuild: bool) -> str:

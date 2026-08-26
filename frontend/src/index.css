@@ -79,6 +79,9 @@ body {
 }
 
 /* markdown content typography */
+/* Content must never overflow its container: wrap long unbroken strings at
+   word boundaries and scroll code blocks horizontally, all locally. */
+.md-body { min-width: 0; overflow-wrap: anywhere; }
 .md-body h1 { font-size: 1.5rem; font-weight: 700; margin: 0.75rem 0 0.5rem; }
 .md-body h2 { font-size: 1.25rem; font-weight: 700; margin: 0.75rem 0 0.4rem; }
 .md-body h3 { font-size: 1.05rem; font-weight: 600; margin: 0.6rem 0 0.3rem; }
@@ -90,5 +93,7 @@ body {
 .md-body th, .md-body td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; }
 .md-body th { background: var(--surface-2); font-weight: 600; }
 .md-body code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 0.25rem; font-size: 0.85em; font-family: var(--font-mono); }
+.md-body pre { overflow-x: auto; }
+.md-body pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md-body blockquote { border-left: 3px solid var(--accent); padding-left: 0.75rem; color: var(--muted); margin: 0.5rem 0; }
 .md-body a { color: var(--accent); text-decoration: underline; }

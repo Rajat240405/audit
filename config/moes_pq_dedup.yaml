@@ -1,0 +1,36 @@
+# MoES ↔ Parliamentary Q&A cross-source dedup — ingestion thresholds.
+#
+# Read at ingestion by src/scraping/moes/dedup.py for the `moes_website`
+# source. Reuses src/scripts/check_moes_pq_overlap.py classification.
+#
+#   near_identical_threshold : containment |MoES∩RS|/|MoES| at/above which a
+#                              PQ press-release is a CONFIRMED duplicate and
+#                              is EXCLUDED at ingestion (TEXTUALLY_NEAR_IDENTICAL;
+#                              EXACT_SHA is always excluded regardless).
+#   related_threshold        : below near_identical but >= this is
+#                              POTENTIALLY_CORRESPONDING — UNCERTAIN, always
+#                              PRESERVED. POTENTIALLY_UNIQUE / UNCOMPARABLE are
+#                              always preserved too.
+#
+# CALIBRATION: the near/related values below are the current OPERATIONAL
+# defaults (0.90 / 0.50) and are intentionally CONSERVATIVE (a higher
+# near_identical excludes fewer documents, so nothing is dropped by a loose
+# threshold). Running the calibrator on the representative validation corpus
+# yields data-derived values of 0.821 / 0.36 (separating the 0.922 near /
+# 0.720 corresponding / 0.000 unique distribution). Re-run the calibrator
+# against the REAL corpora and update this file before relying on production
+# counts:
+#
+#   python -m src.scripts.check_moes_pq_overlap \
+#       --calibrate --write-calibrated-thresholds config/moes_pq_dedup.yaml
+#
+# Note: containment only ever decides NEAR. A POTENTIALLY_CORRESPONDING or
+# unique/uncertain document is never dropped — dedup is conservative by design
+# (only confirmed duplicates are excluded).
+near_identical_threshold: 0.90
+related_threshold: 0.50
+
+# Auditable exclusion report: written at ingestion when exclusions are applied.
+# Must never be inside a corpus root. Relative paths resolve against the
+# active APP_DATA_DIR.
+exclusion_report: "moes_pq_dedup_report.md"

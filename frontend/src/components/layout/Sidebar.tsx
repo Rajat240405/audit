@@ -35,7 +35,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col justify-between border-r border-border bg-surface">
+    <aside className="flex w-96 shrink-0 flex-col justify-between border-r border-border bg-surface">
       {/* Session tabs */}
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border p-2">
         <button
