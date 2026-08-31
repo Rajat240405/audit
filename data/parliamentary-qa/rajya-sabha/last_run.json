@@ -1,12 +1,10 @@
 {
  "crawler": "crawl_parliamentary_qa/rs-1.0",
  "house": "rajya-sabha",
- "started_at": "2026-08-24T06:13:18Z",
- "finished_at": "2026-08-24T06:15:45Z",
+ "started_at": "2026-08-28T11:48:12Z",
+ "finished_at": "2026-08-28T12:36:03Z",
  "options": {
-  "sessions": [
-   271
-  ],
+  "sessions": null,
   "ministry_slugs": [
    "earth-sciences",
    "ocean-development"
@@ -17,7 +15,7 @@
  },
  "config": "E:\\audit2\\config\\crawlers\\parliamentary_qa.yaml",
  "root": "E:\\audit2\\data\\parliamentary-qa\\rajya-sabha",
- "http_requests": 52,
+ "http_requests": 2088,
  "ministries": [
   {
    "code": 95,
@@ -37,6 +35,2152 @@
   }
  ],
  "sessions": [
+  {
+   "session": 174,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 175,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 176,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 178,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 179,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 180,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 181,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 182,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 184,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 185,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 3
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 3,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 3,
+   "docs": {
+    "good": 6,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 186,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 188,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 189,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 2
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 2,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 2,
+   "docs": {
+    "good": 4,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 190,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 191,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 8
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 192,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 2
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 2,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 2,
+   "docs": {
+    "good": 4,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 193,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 8
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 194,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 2,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 195,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 15
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 15,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 15,
+   "docs": {
+    "good": 28,
+    "partial": 0,
+    "broken": 2,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 196,
+   "status": "empty",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "earth-sciences",
+    "ocean-development"
+   ],
+   "records": 0,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 0,
+   "docs": {
+    "good": 0,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 197,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 4
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 4,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 4,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 198,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 4
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 4,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 4,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 199,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 200,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 202,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 1
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 1,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 1,
+   "docs": {
+    "good": 2,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 203,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 3
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 3,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 3,
+   "docs": {
+    "good": 6,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 204,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 23
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 23,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 23,
+   "docs": {
+    "good": 46,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 205,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 8
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 206,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 7
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 7,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 7,
+   "docs": {
+    "good": 14,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 207,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 0,
+    "ocean-development": 9
+   },
+   "zero_ministries": [
+    "earth-sciences"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 208,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 5,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 5,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 5,
+   "docs": {
+    "good": 10,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 209,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 10,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 10,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 10,
+   "docs": {
+    "good": 20,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 210,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 25,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 25,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 25,
+   "docs": {
+    "good": 50,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 211,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 14,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 14,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 14,
+   "docs": {
+    "good": 28,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 212,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 4,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 4,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 4,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 213,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 13,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 13,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 13,
+   "docs": {
+    "good": 26,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 214,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 12,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 12,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 12,
+   "docs": {
+    "good": 24,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 215,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 3,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 3,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 3,
+   "docs": {
+    "good": 6,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 217,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 19,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 19,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 19,
+   "docs": {
+    "good": 38,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 218,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 9,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 219,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 9,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 220,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 10,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 10,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 10,
+   "docs": {
+    "good": 20,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 221,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 222,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 7,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 7,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 7,
+   "docs": {
+    "good": 14,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 223,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 9,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 224,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 7,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 7,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 7,
+   "docs": {
+    "good": 7,
+    "partial": 0,
+    "broken": 0,
+    "missing": 7
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 225,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 17,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 17,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 17,
+   "docs": {
+    "good": 19,
+    "partial": 0,
+    "broken": 11,
+    "missing": 4
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 226,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 15,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 15,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 15,
+   "docs": {
+    "good": 15,
+    "partial": 0,
+    "broken": 15,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 227,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 22,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 22,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 22,
+   "docs": {
+    "good": 22,
+    "partial": 0,
+    "broken": 22,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 228,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 21,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 21,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 21,
+   "docs": {
+    "good": 23,
+    "partial": 0,
+    "broken": 19,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 229,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 10,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 10,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 10,
+   "docs": {
+    "good": 10,
+    "partial": 0,
+    "broken": 10,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 230,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 7,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 7,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 7,
+   "docs": {
+    "good": 7,
+    "partial": 0,
+    "broken": 7,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 232,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 11,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 11,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 11,
+   "docs": {
+    "good": 11,
+    "partial": 0,
+    "broken": 1,
+    "missing": 10
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 233,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 10,
+    "partial": 0,
+    "broken": 0,
+    "missing": 6
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 234,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 235,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 6,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 6,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 6,
+   "docs": {
+    "good": 12,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 236,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 12,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 12,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 12,
+   "docs": {
+    "good": 24,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 237,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 6,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 6,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 6,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 4
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 238,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 239,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 11,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 11,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 11,
+   "docs": {
+    "good": 22,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 240,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 19,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 19,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 19,
+   "docs": {
+    "good": 38,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 241,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 11,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 11,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 11,
+   "docs": {
+    "good": 22,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 242,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 26,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 26,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 26,
+   "docs": {
+    "good": 52,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 243,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 10,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 10,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 10,
+   "docs": {
+    "good": 20,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 244,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 4,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 4,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 4,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 245,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 23,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 23,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 23,
+   "docs": {
+    "good": 46,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 246,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 9,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 247,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 14,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 14,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 14,
+   "docs": {
+    "good": 26,
+    "partial": 2,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 248,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 7,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 7,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 7,
+   "docs": {
+    "good": 14,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 249,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 13,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 13,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 13,
+   "docs": {
+    "good": 26,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 250,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 251,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 9,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 9,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 9,
+   "docs": {
+    "good": 18,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 252,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 4,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 4,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 4,
+   "docs": {
+    "good": 8,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 253,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 12,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 12,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 12,
+   "docs": {
+    "good": 24,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 254,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 13,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 13,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 13,
+   "docs": {
+    "good": 26,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 255,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 14,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 14,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 14,
+   "docs": {
+    "good": 28,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 256,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 34,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 34,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 34,
+   "docs": {
+    "good": 68,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 257,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 15,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 15,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 15,
+   "docs": {
+    "good": 30,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 258,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 18,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 18,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 18,
+   "docs": {
+    "good": 36,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 259,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 26,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 26,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 26,
+   "docs": {
+    "good": 52,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 260,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 28,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 28,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 28,
+   "docs": {
+    "good": 56,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 262,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 15,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 15,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 15,
+   "docs": {
+    "good": 30,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 263,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 8,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 8,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 8,
+   "docs": {
+    "good": 16,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 265,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 25,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 25,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 25,
+   "docs": {
+    "good": 50,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 266,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 31,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 31,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 31,
+   "docs": {
+    "good": 62,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 267,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 33,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 33,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 33,
+   "docs": {
+    "good": 66,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 268,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 28,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 28,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 28,
+   "docs": {
+    "good": 56,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 269,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 27,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 27,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 27,
+   "docs": {
+    "good": 54,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
+  {
+   "session": 270,
+   "status": "unchanged",
+   "ministries": {
+    "earth-sciences": 31,
+    "ocean-development": 0
+   },
+   "zero_ministries": [
+    "ocean-development"
+   ],
+   "records": 31,
+   "added": 0,
+   "changed": 0,
+   "unchanged": 31,
+   "docs": {
+    "good": 62,
+    "partial": 0,
+    "broken": 0,
+    "missing": 0
+   },
+   "doc_files_written": 0,
+   "attention": [],
+   "failures": []
+  },
   {
    "session": 271,
    "status": "unchanged",
@@ -63,10 +2207,10 @@
   }
  ],
  "doc_totals": {
-  "good": 50,
-  "partial": 0,
-  "broken": 0,
-  "missing": 0
+  "good": 1816,
+  "partial": 2,
+  "broken": 89,
+  "missing": 31
  },
  "failures": 0
 }

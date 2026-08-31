@@ -1,0 +1,38 @@
+# INCOIS Audit Platform — weekly maintenance cron schedule
+#
+# Install with:
+#   crontab -e          # paste the lines below, or:
+#   crontab crontab.hpc.txt  # replace your entire crontab (careful)
+#
+# Verify with:
+#   crontab -l
+#
+# ── Required: set PROJECT to the absolute path of your project directory ──────
+# Replace /home/user/incois-audit with the real path on your HPC.
+# All paths below are derived from PROJECT.
+
+PROJECT=/home/user/incois-audit
+
+# ── Weekly maintenance: every Saturday at 02:00 HPC local time ───────────────
+# Runs crawl_all.py inside the Singularity container:
+#   - checks schedule intervals (168 h / 7 days per source)
+#   - crawls RS, LS, MoES website, INCOIS for new/changed content
+#   - ingests new records into corpus_reports.jsonl
+#   - triggers incremental embed (new records) or full rebuild (changed records)
+#
+# Stdout/stderr of this job goes to runtime/logs/cron.log.
+# Each run also writes its own timestamped log to runtime/logs/maintenance/.
+# The symlink runtime/logs/maintenance.log always points at the latest run.
+#
+0 2 * * 6 cd ${PROJECT} && ./run_maintenance_hpc.sh >> ${PROJECT}/runtime/logs/cron.log 2>&1
+
+# ── Optional: status check on Monday morning (confirm last run succeeded) ────
+# Prints the last-run table to cron.log — useful to catch silent failures.
+#
+#0 9 * * 1 cd ${PROJECT} && ./run_maintenance_hpc.sh --status >> ${PROJECT}/runtime/logs/cron.log 2>&1
+
+# ── Optional: force a full run mid-week if needed ─────────────────────────────
+# Uncomment and trigger manually or via `crontab -e` when an urgent update
+# must be pulled regardless of the 7-day interval:
+#
+#0 3 * * 3 cd ${PROJECT} && ./run_maintenance_hpc.sh --force >> ${PROJECT}/runtime/logs/cron.log 2>&1

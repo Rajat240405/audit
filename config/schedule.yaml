@@ -1,0 +1,87 @@
+# Source maintenance schedule — consumed by src/scripts/crawl_all.py.
+#
+# This file is DATA, not code: adjusting an interval or enabling/disabling a
+# source requires only an edit here, never a code change.
+#
+# Schema per source block:
+#
+#   enabled         boolean — set false to skip entirely without removing the
+#                   block.  Useful for temporarily pausing a source.
+#
+#   interval_hours  Minimum wall-clock hours that must elapse between
+#                   *successful* crawl runs.  The orchestrator compares this
+#                   against the timestamp of the last ok=true crawl record in
+#                   data/run_history.jsonl.
+#                   0 = always run (useful for manual one-shot invocation).
+#                   168 = weekly (7 × 24).
+#
+#   crawler_module  Python module path passed to `python -m <module>`.
+#                   The orchestrator runs:
+#                       python -m <crawler_module> [crawler_args...] \
+#                           [--config <crawler_config>]
+#
+#   crawler_config  Path to the crawler's YAML config (relative to the
+#                   project root).  Passed via --config if the crawler
+#                   accepts that flag.  Omit for crawlers that use their own
+#                   argument conventions (e.g. incois).
+#
+#   crawler_args    Optional list of extra CLI arguments appended verbatim
+#                   after the module invocation.  Values must be strings.
+#
+#   exit_ok         List of subprocess exit codes that are treated as
+#                   "success" for the purpose of triggering ingest.
+#                   A code in this list causes the run record to have ok=true
+#                   AND triggers the post-crawl ingest step.
+#                   Exit code 2 is always a config/usage error and is never
+#                   in any exit_ok list.
+#
+#   ingest_source   The key in config/sources.yaml that the orchestrator
+#                   passes to `python -m src.scripts.ingest <ingest_source>`.
+#                   Must match exactly.  Omit (or set null) to skip ingest
+#                   after crawl (crawl-only mode).
+#
+# Exit code semantics (common to LS, RS, MoES crawlers; INCOIS differs):
+#   0  — completed with zero failures
+#   2  — config/usage error (never in exit_ok)
+#   3  — completed but with partial failures (still ingestible)
+# INCOIS main() returns None → subprocess exits 0 on success (no code 3).
+
+version: 1
+
+sources:
+
+  lok_sabha:
+    enabled: true
+    interval_hours: 168                   # weekly
+    crawler_module: src.scraping.ls.pipeline
+    crawler_config: config/crawlers/lok_sabha_qa.yaml
+    crawler_args: []
+    exit_ok: [0, 3]
+    ingest_source: lok_sabha
+
+  rajya_sabha:
+    enabled: true
+    interval_hours: 168                   # weekly
+    crawler_module: src.scripts.crawl_parliamentary_qa
+    crawler_config: config/crawlers/parliamentary_qa.yaml
+    crawler_args: ["--house", "rajya-sabha"]
+    exit_ok: [0, 3]
+    ingest_source: rajya_sabha
+
+  moes_website:
+    enabled: true
+    interval_hours: 168                   # weekly
+    crawler_module: src.scripts.crawl_moes_website
+    crawler_config: config/crawlers/moes_website.yaml
+    crawler_args: []
+    exit_ok: [0, 3]
+    ingest_source: moes_website
+
+  incois:
+    enabled: true
+    interval_hours: 168                   # weekly
+    crawler_module: src.scripts.crawl_incois_reports
+    crawler_config: null                  # incois uses --sections/--out, not --config
+    crawler_args: ["--sections", "all"]
+    exit_ok: [0]                          # incois main() returns None; subprocess exits 0
+    ingest_source: incois

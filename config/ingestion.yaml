@@ -103,7 +103,7 @@ project_scope:
   default_ministry: "EARTH SCIENCES"
 
   # Whether to apply the default ministry filter by default
-  filter_enabled: true
+  filter_enabled: false
 
   # Allow overriding the scope to ingest ALL ministries
   # (useful for generic parliamentary corpus or testing)

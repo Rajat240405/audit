@@ -150,6 +150,18 @@ providers:
       #    context_window is the DEPLOYED/app-blessed window (default app
       #    ceiling); raise the app ceiling via RAG_MAX_CONTEXT_TOKENS=131072
       #    on this deployment. Native stays 262144 regardless of serving.
+      - id: gpt_oss_20b
+        display_name: "GPT OSS 20B"
+        model_name: "gpt-oss-20b"        # vLLM --served-model-name — sent verbatim
+        context_window: 32768
+        native_context_window: 131072    # YaRN rope scaling 4K→131K
+        # Reasoning is controlled via system prompt ("Reasoning: high/medium/low")
+        # NOT via chat_template_kwargs — think_mode: none ensures we never send
+        # enable_thinking. The app's Deep mode system prompt triggers reasoning.
+        thinking_capable: true
+        think_mode: none                  # never send chat_template_kwargs
+        recommended_execution_mode: GPU
+
       - id: qwen3.8_27b_fp8
         display_name: "Qwen 3.8 27B FP8"
         model_name: "Qwen3.8-27B-FP8"   # vLLM --served-model-name — sent verbatim

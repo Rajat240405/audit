@@ -55,7 +55,7 @@ function Row({
         checked ? "bg-accent/15 text-foreground" : "text-muted hover:bg-surface-2",
         disabled && "cursor-not-allowed opacity-45"
       )}
-      title={disabled ? `${label} — no documents yet` : undefined}
+      title={disabled ? `${label} — not available for selected source(s)` : undefined}
     >
       <span
         className={cn(
@@ -76,7 +76,15 @@ function Row({
 
 /** Source filter popover — Organizations (orgs) + Document Types (categories).
  *  Draft-commit UX: checkboxes edit a local draft; Apply commits to the store,
- *  Clear resets. "N selected" badge on the trigger reflects the APPLIED state. */
+ *  Clear resets. "N selected" badge on the trigger reflects the APPLIED state.
+ *
+ *  HIERARCHY RULE (requirement):
+ *  - Each org carries a `categories` list (from /api/sources → org_tree.py).
+ *  - When ≥1 orgs are selected, active categories = UNION of those orgs' lists.
+ *  - Categories outside the union are faded + non-selectable.
+ *  - When no orgs selected ("All Sources"), all categories are active.
+ *  - The mapping is fully backend-driven — no hardcoded org→category map here.
+ */
 export function SourceFilter() {
   const sourceFilter = useAppStore((s) => s.sourceFilter);
   const setSourceFilter = useAppStore((s) => s.setSourceFilter);
@@ -112,13 +120,34 @@ export function SourceFilter() {
   const tree = catalogue?.tree ?? {};
   const categories = catalogue?.categories ?? [];
 
-  // Flatten orgs across ministries, sorted by count desc (structure visible,
-  // 0-count dimmed but shown so future orgs are discoverable).
+  // Flatten orgs across ministries, sorted by count desc.
   const orgs: SourceOrg[] = useMemo(() => {
     const all: SourceOrg[] = [];
     for (const m of Object.values(tree)) all.push(...m.orgs);
     return all.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }, [tree]);
+
+  // Build a map: org slug -> Set<category> from backend catalogue.
+  // This is the ONLY source of truth for the hierarchy — no hardcoding.
+  const orgCategoryMap = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const org of orgs) {
+      map.set(org.slug, new Set(org.categories ?? []));
+    }
+    return map;
+  }, [orgs]);
+
+  // Active categories = union of categories for all selected orgs.
+  // If no orgs selected → all categories are active ("All Sources").
+  const activeCategorySet = useMemo((): Set<string> | null => {
+    if (draft.orgs.size === 0) return null; // null = all active
+    const union = new Set<string>();
+    for (const slug of draft.orgs) {
+      const cats = orgCategoryMap.get(slug);
+      if (cats) cats.forEach((c) => union.add(c));
+    }
+    return union;
+  }, [draft.orgs, orgCategoryMap]);
 
   const cats = useMemo(
     () =>
@@ -142,7 +171,25 @@ export function SourceFilter() {
       const next = new Set(d.orgs);
       if (next.has(slug)) next.delete(slug);
       else next.add(slug);
-      return { ...d, orgs: next };
+
+      // Drop any selected categories that are no longer active after this toggle.
+      // Recompute active set with the new org selection.
+      const newActive = next.size === 0
+        ? null
+        : (() => {
+            const union = new Set<string>();
+            for (const s of next) {
+              const cats = orgCategoryMap.get(s);
+              if (cats) cats.forEach((c) => union.add(c));
+            }
+            return union;
+          })();
+
+      const newCats = new Set(
+        [...d.cats].filter((c) => newActive === null || newActive.has(c))
+      );
+
+      return { orgs: next, cats: newCats };
     });
 
   const toggleCat = (cat: string) =>
@@ -232,19 +279,28 @@ export function SourceFilter() {
 
             <div className="px-2 pb-0.5 pt-2 text-[9px] font-bold uppercase tracking-wider text-muted/60">
               Document Types
+              {activeCategorySet !== null && (
+                <span className="ml-1 font-normal normal-case text-muted/50">
+                  (filtered by selected org{draft.orgs.size > 1 ? "s" : ""})
+                </span>
+              )}
             </div>
             {filteredCats.length === 0 && (
               <div className="px-2 py-1 text-[10px] text-muted/60">No document types match "{query}"</div>
             )}
-            {filteredCats.map((c) => (
-              <Row
-                key={c.category}
-                label={c.label ?? CATEGORY_LABELS[c.category] ?? c.category}
-                count={c.count}
-                checked={draft.cats.has(c.category)}
-                onToggle={() => toggleCat(c.category)}
-              />
-            ))}
+            {filteredCats.map((c) => {
+              const isActive = activeCategorySet === null || activeCategorySet.has(c.category);
+              return (
+                <Row
+                  key={c.category}
+                  label={c.label ?? CATEGORY_LABELS[c.category] ?? c.category}
+                  count={c.count}
+                  checked={draft.cats.has(c.category)}
+                  disabled={!isActive}
+                  onToggle={() => toggleCat(c.category)}
+                />
+              );
+            })}
           </div>
 
           {/* Footer */}
@@ -267,3 +323,4 @@ export function SourceFilter() {
     </div>
   );
 }
+

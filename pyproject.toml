@@ -49,8 +49,9 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "rank-bm25>=0.2.2",
     "pypdf>=5.0.0",
-    # Table-aware PDF extraction; AGPL-3.0/commercial — scraper falls back
-    # to pypdf when absent (see src/data/pdf_table_extract.py)
+    # Table-aware PDF extraction; AGPL-3.0/commercial (see src/data/pdf_table_extract.py).
+    # PyMuPDF is the canonical PDF extraction engine; pypdf is retained for
+    # other uses (crawl_incois_reports, crawl_moes_reports, ingest_folder peek).
     "PyMuPDF>=1.24.0",
     "python-docx>=1.1.0",
     "neo4j>=5.14.0",

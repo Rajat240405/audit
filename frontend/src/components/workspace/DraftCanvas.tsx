@@ -44,8 +44,19 @@ export function DraftCanvas() {
   const crossVerify = () => {
     const { content: c, sources } = useDraftStore.getState();
     if (!c) return;
-    useDraftStore.setState({ grounding: buildGroundingReport(c, sources) });
-    pushToast("success", "Cross-verification complete — grounding score updated");
+    const report = buildGroundingReport(c, sources);
+    useDraftStore.setState({ grounding: report });
+
+    const unverified = report.filter((r) => !r.found);
+    if (unverified.length === 0) {
+      pushToast("success", "Cross-verification complete — all claims grounded in sources.");
+    } else {
+      const claims = unverified.map((r) => `• ${r.text}`).join("\n");
+      pushToast(
+        "error",
+        `Cross-verification: ${unverified.length} claim(s) not found in sources:\n${claims}`
+      );
+    }
   };
 
   // Direct manual editing of the canvas (no AI). On save the content is set
