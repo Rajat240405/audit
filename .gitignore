@@ -135,7 +135,7 @@ pnpm-debug.log*
 .huggingface/
 hf_cache/
 .cache/huggingface/
-models/
+/models/
 checkpoints/
 adapters/
 wandb/
