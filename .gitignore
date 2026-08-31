@@ -1,6 +1,6 @@
-# ==============================================================================
+# ==========================
 # Python & Bytecode
-# ==============================================================================
+# ==========================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,65 +9,49 @@ __pycache__/
 *.dll
 *.dylib
 
-# ==============================================================================
-# Virtual Environments & Package Managers
-# ==============================================================================
+# ==========================
+# Virtual Environments & Conda
+# ==========================
 .venv/
-.venv*/
+.venv-ml/
 venv/
-venv*/
 env/
-env*/
 ENV/
 env.bak/
 venv.bak/
 .conda/
 conda-bld/
-pip-log.txt
-pip-delete-this-directory.txt
 
-# ==============================================================================
-# Node.js & Frontend
-# ==============================================================================
+# ==========================
+# Node / Frontend
+# ==========================
 node_modules/
 frontend/node_modules/
-dist/
 frontend/dist/
-build/
-frontend/build/
-.vite/
 frontend/.vite/
-.cache/
 frontend/.cache/
-.parcel-cache/
 frontend/.parcel-cache/
-.turbo/
 frontend/.turbo/
-.next/
 frontend/.next/
-.svelte-kit/
 frontend/.svelte-kit/
 frontend/vite.svg
 frontend/.eslintcache
 *.tsbuildinfo
 *.tsbuildinfo.*
 
-# Package manager stores & locks
+# Package manager caches
 .pnpm-store/
 .npm/
+.yarn/
 .yarn/cache/
 .yarn/unplugged/
 .yarn/build-state.yml
 .yarn/install-state.gz
 
-# ==============================================================================
-# IDEs, Editors & OS Files
-# ==============================================================================
+# ==========================
+# IDEs & Editors
+# ==========================
 .vscode/
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
 .idea/
 *.code-workspace
 *.swp
@@ -76,7 +60,9 @@ frontend/.eslintcache
 *.sublime-project
 *.sublime-workspace
 
+# ==========================
 # Operating System
+# ==========================
 .DS_Store
 .DS_Store?
 ._*
@@ -87,37 +73,38 @@ Thumbs.db
 desktop.ini
 .directory
 $RECYCLE.BIN/
-~$*
 
-# ==============================================================================
-# Testing, Coverage & Linters
-# ==============================================================================
+# ==========================
+# Pytest / Coverage / Linters
+# ==========================
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
+.cache/
 .mypy_cache/
 .ruff_cache/
 .pyre/
-.pytype/
 .tox/
 .nox/
 .hypothesis/
-coverage/
-*.egg-info/
-.eggs/
 
-# ==============================================================================
+# ==========================
 # Jupyter Notebooks
-# ==============================================================================
+# ==========================
 .ipynb_checkpoints/
+*.ipynb
 
-# ==============================================================================
-# Logs, Runtime & Process State
-# ==============================================================================
+# ==========================
+# Logs & Runtime
+# ==========================
 *.log
 logs/
 runtime/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 *.pid
 *.lock
 *.sock
@@ -125,16 +112,16 @@ runtime/
 *.bak
 *.backup
 *.save
-backup_*/
-*_backup/
-*_backup*/
+~$*
 
-# ==============================================================================
+# ==========================
 # Environment & Secrets
-# ==============================================================================
+# ==========================
 .env
 .env.*
+.env*.local
 !.env.example
+!.env.template
 *.pem
 *.key
 *.cert
@@ -142,9 +129,9 @@ backup_*/
 *.pfx
 *.p12
 
-# ==============================================================================
-# HuggingFace, Model Weights & Training Caches
-# ==============================================================================
+# ==========================
+# HuggingFace, Model Weights & Training
+# ==========================
 .huggingface/
 hf_cache/
 .cache/huggingface/
@@ -165,11 +152,10 @@ lightning_logs/
 *.h5
 *.keras
 *.engine
-*.lora
 
-# ==============================================================================
-# Generated Data & Corpus Storage
-# ==============================================================================
+# ==========================
+# Generated Data & Corpus
+# ==========================
 data/raw/
 data/processed/
 data/intermediate/
@@ -197,27 +183,19 @@ data/user-knowledge/
 data/corpus/
 src/scripts/data/
 
-# Large generated data files
+# Large generated files in data/
 data/*.jsonl
 data/*.csv
 data/*.log
 data/*.txt
 data/*.json
-data/*.parquet
-data/*.pkl
-data/*.pickle
-data/*.pdf
-data/*.zip
-data/*.tar
-data/*.tar.gz
 
-# Keep root data and storage folders tracked via gitkeep
+# Keep the data folder structure
 !data/.gitkeep
-!storage/.gitkeep
 
-# ==============================================================================
-# Retrieval Indexes, Vector Stores & Databases
-# ==============================================================================
+# ==========================
+# Generated Retrieval Indexes & Storage
+# ==========================
 storage/
 faiss/
 indexes/
@@ -244,15 +222,18 @@ lancedb/
 *.duckdb.wal
 *.lance
 
-# ==============================================================================
-# Benchmark & Evaluation Outputs
-# ==============================================================================
+# Preserve storage directory placeholder
+!storage/.gitkeep
+
+# ==========================
+# Evaluation & Benchmark Results
+# ==========================
 evaluation_results/
 benchmark_results/
 
-# ==============================================================================
+# ==========================
 # Temporary & Test Artifacts
-# ==============================================================================
+# ==========================
 generation_prompt_debug.txt
 *_debug.txt
 *_debug.json
@@ -264,13 +245,20 @@ test_up.txt
 test_upload.*
 test_*.pdf
 test_*.txt
-test_*.json
-temp/
-tmp/
 
-# ==============================================================================
+# ==========================
+# Build Artifacts & Docker Overrides
+# ==========================
+build/
+dist/
+coverage/
+*.egg-info/
+.eggs/
+docker-compose.override.yml
+
+# ==========================
 # Container Images & Archives
-# ==============================================================================
+# ==========================
 *.sif
 *.tar
 *.tar.gz
@@ -278,13 +266,11 @@ tmp/
 *.zip
 *.7z
 *.gz
-*.iso
 .singularity/
-docker-compose.override.yml
 
-# ==============================================================================
+# ==========================
 # HPC & SLURM Job Logs
-# ==============================================================================
+# ==========================
 slurm-*.out
 slurm-*.err
 *.out

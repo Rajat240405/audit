@@ -155,11 +155,15 @@ providers:
         model_name: "gpt-oss-20b"        # vLLM --served-model-name — sent verbatim
         context_window: 32768
         native_context_window: 131072    # YaRN rope scaling 4K→131K
-        # Reasoning is controlled via system prompt ("Reasoning: high/medium/low")
-        # NOT via chat_template_kwargs — think_mode: none ensures we never send
-        # enable_thinking. The app's Deep mode system prompt triggers reasoning.
+        # Reasoning is always-ON when served with --reasoning-parser openai_gptoss.
+        # think_mode: none = never send chat_template_kwargs (not a Qwen3-style model).
+        # thinking_token_budget is sent unconditionally via ServingSpec to cap loops.
         thinking_capable: true
         think_mode: none                  # never send chat_template_kwargs
+        serving:
+          reasoning_parser: openai_gptoss
+          default_thinking_budget: 4096   # cap thinking tokens to prevent loops
+          notes: "serve with --reasoning-parser openai_gptoss --tool-call-parser openai"
         recommended_execution_mode: GPU
 
       - id: qwen3.8_27b_fp8
