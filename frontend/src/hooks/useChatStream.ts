@@ -237,7 +237,7 @@ export function useChatStream() {
               )
                 .then((res) => {
                   if (res.error) {
-                    useToastStore.getState().push("error", `Verification failed: ${res.error}`);
+                    useToastStore.getState().pushSticky("error", `Verification failed: ${res.error}`);
                     return;
                   }
                   const draft = useDraftStore.getState();
@@ -246,7 +246,7 @@ export function useChatStream() {
                     draft.sources !== baselineSources;
                   if (userEdited) {
                     // User changed the draft during verify — don't overwrite.
-                    useToastStore.getState().push(
+                    useToastStore.getState().pushSticky(
                       "info",
                       "Verification produced revisions, but you edited the draft — review the grounding report instead."
                     );
@@ -263,7 +263,7 @@ export function useChatStream() {
                   if (res.text && res.text !== draft.content) {
                     draft.applyEdit(res.text);
                     syncDraftToSession(res.text);
-                    useToastStore.getState().push(
+                    useToastStore.getState().pushSticky(
                       "success",
                       "✓ Answer verified & cleaned (unsupported claims removed)"
                     );
@@ -281,7 +281,7 @@ export function useChatStream() {
                 })
                 .catch((err) => {
                   console.warn("[verify] error:", err);
-                  useToastStore.getState().push("error", "Verification failed unexpectedly");
+                  useToastStore.getState().pushSticky("error", "Verification failed unexpectedly");
                 });
             }
           },

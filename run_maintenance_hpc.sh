@@ -1,7 +1,7 @@
 #!/bin/bash
-# run_maintenance_hpc.sh — weekly scheduled source-maintenance for HPC/Singularity
+# run_maintenance_hpc.sh — scheduled (daily) source-maintenance for HPC/Singularity
 #
-# Invoked by crond (weekly cron job).  Runs the full crawl → ingest → embed
+# Invoked by crond (daily cron job).  Runs the full crawl → ingest → embed
 # cycle inside the same Singularity container used by start_hpc.sh / stop_hpc.sh,
 # with the same bind mounts and env-file.  Does NOT touch the running app
 # process or its PID file.
@@ -15,8 +15,8 @@
 #   ./run_maintenance_hpc.sh --no-ingest       # crawl only, skip ingest+embed
 #
 # Cron schedule (edit with: crontab -e):
-#   # Weekly Saturday 02:00 — crawl all sources, ingest, rebuild index if needed
-#   0 2 * * 6 /path/to/project/run_maintenance_hpc.sh >> /path/to/project/runtime/logs/cron.log 2>&1
+#   # Daily 02:00 — crawl all sources, ingest, rebuild index if needed
+#   0 2 * * * /path/to/project/run_maintenance_hpc.sh >> /path/to/project/runtime/logs/cron.log 2>&1
 #
 # Exit codes (mirrored from crawl_all.py):
 #   0  all sources completed without failures
@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ── config ────────────────────────────────────────────────────────────────────
-SIF="incois-audit-app-hpc9.sif"
+SIF="incois-audit-app-hpc16.sif"
 ENV_FILE=".env.hpc"
 
 TMP_DIR="runtime/tmp"
@@ -53,7 +53,10 @@ fi
 
 # ── ensure singularity is available ───────────────────────────────────────────
 # cron runs with a minimal PATH; add the most common install locations.
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+# Hardcoded first: this HPC keeps singularity outside the system module
+# paths the fallback below probes (verified: /home/apps/singularity_ce_4.0.0,
+# module name "singularity/4.0.0").
+export PATH="/home/apps/singularity_ce_4.0.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 if ! command -v singularity >/dev/null 2>&1; then
     # HPC modules system (try common module locations)
     for MODFILE in \
@@ -77,6 +80,13 @@ fi
 # ── runtime directories ───────────────────────────────────────────────────────
 mkdir -p "$TMP_DIR"
 mkdir -p "$LOG_DIR"
+
+# Temp/cache for the SIF unpack (multi-GB, --writable-tmpfs): never the
+# login node's tiny /tmp — same fix as start_hpc.sh (no-space crash).
+export SINGULARITY_TMPDIR="$SCRIPT_DIR/$TMP_DIR"
+export SINGULARITY_CACHEDIR="$SCRIPT_DIR/$TMP_DIR"
+export APPTAINER_TMPDIR="$SCRIPT_DIR/$TMP_DIR"
+export APPTAINER_CACHEDIR="$SCRIPT_DIR/$TMP_DIR"
 
 # ── per-run timestamped log ───────────────────────────────────────────────────
 RUN_TS="$(date -u '+%Y%m%dT%H%M%SZ')"

@@ -114,10 +114,12 @@ class BM25Index:
         """
         Tokenize text: lowercase + stopword removal + alphanumeric only.
 
-        Parameters
-        ----------
-        text : str
-            Text to tokenize.
+        Fix (retrieval/HPC patch #3): meaningful numerics are now KEPT.
+        The audit corpus is built out of years, amounts and question numbers;
+        the old alpha-only rule made BM25 blind to them ("2022-23",
+        "3035", "2000 crore" all vanished from index AND query). We keep
+        3–4 digit tokens (years, amounts, question numbers) while still
+        dropping 1–2 digit junk ("1", "35") that would swamp row lists.
 
         Returns
         -------
@@ -127,10 +129,14 @@ class BM25Index:
         # Split into lowercase alphanumeric word tokens
         tokens = re.findall(r"\b[a-zA-Z0-9']+\b", text.lower())
 
-        # Filter: keep only alphabetic tokens, remove stopwords, len > 2
+        # Filter: keep alphabetic tokens (len > 2, no stopwords) OR
+        # meaningful numerics (3–4 digits).
         filtered = [
             t for t in tokens
-            if t.isalpha() and t not in ENGLISH_STOPWORDS and len(t) > 2
+            if t not in ENGLISH_STOPWORDS and (
+                (t.isalpha() and len(t) > 2)
+                or (t.isdigit() and 3 <= len(t) <= 4)
+            )
         ]
         return filtered
 

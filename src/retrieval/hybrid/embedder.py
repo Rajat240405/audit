@@ -31,6 +31,25 @@ from pathlib import Path
 _MODEL_CACHE: Dict[tuple[str, str], SentenceTransformer] = {}
 
 
+def release_embedding_models() -> None:
+    """Unload all cached embedding models (HPC ingestion policy #5).
+
+    During HPC index-build/ingestion the GPU may be used for embedding work;
+    once the build completes the weights must not linger in GPU memory (the
+    serving phase reserves it for vLLM). Clears the process-wide cache and
+    hints CUDA to drop allocator blocks. Models lazily reload on next use,
+    so this is always safe to call. Never raises.
+    """
+    _MODEL_CACHE.clear()
+    try:  # pragma: no cover - depends on runtime hardware
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - release is best-effort
+        pass
+
+
 def resolve_embed_model() -> str:
     """Pick the embedding model to use.
 
@@ -147,6 +166,14 @@ class Embedder:
             convert_to_tensor=False,
         )
         return embeddings.astype(np.float32)
+
+    def release(self) -> None:
+        """Drop this instance's model reference AND clear the shared cache
+        (see release_embedding_models). ``_embedding_dim`` is retained so
+        dim/compatibility checks keep working after release; the next embed
+        call lazily reloads the model on this instance's device."""
+        self._model = None
+        release_embedding_models()
 
     def save(self, path: str | Path) -> None:
         """Save the model to disk."""

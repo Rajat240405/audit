@@ -514,15 +514,30 @@ def update_index_in_process(pipeline_factory=None):
 
         pipeline_factory = HybridRAGPipeline
     records = DataLoader.load_jsonl(corpus)
-    if _index_is_complete(idx):
-        pipe = pipeline_factory()
-        pipe.load(str(idx))
-        n = int(pipe.add_records(records) or 0)
-        if n:
-            pipe.save(str(idx))
-        _engine.log(f"[ingest] incremental update: {n} new record(s) embedded+added")
-        return n, pipe
-    pipe = pipeline_factory(records=records)
-    pipe.save(str(idx))
-    _engine.log(f"[ingest] full build with {len(records):,} records")
-    return len(records), pipe
+    try:
+        if _index_is_complete(idx):
+            pipe = pipeline_factory()
+            pipe.load(str(idx))
+            n = int(pipe.add_records(records) or 0)
+            if n:
+                pipe.save(str(idx))
+            _engine.log(f"[ingest] incremental update: {n} new record(s) embedded+added")
+            return n, pipe
+        pipe = pipeline_factory(records=records)
+        pipe.save(str(idx))
+        _engine.log(f"[ingest] full build with {len(records):,} records")
+        return len(records), pipe
+    finally:
+        # HPC ingestion policy (#5): embedding models may use the GPU during
+        # the build — release them when the build finishes so serving keeps
+        # the GPU for vLLM. Models lazily reload (CPU) on next use of the
+        # swapped-in pipeline, so this is safe. Guarded for test fakes.
+        try:
+            from src.retrieval.hybrid.embedder import release_embedding_models
+
+            embedder = getattr(locals().get("pipe"), "embedder", None)
+            if embedder is not None:
+                embedder.release()
+            release_embedding_models()
+        except Exception:  # noqa: BLE001 - release must never fail ingest
+            pass

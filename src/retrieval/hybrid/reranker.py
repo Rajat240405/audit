@@ -34,7 +34,6 @@ Nogueira et al. (2020). "Document Ranking with a Pretrained Sequence-to-Sequence
 """
 
 from __future__ import annotations
-import torch
 import numpy as np
 from sentence_transformers import CrossEncoder
 import os
@@ -98,8 +97,18 @@ class CrossEncoderReranker:
             Alternatives: "cross-encoder/ms-marco-MiniLM-L-6-v2" (faster)
                           "cross-encoder/ms-marco-deberta-v3-base" (better, slower)
         device : str, optional
-            Device: "cpu", "cuda", or None (auto-detect).
-            CPU is fine for ~20 candidates per query.
+            Explicit device override.
+
+            HPC DEVICE POLICY (query-serving phase): the GPU is reserved
+            EXCLUSIVELY for the vLLM/LLM inference server. Everything in the
+            retrieval path (BM25, FAISS, RRF, filtering, reranking, evidence
+            assembly) is CPU-bound by design. Therefore the default is
+            ALWAYS "cpu" — the reranker must never auto-select CUDA merely
+            because CUDA is available. Precedence:
+              1. this explicit argument
+              2. RERANK_DEVICE env var (opt-in "cuda" for local
+                 experimentation/tuning only)
+              3. "cpu"
         max_length : int
             Maximum token length for the cross-encoder.
             Default 512 handles most Q&A pairs.
@@ -107,7 +116,13 @@ class CrossEncoderReranker:
         if model_name is None:
             model_name = resolve_rerank_model()
         self.model_name = model_name
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or os.environ.get("RERANK_DEVICE", "cpu")
+        if self.device != "cpu":
+            print(
+                f"[reranker] device={self.device!r} — non-CPU reranking. "
+                f"On HPC query-serving nodes the GPU is reserved for vLLM; "
+                f"unset RERANK_DEVICE to return to the CPU policy."
+            )
         self.max_length = max_length
         self._model: CrossEncoder | None = None
         # GLM #5: docs that exceeded max_length in the last rerank (truncated

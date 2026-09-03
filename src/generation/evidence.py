@@ -40,6 +40,14 @@ from typing import Optional
 
 from src.retrieval.result import RetrievedResult
 
+# split-v2: flattened (newline-less) report/OCR text must not produce a
+# single mega-line/Block. ``wrap_lines`` preserves the old split("\n")
+# behavior for structured text and sentence-wraps lines over the bound
+# (page markers "--- Page N (OCR) ---" act as hard boundaries and drop out).
+from src.utils.text_chunking import wrap_lines as _wrap_lines
+
+_EVIDENCE_LINE_MAX = 800
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Token estimation — consistent with the rest of the stack (chars // 4).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,7 +217,9 @@ def extract_relevant_evidence(text: str, query: str, max_chars: int = 1500) -> s
     if not keywords:
         return truncate_at_sentence(text, max_chars)
 
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    # split-v2: sentence-wrapped pseudo-lines for flattened walls of text;
+    # identical to split("\n") for structured (parliamentary) text.
+    paragraphs = _wrap_lines(text, max_line=_EVIDENCE_LINE_MAX)
     matched_paragraphs = []
 
     for p in paragraphs:
@@ -394,10 +404,12 @@ def segment_blocks(text: str) -> list[Block]:
       * a heading line is never its own surviving unit — it PREFIXES the
         next block (kind preserved), so budgeting can never detach a heading
         from its content. A heading with no following content is dropped.
-      * an oversized single line stays whole (never force-split here; only
-        the allocator's single last-resort sentence truncation may cut it).
+      * a flattened wall of text (no newlines — OCR/scraped reports) is
+        wrapped into <= _EVIDENCE_LINE_MAX pseudo-lines BEFORE segmentation
+        (split-v2), so a mega-document yields many blocks, never one giant
+        Block that budgeting can only take-or-leave whole.
     """
-    lines = [l.strip() for l in (text or "").split("\n") if l.strip()]
+    lines = _wrap_lines(text or "", max_line=_EVIDENCE_LINE_MAX)
     blocks: list[Block] = []
     pending_heading: list[str] = []
     i = 0

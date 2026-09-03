@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-SIF="incois-audit-app-hpc9.sif"
+SIF="incois-audit-app-hpc16.sif"
 ENV_FILE=".env.hpc"
 
 TMP_DIR="runtime/tmp"
@@ -32,6 +32,11 @@ fi
 
 mkdir -p "$TMP_DIR"
 mkdir -p "$LOG_DIR"
+
+export SINGULARITY_TMPDIR="$(pwd)/$TMP_DIR"
+export SINGULARITY_CACHEDIR="$(pwd)/$TMP_DIR"
+export APPTAINER_TMPDIR="$(pwd)/$TMP_DIR"
+export APPTAINER_CACHEDIR="$(pwd)/$TMP_DIR"
 
 # -----------------------------
 # Prevent duplicate startup
@@ -67,6 +72,7 @@ fi
 echo "📦 Starting Singularity container..."
 
 singularity exec \
+    --nv \
     --env-file "$ENV_FILE" \
     --writable-tmpfs \
     --bind "$(realpath data):/data" \
@@ -77,7 +83,7 @@ singularity exec \
     "$SIF" \
     python -m uvicorn src.retrieval.frontend.server:app \
     --host 127.0.0.1 \
-    --port 8000 \
+    --port 18000 \
     > "$LOG_DIR/app.log" 2>&1 &
 
 PID=$!
@@ -87,4 +93,4 @@ echo "$PID" > "$PID_FILE"
 echo "✅ Application started."
 echo "PID: $PID"
 echo "Log: $LOG_DIR/app.log"
-echo "URL: http://localhost:8000"
+echo "URL: http://localhost:18000"

@@ -60,6 +60,12 @@ from pathlib import Path
 # incremental/full index updates. Do NOT fork these functions into this file
 # (the server imports them too — a second copy would drift).
 import src.scripts.ingest_folder as _engine
+
+# Single canonical content hash — engine-owned so the CLI (records-kind
+# merge) and the engine (folders-kind conversion) can never drift apart.
+# Re-exported under the underscored name as this module's public contract
+# (pinned by tests/test_ingest_changed_records.py).
+_qa_content_hash = _engine.qa_content_hash
 from src.models.qa_record import QARecord
 from src.utils.app_paths import config_path, corpus_path, data_dir, index_dir
 from src.utils.atomic_io import append_jsonl_atomic
@@ -517,8 +523,91 @@ def _seed_seen_from_corpus() -> set[str]:
     return seen
 
 
+def _seed_seen_with_hash() -> dict[str, str]:
+    """Existing corpus as {question_id: content hash} — changed-record
+    detection for records-kind sources. Malformed lines are tolerated
+    (skipped); an absent corpus yields an empty map (everything is new)."""
+    hashes: dict[str, str] = {}
+    corpus = corpus_path()
+    if not corpus.exists():
+        return hashes
+    for line in corpus.open(encoding="utf-8"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            rec = QARecord.model_validate_json(s)
+        except Exception:  # noqa: BLE001 — tolerate a bad historical line
+            continue
+        if rec.question_id:
+            hashes[rec.question_id] = _qa_content_hash(rec)
+    return hashes
+
+
+def _seed_seen_hashes_by_url() -> dict[str, str]:
+    """Existing corpus as {source_url: content hash} — changed-file detection
+    for folders-kind sources (document ids are content-derived, so the
+    question_id axis cannot see a re-crawled file as a replacement).
+    Records without metadata.source_url (e.g. parliamentary Q&A rows) are
+    excluded — they are handled by the id-keyed path instead."""
+    hashes: dict[str, str] = {}
+    corpus = corpus_path()
+    if not corpus.exists():
+        return hashes
+    for line in corpus.open(encoding="utf-8"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            rec = QARecord.model_validate_json(s)
+        except Exception:  # noqa: BLE001
+            continue
+        url = getattr(rec.metadata, "source_url", None) if rec.metadata else None
+        if url:
+            hashes[url] = _qa_content_hash(rec)
+    return hashes
+
+
+def _replace_corpus_rows(replacements: dict[str, QARecord]) -> int:
+    """Atomically rewrite corpus rows whose question_id is in `replacements`.
+
+    Changed-record write-back: the row keeps its id and position in the
+    corpus; only its content is swapped for the re-crawled version. Rows we
+    cannot parse are kept verbatim. A replacement id not present in the
+    corpus (should not happen — the hash map is seeded from it) is appended
+    so content is never lost. Returns the number of rows replaced/appended.
+    """
+    from src.utils.atomic_io import write_text_atomic
+    corpus = corpus_path()
+    if not corpus.exists() or not replacements:
+        return 0
+    out_lines: list[str] = []
+    replaced: set[str] = set()
+    for line in corpus.open(encoding="utf-8"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            rid = json.loads(s).get("question_id")
+        except Exception:  # noqa: BLE001
+            out_lines.append(line.rstrip("\n"))
+            continue
+        if rid in replacements:
+            out_lines.append(replacements[rid].model_dump_json())
+            replaced.add(rid)
+        else:
+            out_lines.append(line.rstrip("\n"))
+    for rid in sorted(set(replacements) - replaced):
+        out_lines.append(replacements[rid].model_dump_json())
+        replaced.add(rid)
+    write_text_atomic(corpus, "\n".join(out_lines) + "\n")
+    return len(replaced)
+
+
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
-                      source: str | None = None, recursive: bool = False) -> int:
+                      source: str | None = None, recursive: bool = False,
+                      seen_hashes: dict[str, str] | None = None,
+                      out_changed: list[QARecord] | None = None) -> tuple[int, int]:
     """Merge ready-made QARecord JSONL (Phase-1 parliament output, staged
     crawler corpora) into `out`.
 
@@ -533,9 +622,22 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
     is always sorted (deterministic); the mechanism is generic — any
     records-kind source may opt in per-registry-entry, it is not an
     RS-specific special case.
+
+    ``seen_hashes`` (changed-record detection) maps existing corpus
+    question_id -> content hash. With it, an id that is already known but
+    hashes differently counts as CHANGED (record collected into
+    ``out_changed`` for the caller's row-replacement write-back) instead of
+    being silently skipped. None = legacy id-only behaviour (changed always
+    0). The first staged occurrence of an id always wins (declaration order)
+    — later same-id rows in the same run are ignored either way.
+
+    Returns ``(added, changed)`` — the legacy int return grew a second
+    element with the detection; both are plain counts.
     """
     added = 0
+    changed = 0
     skipped = 0
+    handled: set[str] = set()   # first staged occurrence of an id wins
     for rel in dirs:
         d = _data_path(rel)
         if not d.exists():
@@ -552,12 +654,25 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                     except Exception:  # noqa: BLE001 — count malformed/incomplete rows
                         skipped += 1
                         continue
+                    if rec.question_id in handled:
+                        continue
                     if rec.question_id not in seen:
+                        handled.add(rec.question_id)
                         seen.add(rec.question_id)
                         if source is not None and rec.metadata is not None:
                             rec.metadata.source = source
                         out.append(rec)
                         added += 1
+                        if seen_hashes is not None:
+                            seen_hashes[rec.question_id] = _qa_content_hash(rec)
+                    elif seen_hashes is not None:
+                        h = _qa_content_hash(rec)
+                        if seen_hashes.get(rec.question_id) != h:
+                            handled.add(rec.question_id)
+                            seen_hashes[rec.question_id] = h
+                            changed += 1
+                            if out_changed is not None:
+                                out_changed.append(rec)
             except OSError as e:
                 _engine.log(f"  [warn] {f}: {e}")
     if skipped:
@@ -571,7 +686,7 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
             "validation (e.g. empty answer_text — recover the official document "
             "via the backfill runbook; content is never faked)"
         )
-    return added
+    return added, changed
 
 
 def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
@@ -579,23 +694,38 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
     """Ingest ONE source through the existing engine. Returns stats."""
     if spec.kind == "records":
         out: list[QARecord] = []
+        out_changed: list[QARecord] = []
         seen = _seed_seen_from_corpus()
-        added = merge_record_dirs(spec.record_dirs, out, seen, source=spec.name,
-                                  recursive=spec.recursive)
+        hashes = _seed_seen_with_hash()
+        added, changed = merge_record_dirs(
+            spec.record_dirs, out, seen, source=spec.name,
+            recursive=spec.recursive,
+            seen_hashes=hashes, out_changed=out_changed,
+        )
+        if out_changed:
+            n_rep = _replace_corpus_rows({r.question_id: r for r in out_changed})
+            _engine.log(f"[ingest:{spec.name}] replaced {n_rep} changed record(s) "
+                        f"in place -> {corpus_path()} (content drift detected)")
         if out:
             lines = [rec.model_dump_json() for rec in out]
             append_jsonl_atomic(corpus_path(), lines)
             _engine.log(f"[ingest:{spec.name}] appended {added} record(s) -> {corpus_path()}")
-        else:
-            _engine.log(f"[ingest:{spec.name}] no new records in {spec.record_dirs}")
-        return {"added": added, "folders": 0}
+        elif not out_changed:
+            _engine.log(f"[ingest:{spec.name}] no new or changed records in {spec.record_dirs}")
+        return {"added": added, "changed": changed, "folders": 0}
 
     # kind == "folders" — expand (flat or hierarchical) into leaf jobs, each
     # handed to the proven engine path (detect -> convert -> dedup -> append).
     # Folder-level dedup against the corpus happens inside the engine per call.
     jobs = expand_source(spec, category_map or _BUILTIN_CATEGORY_MAP)
     total = files = failed = 0
+    changed_total = 0
     scanned = 0
+    # Changed-file detection across every leaf of this source, keyed on
+    # source_url (document ids are content-derived — the id axis can't see
+    # a re-crawled replacement). One seed per source run; the engine updates
+    # it in place as it converts.
+    seen_hashes_by_url = _seed_seen_hashes_by_url()
     # MoES ↔ Parliamentary Q&A cross-source dedup: only for the moes_website
     # source, only confirmed-duplicate filenames are added to exclude_files.
     # Empty set (safe default) preserves everything and changes nothing.
@@ -618,13 +748,16 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
             move_processed=move,
             meta_context=job.meta_context or None,
             exclude_files=set(job.exclude_files) | dedup_excludes or None,
+            seen_hashes=seen_hashes_by_url,
         )
         total += res.get("added", 0)
         files += res.get("files", 0)
         failed += res.get("failed", 0)
+        changed_total += res.get("changed", 0)
     if scanned == 0:
         _engine.log(f"[ingest:{spec.name}] no folders on disk for this source — nothing to do")
-    return {"added": total, "folders": scanned, "files": files, "failed": failed}
+    return {"added": total, "changed": changed_total, "folders": scanned,
+            "files": files, "failed": failed}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -666,20 +799,34 @@ def _moes_website_dedup_excludes() -> set[str]:
     return _moes_dedup_cache["done"]  # type: ignore[return-value]
 
 
-def choose_embed_action(total_added: int, no_rebuild: bool, full_rebuild: bool) -> str:
+def choose_embed_action(total_added: int, no_rebuild: bool, full_rebuild: bool,
+                        total_changed: int = 0) -> str:
     """Pure decision — mirrors ingest_folder.main()'s contract exactly:
 
-      nothing added        -> "skip"     (no index work at all)
-      --no-rebuild         -> "defer"    (records appended; index untouched)
-      --full-rebuild       -> "rebuild"  (explicit operator intent only)
-      no usable index      -> "rebuild"  (first build)
-      otherwise            -> "incremental" (embed ONLY new records)
+      nothing added/changed  -> "skip"     (no index work at all)
+      --no-rebuild           -> "defer"    (corpus updated; index untouched)
+      --full-rebuild         -> "rebuild"  (explicit operator intent, ALWAYS —
+                                            even with zero additions)
+      changed > 0            -> "rebuild"  (changed rows already live in the
+                                            index under old embeddings; FAISS
+                                            has no in-place update — a full
+                                            rebuild is the only correct path)
+      no usable index        -> "rebuild"  (first build)
+      otherwise              -> "incremental" (embed ONLY new records)
+
+    ``total_changed`` defaults to 0 so legacy callers keep byte-identical
+    behaviour. --no-rebuild beats the changed-trigger (operator deferral);
+    --full-rebuild beats everything else (explicit intent).
     """
-    if total_added <= 0:
+    if full_rebuild:
+        return "rebuild"
+    if total_added <= 0 and total_changed <= 0:
         return "skip"
     if no_rebuild:
         return "defer"
-    if full_rebuild or not _engine._index_exists():
+    if total_changed > 0:
+        return "rebuild"
+    if not _engine._index_exists():
         return "rebuild"
     return "incremental"
 
@@ -708,6 +855,7 @@ def run_sources(
     """Ingest each source, then update the index exactly once at the end."""
     _sync_engine_paths()
     total_added = 0
+    total_changed = 0
     per_source: dict[str, dict] = {}
     for name, spec in specs.items():
         _engine.log(f"=== ingest source: {name} (kind={spec.kind}"
@@ -717,9 +865,12 @@ def run_sources(
         res = ingest_source(spec, move_processed=move_processed, category_map=category_map)
         per_source[name] = res
         total_added += res.get("added", 0)
-    action = choose_embed_action(total_added, no_rebuild, full_rebuild)
+        total_changed += res.get("changed", 0)
+    action = choose_embed_action(total_added, no_rebuild, full_rebuild,
+                                 total_changed=total_changed)
     run_embed_phase(action)
-    return {"added": total_added, "embed": action, "sources": per_source}
+    return {"added": total_added, "changed": total_changed,
+            "embed": action, "sources": per_source}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -801,8 +952,9 @@ def main() -> None:
         # append-only; the index is untouched; nothing was rebuilt silently.
         print(f"[ingest] ERROR: {e}", file=sys.stderr)
         sys.exit(3)
-    print(f"[ingest] done: {result['added']} new record(s) appended; "
-          f"index: {result['embed']}")
+    print(f"[ingest] done: {result['added']} new record(s) appended"
+          f", {result.get('changed', 0)} changed (replaced in corpus)"
+          f"; index: {result['embed']}")
 
 
 if __name__ == "__main__":

@@ -29,9 +29,18 @@ numpy>=1.24.0
 pandas>=2.0.0
 networkx>=3.0.0
 matplotlib>=3.7.0
-faiss-cpu>=1.8.0
+# Retrieval/index stack — PINNED (#6 reproducibility hardening).
+# These versions ship inside the Docker→SIF image and the index artifacts
+# (FAISS binary, rank-bm25 pickle) are only guaranteed to load under the
+# same versions that built them. Bump deliberately, then rebuild the index.
+faiss-cpu==1.15.0
 sentence-transformers>=3.0.0
-rank-bm25>=0.2.2
+rank-bm25==0.2.2
+# torch is pinned too (consumed by sentence-transformers + the cross-encoder
+# reranker). CPU wheel for local/dev installs:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+# The production image installs the cu124 GPU wheel (see Dockerfile.base).
+torch==2.6.0
 pypdf>=5.0.0
 # PyMuPDF powers table-aware PDF extraction (src/data/pdf_table_extract.py).
 # NOTE: PyMuPDF is AGPL-3.0/commercial dual-licensed. The scraper degrades

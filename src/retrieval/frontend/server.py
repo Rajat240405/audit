@@ -358,6 +358,13 @@ class _LazyPipeline:
             print(f"Embedding Dimension : {p.embedder.embedding_dim}")
             print(f"Documents Indexed : {len(p._doc_map)}")
             print(f"Chunks Indexed : {chunks_count}")
+            # HPC device policy must be visible at startup (#5): retrieval is
+            # CPU-bound; the GPU belongs to the vLLM/LLM server only.
+            print(
+                f"Devices : embed={p.embedder.device} (EMBED_DEVICE) | "
+                f"rerank={p.reranker.device} (RERANK_DEVICE) | "
+                f"policy=GPU reserved for vLLM/LLM inference"
+            )
             print("FAISS Index Built Successfully")
             print("=" * 60)
         return p
@@ -1511,8 +1518,8 @@ def _llm_rewrite_answer(
         "1. Removes every statement based on a rejected claim.\n"
         "2. Keeps all supported statements verbatim where possible.\n"
         "3. Does NOT add any new facts, names, or figures.\n"
-        "4. Preserves markdown formatting and [Source N] citations for the "
-        "kept statements.\n"
+        "4. Preserves markdown formatting and keeps the answer free of "
+        "[Source N] citation markers (attribution is handled separately).\n"
         "If everything was rejected, say the context does not support the "
         "claim.\n"
         "Return ONLY the rewritten answer, no commentary."
@@ -1630,7 +1637,8 @@ def chat_stream(request: ChatStreamRequest):
                 "Match length to what the question and sources require. "
                 "Do not pad, and do not compress to a character quota. "
                 "Prefer third-person official wording unless the sources "
-                "read more naturally otherwise. Keep every [Source N] citation."
+                "read more naturally otherwise. Do not include [Source N] "
+                "markers in the answer text."
             ),
             "professional": (
                 "\n\nTONE: PROFESSIONAL — write in a clear, formal, "
@@ -1645,8 +1653,9 @@ def chat_stream(request: ChatStreamRequest):
                 "ministry reply. Write in the third person: \"The Government "
                 "has...\", \"As per available information...\", \"It may be "
                 "stated that...\". Mirror the question's clauses as "
-                "(a), (b), (c) sub-answers. Preserve figures, names and "
-                "[Source N] citations verbatim. Stay factual and official; "
+                "(a), (b), (c) sub-answers. Preserve figures and names "
+                "verbatim; do not include [Source N] markers in the answer "
+                "text. Stay factual and official; "
                 "no opinions, no recommendations. Length may match a full "
                 "ministry reply; do not cap at a character quota."
             ),
@@ -1654,14 +1663,13 @@ def chat_stream(request: ChatStreamRequest):
                 "\n\nTONE: CONCISE — be brief and direct. Use short bullet "
                 "points or 1-2 sentence paragraphs. Give only the key facts "
                 "and figures; drop elaboration, context and repetition. "
-                "Keep every [Source N] citation."
+                "Do not include [Source N] markers in the answer text."
             ),
             "detailed": (
                 "\n\nTONE: DETAILED — give a comprehensive answer. Cover "
                 "every aspect of the question with sub-sections or numbered "
                 "points, include supporting context, figures, dates and "
-                "institutional roles, and cite all relevant [Source N] "
-                "references. Depth over brevity. Ignore any preference for "
+                "institutional roles. Depth over brevity. Ignore any preference for "
                 "short answers; stay grounded in the sources."
             ),
         }

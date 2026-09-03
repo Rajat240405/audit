@@ -25,6 +25,30 @@ from src.retrieval.hybrid.reranker import CrossEncoderReranker
 from src.retrieval.result import RetrievedResult
 
 
+def _chunker_version() -> str:
+    """Version stamp of the long-doc chunker written into build_meta.json so a
+    stale/mixed-version index is detectable on load (esp. on HPC)."""
+    from src.utils.text_chunking import CHUNKER_VERSION
+
+    return CHUNKER_VERSION
+
+
+def _dep_versions() -> dict[str, str]:
+    """Reproducibility fingerprint (#6): versions of the libraries whose
+    on-disk artifacts end up inside the index directory (faiss binary,
+    rank-bm25 pickle) plus the embedding stack. Best-effort — a missing
+    distribution is simply omitted."""
+    import importlib.metadata
+
+    out: dict[str, str] = {}
+    for dist in ("faiss-cpu", "rank-bm25", "torch", "sentence-transformers"):
+        try:
+            out[dist] = importlib.metadata.version(dist)
+        except Exception:  # noqa: BLE001 — fingerprint must never break a build
+            continue
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Timing dataclass
 # ─────────────────────────────────────────────────────────────────────────────
@@ -94,14 +118,17 @@ class HybridRAGPipeline:
             device=_os.environ.get("EMBED_DEVICE", "cpu")
         )
 
-        # Vector store
+        # Vector store / BM25 index.
+        # NOTE: explicit None checks, NOT `arg or default` — both classes
+        # implement __len__, so a freshly-constructed (empty) instance is
+        # falsy and would be silently discarded by `or`.
         self._embedding_dim = self.embedder.embedding_dim
-        self.vector_store = vector_store or FAISSVectorStore(
-            embedding_dim=self._embedding_dim
+        self.vector_store = (
+            vector_store
+            if vector_store is not None
+            else FAISSVectorStore(embedding_dim=self._embedding_dim)
         )
-
-        # BM25 index
-        self.bm25_index = bm25_index or BM25Index()
+        self.bm25_index = bm25_index if bm25_index is not None else BM25Index()
 
         # Cross-encoder reranker (CPU-viable)
         self.reranker = reranker if reranker is not None else CrossEncoderReranker()
@@ -116,7 +143,14 @@ class HybridRAGPipeline:
         # figure buried in a long answer can be found. Short docs stay whole
         # (the working median path is untouched).
         self.long_doc_chars = 4000
-        self.long_chunk_chars = 500
+        self.long_chunk_chars = 500  # packing target (unchanged design value)
+        # split-v2 hard guarantees (src/utils/text_chunking.py): no chunk body
+        # exceeds long_chunk_max, and at most long_chunk_overlap chars of the
+        # previous chunk's tail are carried into the next chunk. Together they
+        # make flattened (newline-less) report text chunk correctly instead of
+        # degenerating to one mega-chunk.
+        self.long_chunk_max = 800
+        self.long_chunk_overlap = 80
         self._long_chunk_map: dict[str, QAChunk] = {}
         self._long_chunk_texts: dict[str, str] = {}
 
@@ -314,35 +348,70 @@ class HybridRAGPipeline:
         return len(new_recs)
 
     def _split_long_doc(self, r: QARecord) -> list[QAChunk]:
-        """Split a long document's answer into ~500-char ANNEXURE chunks."""
-        chunks = []
-        ans = r.answer_text or ""
-        # split on paragraph boundaries first, then pack into ~500-char chunks
-        paras = [p.strip() for p in ans.split("\n") if p.strip()]
-        current = ""
-        idx = 0
-        for para in paras:
-            if len(current) + len(para) + 2 > self.long_chunk_chars and current:
-                chunks.append(QAChunk(
-                    chunk_id=f"{r.question_id}_L{idx}",
-                    parent_doc_id=r.question_id,
-                    chunk_type=ChunkType.ANNEXURE,
-                    chunk_text=current.strip(),
-                    metadata=r.metadata,
-                ))
-                idx += 1
-                current = para
-            else:
-                current = current + "\n" + para if current else para
-        if current.strip():
-            chunks.append(QAChunk(
+        """Split a long document's answer into ~500-char ANNEXURE chunks.
+
+        Delegates to ``src.utils.text_chunking.split_long_text`` (split-v2):
+        page-marker boundaries → real newlines → sentence splits → word-wrap
+        fallback; headings stay bonded to their content; <=80-char tail
+        overlap between neighbors. Cannot degenerate into a single
+        mega-chunk for flattened (newline-less) report/OCR text. Chunk IDs
+        remain ``{question_id}_L{idx}`` — the Deep-sibling machinery
+        (``_chunk_seq``) is untouched.
+        """
+        from src.utils.text_chunking import split_long_text
+
+        pieces = split_long_text(
+            r.answer_text or "",
+            target=self.long_chunk_chars,
+            max_chars=self.long_chunk_max,
+            overlap=self.long_chunk_overlap,
+        )
+        return [
+            QAChunk(
                 chunk_id=f"{r.question_id}_L{idx}",
                 parent_doc_id=r.question_id,
                 chunk_type=ChunkType.ANNEXURE,
-                chunk_text=current.strip(),
+                chunk_text=piece,
                 metadata=r.metadata,
-            ))
-        return chunks
+            )
+            for idx, piece in enumerate(pieces)
+        ]
+
+    def _rerank_text_for(self, cand_id: str, query: str) -> str:
+        """The text a cross-encoder sees for one candidate (#4).
+
+        Chunk candidates rerank on their own (small) chunk text. Parent-row
+        candidates rerank on a BOUNDED, query-relevant window — ``QUESTION:``
+        line + the keyword-anchored structural evidence window (same
+        ``assemble_parent_evidence`` machinery the generator budgets with,
+        capped at PARENT_EVIDENCE_CAP_TOKENS) — instead of the raw parent
+        string whose first 512 tokens are often boilerplate cover pages.
+        """
+        txt = self._chunk_texts.get(cand_id)
+        if txt is None:
+            txt = self._long_chunk_texts.get(cand_id)
+        if txt is not None:
+            return txt
+        rec = self._doc_map.get(cand_id)
+        if rec is None:
+            return ""
+        from src.generation.evidence import assemble_parent_evidence
+
+        return (
+            f"QUESTION: {rec.question_text or ''}\n"
+            + assemble_parent_evidence(rec.answer_text or "", query)
+        )
+
+    def _parent_id_of(self, unit_id: str) -> str:
+        """Parent document id for any retrieval unit: bare doc id, a
+        use_chunking Q/A chunk id, or a long-doc ``_L{n}`` chunk id.
+        Unknown ids map to themselves (never raises)."""
+        if unit_id in self._doc_map:
+            return unit_id
+        ch = self._chunk_map.get(unit_id)
+        if ch is None:
+            ch = self._long_chunk_map.get(unit_id)
+        return ch.parent_doc_id if ch is not None else unit_id
 
     def retrieve(
         self,
@@ -378,9 +447,17 @@ class HybridRAGPipeline:
         query_embedding = self.embedder.embed(expanded_query)
         timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
 
+        # ── Stage 2/3: retrieval — oversample when filters are active (#2) ───
+        # Metadata filters run AFTER fusion; with the default 50-slot pool a
+        # matching document that ranked #60 unfiltered can never survive the
+        # filter. Oversample both channels 8x when any filter axis is on so
+        # filtering narrows a real pool instead of silently returning ~0.
+        filters_active = bool(doc_types or orgs or doc_categories)
+        pool_k = self.dense_top_k * (8 if filters_active else 1)
+
         # ── Stage 2: Dense retrieval ───────────────────────────────────────
         t_dense = time.perf_counter()
-        dense_results = self.vector_store.search(query_embedding, k=self.dense_top_k)
+        dense_results = self.vector_store.search(query_embedding, k=pool_k)
         timings.dense_search_ms = (time.perf_counter() - t_dense) * 1000
         print(f"Dense candidates : {len(dense_results)}")
         if on_stage:
@@ -388,7 +465,7 @@ class HybridRAGPipeline:
 
         # ── Stage 3: BM25 retrieval ────────────────────────────────────────
         t_bm25 = time.perf_counter()
-        bm25_results = self.bm25_index.search(expanded_query, k=self.dense_top_k)
+        bm25_results = self.bm25_index.search(expanded_query, k=pool_k)
         timings.bm25_search_ms = (time.perf_counter() - t_bm25) * 1000
         print(f"BM25 candidates : {len(bm25_results)}")
         if on_stage:
@@ -405,6 +482,42 @@ class HybridRAGPipeline:
         print(f"RRF candidates : {len(fused_results)}")
         if on_stage:
             on_stage("rrf", {"count": len(fused_results)})
+
+        # ── Stage 4.6: collapse duplicate units by parent (#1) ─────────────
+        # Parents AND their `_L{n}`/Q/A chunks share one index, so a long
+        # document could occupy several top_k reranker slots and the user saw
+        # "5 results" that were really 2–3 documents. Collapse to one
+        # candidate per parent: ORDER and score come from the parent's
+        # best-ranked unit (RRF is sorted ⇒ first occurrence), while the
+        # candidate IDENTITY is the canonical parent row whenever that row
+        # itself is in the pool — citations, UI source ids, custom rerankers
+        # and the evidence bridge all key on parent ids. A chunk id is the
+        # representative only when the parent row is absent, and chunk hits
+        # still route through the unchanged post-rerank parent assembly.
+        groups: dict[str, list[tuple[str, float]]] = {}
+        for cand_id, score in fused_results:
+            groups.setdefault(self._parent_id_of(cand_id), []).append((cand_id, score))
+        collapsed: list[tuple[str, float]] = []
+        # Chunk-hit provenance rides along even when the canonical parent row
+        # becomes the representative — downstream (metadata["chunk_ids"],
+        # Deep-mode neighbor pull-in gating) depends on it.
+        collapse_hits: dict[str, list[str]] = {}
+        for pid, units in groups.items():
+            best_id, best_score = units[0]
+            rep_id = pid if any(u == pid for u, _ in units) else best_id
+            collapsed.append((rep_id, best_score))
+            hits = [
+                u for u, _ in units
+                if u != pid and (u in self._chunk_map or u in self._long_chunk_map)
+            ]
+            if hits:
+                collapse_hits[pid] = hits[:8]
+        if len(collapsed) != len(fused_results):
+            print(
+                f"Parent collapse : {len(fused_results)} units -> "
+                f"{len(collapsed)} distinct parents"
+            )
+        fused_results = collapsed
 
         # ── Stage 4.5: Metadata filters (doc_types / orgs / categories) ──
         # Optional, applied post-RRF pre-rerank. Union WITHIN an axis, AND
@@ -480,19 +593,26 @@ class HybridRAGPipeline:
             if on_stage:
                 on_stage("filter", {"count": len(fused_results)})
 
-        # ── Stage 5: Cross-encoder reranking ───────────────────────────────
+        # ── Stage 5: Cross-encoder reranking (#4: representative texts) ────
+        # Never hand the cross-encoder a raw mega-document: it truncates at
+        # 512 tokens, so a long parent was judged on its boilerplate cover
+        # page while the answer sat 95% deep. Chunk candidates rerank on
+        # their own text; parent candidates rerank on a bounded,
+        # query-relevant window (QUESTION line + keyword-anchored evidence,
+        # capped at PARENT_EVIDENCE_CAP_TOKENS — the same structural
+        # machinery evidence assembly uses, no new mechanism introduced).
         if self.use_reranker and fused_results:
             t_rerank = time.perf_counter()
-            active_texts = dict(self._doc_texts)
-            if self.use_chunking:
-                active_texts.update(self._chunk_texts)
-            active_texts.update(self._long_chunk_texts)
-            
+            rerank_texts = {
+                cand_id: self._rerank_text_for(cand_id, query)
+                for cand_id, _s in fused_results
+            }
+
             reranked_results = self.reranker.rerank(
                 query=query,
                 candidates=fused_results,
                 k=top_k,
-                doc_texts=active_texts,
+                doc_texts=rerank_texts,
             )
             timings.rerank_ms = (time.perf_counter() - t_rerank) * 1000
             final_results = reranked_results
@@ -636,7 +756,17 @@ class HybridRAGPipeline:
                         "document_type": record.metadata.document_type,
                         # Task 3: long-chunk provenance for Deep-mode neighbor
                         # pull-in (omitted when the parent hit directly)
-                        **({"chunk_ids": list(g["chunk_ids"])} if g["chunk_ids"] else {}),
+                        # merge direct chunk hits with collapse provenance so
+                        # chunk_ids survive canonical-parent representatives
+                        **(
+                            {"chunk_ids": _merged}
+                            if (
+                                _merged := list(dict.fromkeys(
+                                    g["chunk_ids"] + collapse_hits.get(pid, [])
+                                ))[:8]
+                            )
+                            else {}
+                        ),
                         # Bridge: evidence = parent-level assembly (not chunk
                         # windows / keyword filter) — Deep sibling rescue is
                         # subsumed and skips flagged results.
@@ -748,7 +878,7 @@ class HybridRAGPipeline:
                 chunk_id: c.chunk_text for chunk_id, c in self._long_chunk_map.items()
             }
 
-        self._warn_if_build_meta_mismatch(path)
+        self._check_build_meta_compat(path)
 
         print(f"✓ Loaded Hybrid RAG pipeline (use_chunking={self.use_chunking}) from {path}")
 
@@ -776,13 +906,27 @@ class HybridRAGPipeline:
             "chunk_count": len(self._chunk_map),
             "use_chunking": self.use_chunking,
             "fusion_top_k": self.fusion_top_k,
+            # split-v2 fingerprint: chunk boundaries change meaning across
+            # chunker versions, so a stale HPC index must be rebuilt, not
+            # incrementally extended.
+            "chunker": _chunker_version(),
+            "deps": _dep_versions(),
             "rows_sha256": hasher.hexdigest(),
         }
         from src.utils.atomic_io import dump_json_atomic
 
         dump_json_atomic(path / "build_meta.json", meta, indent=2)
 
-    def _warn_if_build_meta_mismatch(self, path: Path) -> None:
+    def _check_build_meta_compat(self, path: Path) -> None:
+        """Index-compatibility check on load (#6).
+
+        Fail-fast on CRITICAL embedding incompatibilities: an embed_dim
+        mismatch would crash inside FAISS three calls later with a cryptic
+        message — raise a legible error here instead. Model-name and chunker
+        mismatches stay warning-only (model: same dim can still be wrong but
+        is sometimes intentional; chunker: a stale index is internally
+        consistent, just built with older boundaries).
+        """
         meta_path = path / "build_meta.json"
         if not meta_path.exists():
             return
@@ -790,13 +934,33 @@ class HybridRAGPipeline:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             return
+        saved_chunker = meta.get("chunker")
+        live_chunker = _chunker_version()
+        if saved_chunker and saved_chunker != live_chunker:
+            print(
+                f"[build_meta] WARNING: index chunked with {saved_chunker!r} "
+                f"but live chunker is {live_chunker!r}. Rebuild the index."
+            )
         live_dim = getattr(self.embedder, "embedding_dim", self._embedding_dim)
         saved_dim = meta.get("embed_dim")
         if saved_dim is not None and live_dim is not None and int(saved_dim) != int(live_dim):
-            print(
-                f"[build_meta] WARNING: index embed_dim={saved_dim} "
-                f"but live embedder dim={live_dim}. Rebuild the index."
+            raise RuntimeError(
+                f"[build_meta] index embed_dim={saved_dim} but live embedder "
+                f"dim={live_dim} ({getattr(self.embedder, 'model_name', '?')}). "
+                f"Continuing would crash FAISS at query time. Rebuild the index "
+                f"with this embedding model (ingest job), or point the serving "
+                f"container at the matching model."
             )
+        deps = meta.get("deps") or {}
+        if deps:
+            live_deps = _dep_versions()
+            drift = {
+                k: (deps[k], live_deps.get(k))
+                for k in deps
+                if k in live_deps and deps[k] != live_deps[k]
+            }
+            if drift:
+                print(f"[build_meta] NOTE: dependency drift vs index build: {drift}")
         saved_model = meta.get("embed_model")
         live_model = getattr(self.embedder, "model_name", None)
         if saved_model and live_model and str(saved_model) != str(live_model):

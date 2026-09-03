@@ -29,6 +29,7 @@ Also:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -182,10 +183,70 @@ def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool
     return n
 
 
+def qa_content_hash(rec) -> str:
+    """Deterministic full-sha256 content hash of a QARecord.
+
+    Canonical identity for changed-record detection (re-exported by
+    src/scripts/ingest.py as ``_qa_content_hash``). Covers question_id,
+    question_text, answer_text and the full metadata dump. EXCLUDES
+    scraped_at (volatile — a re-crawl of unchanged content must hash
+    identically) and the ``content_hash`` computed field (a
+    question_text-only projection — redundant noise here).
+
+    64-char hex (full digest — hash collisions in a 2.6k-row corpus are a
+    non-issue, but the full digest keeps this safe for arbitrary growth).
+    """
+    d = rec.model_dump(mode="json", exclude={"scraped_at"})
+    d.pop("content_hash", None)
+    blob = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _purge_stale_url_rows(stale_urls: set[str], keep_hashes: dict[str, set[str]]) -> int:
+    """Remove OLD corpus rows for files whose content changed this run.
+
+    Records-kind rows (stable question_id) are updated in place by
+    ingest.py's row replacement; document-kind rows have CONTENT-DERIVED
+    ids, so the previous version of a changed file would otherwise survive
+    as an orphan row (stale content, still retrievable). For each changed
+    source_url we keep exactly the hash set produced during this run and
+    drop every older variant. Lines that fail validation are kept verbatim —
+    we never delete what we cannot parse.
+    """
+    removed = 0
+    if not CORPUS.exists():
+        return 0
+    kept: list[str] = []
+    with open(CORPUS, encoding="utf-8") as fh:
+        for line in fh:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                rec = QARecord.model_validate_json(s)
+                url = getattr(rec.metadata, "source_url", None) if rec.metadata else None
+            except Exception:  # noqa: BLE001 — never drop what we can't parse
+                kept.append(line.rstrip("\n"))
+                continue
+            if url is not None and url in stale_urls:
+                keep = keep_hashes.get(url) or set()
+                if qa_content_hash(rec) not in keep:
+                    removed += 1
+                    continue
+            kept.append(line.rstrip("\n"))
+    if removed:
+        from src.utils.atomic_io import write_text_atomic
+        write_text_atomic(CORPUS, "\n".join(kept) + "\n")
+        log(f"[ingest_folder] removed {removed} superseded corpus row(s) "
+            f"for {len(stale_urls)} changed file(s)")
+    return removed
+
+
 def ingest_folder(folder: str, move_processed: bool = False,
                   meta_context: dict | None = None,
                   only_files: set[str] | None = None,
-                  exclude_files: set[str] | None = None) -> dict:
+                  exclude_files: set[str] | None = None,
+                  seen_hashes: dict[str, str] | None = None) -> dict:
     """Convert every file in a folder, append new records to the corpus.
 
     ``meta_context`` is an additive per-source identity for hierarchical
@@ -205,11 +266,19 @@ def ingest_folder(folder: str, move_processed: bool = False,
     (e.g. record.json, manifest.json) that live next to real documents in a
     staged corpus. Matching is case-insensitive; excluded files are not
     scanned, not converted, never moved. None (default) = legacy behavior.
+
+    ``seen_hashes`` (additive, changed-record detection) is the corpus's
+    last-known {source_url: content hash} map, seeded by the caller
+    (ingest.py's _seed_seen_hashes_by_url). A converted file whose url is
+    present with a DIFFERENT hash means the upstream file changed: it counts
+    as ``changed`` (ids are content-derived, so it also lands as a new row —
+    the superseded row is purged after the append). None (default) = legacy
+    behavior: no change detection and ``changed`` is always 0.
     """
     p = Path(folder)
     if not p.exists():
         log(f"[ingest_folder] folder not found: {folder}")
-        return {"files": 0, "added": 0, "failed": 0}
+        return {"files": 0, "added": 0, "failed": 0, "changed": 0}
 
     excluded = {n.lower() for n in (exclude_files or set())}
     all_files = sorted(
@@ -223,7 +292,7 @@ def ingest_folder(folder: str, move_processed: bool = False,
     if not files:
         scope = f" (filter matched 0 of {len(all_files)} on disk)" if only_files is not None else ""
         log(f"[ingest_folder] no files in {folder}{scope}")
-        return {"files": 0, "added": 0, "failed": 0}
+        return {"files": 0, "added": 0, "failed": 0, "changed": 0}
 
     log(f"[ingest_folder] scanning {folder}: {len(files)} file(s)")
     out: list = []
@@ -243,6 +312,9 @@ def ingest_folder(folder: str, move_processed: bool = False,
                 continue
 
     ok = fail = 0
+    changed = 0
+    _stale_urls: set[str] = set()              # urls whose content changed
+    _new_hashes: dict[str, set[str]] = {}      # url -> hashes produced this run
     types_used: dict[str, int] = {}
     # Crawl (crawl_incois_reports) writes a .txt next to each .pdf — skip the
     # .txt when its .pdf sibling exists so each report is ingested exactly
@@ -271,6 +343,22 @@ def ingest_folder(folder: str, move_processed: bool = False,
             else:
                 fail += 1
                 log(f"  WARN {f.name}: no records extracted")
+            # Changed-file detection (content-hash keyed on source_url):
+            # document-kind ids are content-derived, so an updated upstream
+            # file arrives under a NEW id and pure id-dedup cannot see the
+            # replacement. Compare with the caller-seeded corpus hash map.
+            if n > 0 and seen_hashes is not None:
+                for _rec in out[before:]:
+                    _md = getattr(_rec, "metadata", None)
+                    _url = getattr(_md, "source_url", None) or str(f)
+                    _h = qa_content_hash(_rec)
+                    _old = seen_hashes.get(_url)
+                    if _old is not None and _old != _h:
+                        changed += 1
+                        _stale_urls.add(_url)
+                        log(f"  CHANGED {f.name} (content drift vs corpus)")
+                    seen_hashes[_url] = _h
+                    _new_hashes.setdefault(_url, set()).add(_h)
         except Exception as e:  # noqa: BLE001
             fail += 1
             log(f"  ERROR {f.name}: {e}")
@@ -287,7 +375,13 @@ def ingest_folder(folder: str, move_processed: bool = False,
         append_jsonl_atomic(CORPUS, lines)
         log(f"[ingest_folder] appended {len(out)} record(s) -> {CORPUS}")
 
-    return {"files": len(files), "added": len(out), "failed": fail, "types": types_used}
+    if _stale_urls:
+        # drop the superseded old-content rows (content-derived ids make
+        # the new version a different id — replacement is url-keyed here)
+        _purge_stale_url_rows(_stale_urls, _new_hashes)
+
+    return {"files": len(files), "added": len(out), "failed": fail,
+            "changed": changed, "types": types_used}
 
 
 def _index_exists() -> bool:
