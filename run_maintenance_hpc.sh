@@ -39,6 +39,7 @@ TMP_DIR="runtime/tmp"
 LOG_BASE="runtime/logs"
 LOG_DIR="${LOG_BASE}/maintenance"
 LATEST_LINK="${LOG_BASE}/maintenance.log"
+PID_FILE="runtime/app.pid"
 
 # ── validate required files ───────────────────────────────────────────────────
 if [ ! -f "$SIF" ]; then
@@ -81,6 +82,19 @@ fi
 mkdir -p "$TMP_DIR"
 mkdir -p "$LOG_DIR"
 
+# ── remember whether the web app is up ────────────────────────────────────────
+# Sampled BEFORE the crawl: the crawl/ingest runs in its own container process
+# and writes the index to disk, but the running server keeps its pipeline in
+# memory — it only sees the new vectors after a restart (see the restart block
+# at the end of this script). If the app was down, we leave it down.
+APP_WAS_RUNNING=0
+if [ -f "$PID_FILE" ]; then
+    APP_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+        APP_WAS_RUNNING=1
+    fi
+fi
+
 # Temp/cache for the SIF unpack (multi-GB, --writable-tmpfs): never the
 # login node's tiny /tmp — same fix as start_hpc.sh (no-space crash).
 export SINGULARITY_TMPDIR="$SCRIPT_DIR/$TMP_DIR"
@@ -119,7 +133,21 @@ CRAWL_ARGS=("$@")
 
 echo "[maintenance] invoking crawl_all.py with args: ${CRAWL_ARGS[*]:-<none>}"
 
+# ── GPU for embedding (opt-in, detected) ──────────────────────────────────────
+# Embedding is GPU-accelerated only when this job actually lands on a node with
+# visible GPUs. cron frequently runs on a login/service node without one, and
+# forcing CUDA there would crash the run — so fall back to CPU (correct, just
+# slower on the rare full rebuild that a changed record triggers).
+GPU_ARGS=()
+if ls /dev/nvidia[0-9]* >/dev/null 2>&1; then
+    GPU_ARGS=(--nv --env EMBED_DEVICE=cuda)
+    echo "[maintenance] GPU detected — embedding on CUDA (EMBED_DEVICE=cuda)"
+else
+    echo "[maintenance] no GPU visible — embedding on CPU"
+fi
+
 singularity exec \
+    ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
     --env-file    "$ENV_FILE" \
     --writable-tmpfs \
     --pwd         /app \
@@ -137,5 +165,22 @@ echo "[maintenance] ============================================================
 echo "[maintenance] run finished: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "[maintenance] exit code: $CRAWL_EXIT"
 echo "[maintenance] ============================================================"
+
+# ── make the new vectors live ────────────────────────────────────────────────
+# crawl_all runs ingest in a SEPARATE container process: it writes the index to
+# /storage/hybrid_rag on disk, but the running server holds its pipeline in
+# memory and never re-reads it (live swap only happens on the UI upload path).
+# So a successful run that actually touched the index needs an app restart —
+# otherwise the freshly crawled documents stay invisible until someone
+# restarts by hand. Marker line printed by src/scripts/ingest.py:
+#   [ingest] done: N new record(s) appended, M changed (replaced in corpus); index: <action>
+if [ "$CRAWL_EXIT" -eq 0 ] && [ "$APP_WAS_RUNNING" -eq 1 ] \
+   && grep -qE "\[ingest\] done: .*; index: (incremental|rebuild)" "$RUN_LOG"; then
+    echo "[maintenance] index was updated — restarting the app to load it"
+    ./stop_hpc.sh || true
+    # nohup: the app must survive this cron job's session teardown.
+    nohup ./start_hpc.sh >> "$RUN_LOG" 2>&1 \
+        || echo "[maintenance] WARNING: app restart failed — new records stay invisible until a manual restart"
+fi
 
 exit $CRAWL_EXIT

@@ -36,6 +36,6 @@ PROJECT=/home/user/incois-audit
 
 # ── Optional: force a full run mid-week if needed ─────────────────────────────
 # Uncomment and trigger manually or via `crontab -e` when an urgent update
-# must be pulled regardless of the 7-day interval:
+# regardless of the 20-hour per-source interval (see config/schedule.yaml):
 #
 #0 3 * * 3 cd ${PROJECT} && ./run_maintenance_hpc.sh --force >> ${PROJECT}/runtime/logs/cron.log 2>&1

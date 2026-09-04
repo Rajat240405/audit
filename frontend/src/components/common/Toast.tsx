@@ -15,7 +15,9 @@ export interface ToastItem {
 
 export function Toast({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss?: (id: string) => void }) {
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+    // max-h + scroll: sticky verification notices never auto-dismiss, so a
+    // long session can stack enough of them to run off the top of the screen.
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex max-h-[70vh] w-80 flex-col gap-2 overflow-y-auto">
       <AnimatePresence>
         {toasts.map((t) => (
           <motion.div
