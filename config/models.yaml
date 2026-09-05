@@ -181,6 +181,13 @@ providers:
         # metadata only — never read by execution policy, never sent on wire).
         serving:
           reasoning_parser: qwen3
+          # Deep-mode thinking cap (Qwen3 ``chat_template_kwargs.enable_thinking:
+          # true``). 1024 reasoning tokens is enough for retrieval-grounded
+          # audit answers and cuts Deep-mode latency markedly vs the old
+          # hardcoded 4096; raise to 2048/4096 if answers start losing
+          # multi-step reasoning on very large evidence sets.
+          # Fast mode is unaffected (thinking stays OFF).
+          default_thinking_budget: 1024
           max_model_len: 131072
           notes: "requires vLLM>=0.17.0 + transformers>=5.8.0; native ctx 262144; served 131072 on A40 (2026-08-19, was 32768) — 2×131072 fp8-KV seqs fit @0.90 util, 262144 not safe at max-num-seqs 2; Ampere/SM86 runs FP8 weight-only via Marlin; live cmd keeps --kv-cache-dtype fp8 — if rejected on SM86, drop it and use 65536"
         thinking_capable: true

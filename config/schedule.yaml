@@ -83,6 +83,6 @@ sources:
     interval_hours: 20                    # daily (cron 02:00; 20h guard absorbs runtime jitter)
     crawler_module: src.scripts.crawl_incois_reports
     crawler_config: null                  # incois uses --sections/--out, not --config
-    crawler_args: ["--sections", "all"]
+    crawler_args: ["--sections", "all", "--out", "/data/incois_reports]
     exit_ok: [0]                          # incois main() returns None; subprocess exits 0
     ingest_source: incois

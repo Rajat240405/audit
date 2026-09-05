@@ -399,7 +399,7 @@ class HybridRAGPipeline:
 
         return (
             f"QUESTION: {rec.question_text or ''}\n"
-            + assemble_parent_evidence(rec.answer_text or "", query)
+            + assemble_parent_evidence(rec.answer_text or "", query, cand_id)
         )
 
     def _parent_id_of(self, unit_id: str) -> str:
@@ -730,7 +730,9 @@ class HybridRAGPipeline:
                 # structurally windowed here (assemble_parent_evidence).
                 from src.generation.evidence import assemble_parent_evidence
 
-                evidence = assemble_parent_evidence(record.answer_text or "", query)
+                evidence = assemble_parent_evidence(
+                    record.answer_text or "", query, pid
+                )
 
                 dense_score = next((s for d_id, s in dense_results if d_id == pid), None)
                 bm25_score = next((s for d_id, s in bm25_results if d_id == pid), None)

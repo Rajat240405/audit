@@ -34,7 +34,10 @@ budgets arrive as numbers from the ExecutionPlan.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -490,6 +493,123 @@ def segment_blocks(text: str) -> list[Block]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Segmentation cache
+#
+# ``segment_blocks`` is DETERMINISTIC and QUERY-INDEPENDENT — it depends on
+# nothing but the text it is given. It is nevertheless re-run for the same
+# parent on every query (rerank evidence text for up to ``fusion_top_k``
+# candidates, then again for the admitted ones during allocation), and on a
+# mega-document (annual reports, 100k+ chars) one pass costs far more than the
+# rest of the pipeline stage combined.
+#
+# So we memoize its OUTPUT, not its behaviour: same text => same Block list,
+# byte for byte. The rules above are untouched; this is a pure cache.
+#
+# Staleness is impossible by construction: the key mixes the caller's document
+# identity, the segmenter version, the text length and a BLAKE2b digest of the
+# text itself. Any change to the document content (a re-ingest, a changed
+# record, a different OCR result) changes the digest, so a changed parent can
+# never reuse blocks computed from its previous content.
+#
+# Only deterministic segmentation output is cached — never generated answers,
+# never retrieval results, never anything query-dependent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Bump if the segmentation RULES above ever change (belt-and-braces: the
+# content digest alone already prevents stale reuse).
+SEGMENTER_VERSION = "seg-v1"
+
+# Capacity guards. Only oversized documents (>PARENT_EVIDENCE_CAP_TOKENS) ever
+# reach this cache, so 512 entries is already generous for a live system;
+# the byte cap is the real bound (this box has ~1 TB RAM, but unbounded growth
+# across a long-lived process is still wrong).
+_SEGMENT_CACHE_MAX_DOCS = 512
+_SEGMENT_CACHE_MAX_CHARS = 192 * 1024 * 1024  # 192 MiB of cached block text
+
+_segment_cache: "OrderedDict[str, tuple[Block, ...]]" = OrderedDict()
+_segment_cache_chars = 0
+_segment_cache_stats = {"hits": 0, "misses": 0, "evictions": 0}
+_segment_cache_lock = threading.Lock()
+
+
+def _segment_cache_key(doc_key: str, text: str) -> str:
+    """Identity of one (document, content) pair.
+
+    ``doc_key`` is the caller's document id (parent id / candidate id) and is
+    only there for debuggability — correctness rests on the digest, so a
+    reused or colliding doc_key can never serve stale blocks.
+    """
+    digest = hashlib.blake2b(
+        (text or "").encode("utf-8", "ignore"), digest_size=16
+    ).hexdigest()
+    return f"{doc_key}|{SEGMENTER_VERSION}|{len(text or '')}|{digest}"
+
+
+def segment_blocks_cached(doc_key: str, text: str) -> list[Block]:
+    """``segment_blocks(text)``, memoized per (doc_key, content).
+
+    Returns a fresh list each call (the cached tuple is never handed out) so a
+    caller that mutates the list cannot corrupt the cache. ``Block`` objects
+    are shared — every consumer in this module treats them as read-only.
+    """
+    global _segment_cache_chars
+    key = _segment_cache_key(doc_key, text)
+
+    with _segment_cache_lock:
+        hit = _segment_cache.get(key)
+        if hit is not None:
+            _segment_cache.move_to_end(key)
+            _segment_cache_stats["hits"] += 1
+            return list(hit)
+        _segment_cache_stats["misses"] += 1
+
+    blocks = tuple(segment_blocks(text))
+    size = sum(len(b.text) for b in blocks)
+
+    with _segment_cache_lock:
+        if key not in _segment_cache:
+            _segment_cache[key] = blocks
+            _segment_cache_chars += size  # type: ignore[operator]
+        else:                              # another thread won the race
+            blocks = _segment_cache[key]
+            _segment_cache.move_to_end(key)
+            size = 0
+        while (
+            len(_segment_cache) > _SEGMENT_CACHE_MAX_DOCS
+            or _segment_cache_chars > _SEGMENT_CACHE_MAX_CHARS
+        ):
+            _old_key, _old_blocks = _segment_cache.popitem(last=False)
+            _segment_cache_chars -= sum(len(b.text) for b in _old_blocks)  # type: ignore[operator]
+            _segment_cache_stats["evictions"] += 1
+
+    return list(blocks)
+
+
+def segment_cache_stats() -> dict:
+    """Cache counters (diagnostics/tests) — hits, misses, size, evictions."""
+    with _segment_cache_lock:
+        return {
+            "version": SEGMENTER_VERSION,
+            "hits": _segment_cache_stats["hits"],
+            "misses": _segment_cache_stats["misses"],
+            "evictions": _segment_cache_stats["evictions"],
+            "docs": len(_segment_cache),
+            "chars": _segment_cache_chars,
+            "max_docs": _SEGMENT_CACHE_MAX_DOCS,
+            "max_chars": _SEGMENT_CACHE_MAX_CHARS,
+        }
+
+
+def segment_cache_clear() -> None:
+    """Drop every cached segmentation (tests / after a corpus swap)."""
+    global _segment_cache_chars
+    with _segment_cache_lock:
+        _segment_cache.clear()
+        _segment_cache_chars = 0
+        _segment_cache_stats.update(hits=0, misses=0, evictions=0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Allocation
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -575,7 +695,10 @@ def allocate_evidence(
             alloc.skipped_doc_ids.append(r.doc_id)
             continue
         avail = remaining - header_cost
-        selection = _select_blocks(segment_blocks(a_text), keywords, avail)
+        # Cached: segmentation is query-independent (see segmentation cache).
+        selection = _select_blocks(
+            segment_blocks_cached(r.doc_id, a_text), keywords, avail
+        )
         if selection is None:
             alloc.skipped_doc_ids.append(r.doc_id)
             continue
@@ -602,7 +725,7 @@ def allocate_evidence(
         header = _source_header(r, 1, q_text)
         avail = remaining - estimate_tokens(header)
         if avail >= _MIN_TRUNCATED_TOKENS and a_text:
-            blocks = segment_blocks(a_text)
+            blocks = segment_blocks_cached(r.doc_id, a_text)
             best = _best_single_block(blocks, keywords)
             truncated_text = _truncate_tokens(best.text, avail)
             cost = estimate_tokens(header) + estimate_tokens(truncated_text)
@@ -728,8 +851,14 @@ def _render_selected(blocks: list[Block], selected: set[int]) -> tuple[str, int]
 PARENT_EVIDENCE_CAP_TOKENS = 4500
 
 
-def assemble_parent_evidence(answer_text: str, query: str) -> str:
+def assemble_parent_evidence(
+    answer_text: str, query: str, doc_key: str = ""
+) -> str:
     """The single evidence-source mechanism for a relevant parent document.
+
+    ``doc_key`` (optional) is the parent's identity for the segmentation
+    cache; leaving it empty is still safe (the cache key carries a digest of
+    ``answer_text``), it only reduces debuggability.
 
     Modest parents pass through whole (zero loss — the downstream
     ``allocate_evidence`` budget remains authoritative). Oversized parents
@@ -743,7 +872,7 @@ def assemble_parent_evidence(answer_text: str, query: str) -> str:
     if estimate_tokens(text) <= PARENT_EVIDENCE_CAP_TOKENS:
         return text
     keywords = query_keywords(query)
-    blocks = segment_blocks(text)
+    blocks = segment_blocks_cached(doc_key, text)
     sel = _select_blocks(blocks, keywords, PARENT_EVIDENCE_CAP_TOKENS)
     if sel is None:
         best = _best_single_block(blocks, keywords)

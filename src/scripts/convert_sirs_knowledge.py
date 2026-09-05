@@ -310,31 +310,100 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
     return 0
 
 
-def _ocr_pdf_text(path: Path) -> str:
-    """OCR a scanned PDF via PyMuPDF render + pytesseract. Returns '' if
-    tesseract/pymupdf aren't installed or OCR yields nothing."""
+_OCR_DPI = 200
+
+
+def _ocr_page(args) -> tuple[int, str]:
+    """OCR ONE page. Each thread opens its own fitz document (PyMuPDF
+    documents are not thread-safe). Returns (page_index, text) — failures
+    return '' for that page, exactly like the sequential path."""
+    path, page_index = args
     try:
         import fitz  # PyMuPDF
         import pytesseract
         from PIL import Image
     except ImportError:
+        return page_index, ""
+    try:
+        doc = fitz.open(str(path))
+        try:
+            pix = doc[page_index].get_pixmap(dpi=_OCR_DPI)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            t = pytesseract.image_to_string(img)
+        finally:
+            doc.close()
+        return page_index, t or ""
+    except Exception:  # noqa: BLE001
+        return page_index, ""
+
+
+def _ocr_workers() -> int:
+    """Page-level OCR parallelism. pytesseract shells out to the tesseract
+    binary, so threads scale near-linearly (the wait is a subprocess).
+    Override with OCR_WORKERS; 1 disables pooling (sequential path)."""
+    import os
+
+    try:
+        n = int(os.environ.get("OCR_WORKERS", "") or 0)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        n = min(8, os.cpu_count() or 4)
+    return max(1, n)
+
+
+def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
+    """OCR a scanned PDF via PyMuPDF render + pytesseract. Returns '' if
+    tesseract/pymupdf aren't installed or OCR yields nothing.
+
+    ``max_pages`` limits OCR to the first N pages — used by the type-
+    detection peek, which only needs the title page but used to OCR the
+    ENTIRE document (i.e. every scanned PDF was OCR'd twice per run).
+
+    Pages are OCR'd in a thread pool (OCR_WORKERS, default min(8, cpus)) and
+    re-joined in page order, so the result is BYTE-IDENTICAL to the old
+    sequential loop — same dpi, same engine, same page order. Only wall-clock
+    changes, which matters because the nightly crawls spend hours in here.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
         return ""
     try:
         doc = fitz.open(str(path))
-        pages_text = []
-        for i in range(len(doc)):
-            pix = doc[i].get_pixmap(dpi=200)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            try:
-                t = pytesseract.image_to_string(img)
-                if t.strip():
-                    pages_text.append(f"--- Page {i+1} (OCR) ---\n{t.strip()}")
-            except Exception:  # noqa: BLE001
-                continue
+        n_pages = len(doc)
         doc.close()
-        return "\n\n".join(pages_text)
     except Exception:  # noqa: BLE001
         return ""
+    if n_pages <= 0:
+        return ""
+    if max_pages is not None:
+        n_pages = max(0, min(n_pages, int(max_pages)))
+
+    workers = _ocr_workers()
+    pages_text: list[str] = []
+
+    if n_pages == 1 or workers == 1:
+        for i in range(n_pages):
+            _, t = _ocr_page((str(path), i))
+            if t.strip():
+                pages_text.append(f"--- Page {i+1} (OCR) ---\n{t.strip()}")
+        return "\n\n".join(pages_text)
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(workers, n_pages)) as pool:
+            results = list(pool.map(_ocr_page, [(str(path), i) for i in range(n_pages)]))
+    except Exception:  # noqa: BLE001 - never fail a conversion over pooling
+        results = [(_ocr_page((str(path), i))) for i in range(n_pages)]
+
+    # pool.map preserves input order; sort anyway so output can never depend
+    # on completion order.
+    for i, t in sorted(results, key=lambda r: r[0]):
+        if t and t.strip():
+            pages_text.append(f"--- Page {i+1} (OCR) ---\n{t.strip()}")
+    return "\n\n".join(pages_text)
 
 
 def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:

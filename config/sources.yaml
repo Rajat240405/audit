@@ -17,6 +17,26 @@
 
 version: 1
 
+# ── English-only corpus policy (global) ──────────────────────────────────────
+# The searchable corpus is ENGLISH-ONLY. MoES/INCOIS publish every press
+# release twice — `<id>-eng.pdf` and `<id>-hin.pdf` — and both land in the
+# same crawl folder. Records carry no language field and neither retrieval nor
+# the UI has a language filter, so a Hindi file that reached the corpus would
+# be indistinguishable from an English one and would surface in answers.
+#
+# These globs are applied BEFORE conversion: matching files are never OCR'd,
+# never embedded, never indexed. Case-insensitive fnmatch patterns on the file
+# NAME. Applies to every source that does not declare its own exclude_globs.
+#
+# To opt a single source out, give it `exclude_globs: []` in its entry below.
+# Runtime overrides (no config edit): INGEST_EXCLUDE_GLOBS="*-hin.*,*-tam.*"
+# replaces this list; INGEST_ALLOW_HINDI=1 disables the built-in default.
+# Removing already-ingested Hindi rows is a separate one-off step:
+#   python -m src.scripts.purge_hindi_rows --apply   (then rebuild the index)
+exclude_globs:
+  - "*-hin.*"
+  - "*-hin"      # extension-less ids (e.g. "01-28247-hin")
+
 # ── Hierarchy defaults (global; per-source may override) ────────────────────
 # Leaf directory name -> document_type. Case-insensitive. Values reuse the
 # EXISTING document_type vocabulary so the query-side maps keep working

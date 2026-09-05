@@ -426,6 +426,27 @@ def _resolve_family_for_model(model: str) -> "Optional[ModelFamily]":
     return None
 
 
+def _configured_thinking_budget(family, default: int = 0) -> int:
+    """Deep-mode thinking cap for ``family``, or ``default``.
+
+    Single source of truth for the thinking-token cap:
+    ``serving.default_thinking_budget`` in ``config/models.yaml``. A missing,
+    non-numeric or non-positive value means "no configured cap" and yields the
+    caller's ``default`` (4096 = legacy Qwen3 Deep fallback, 0 = send nothing
+    for always-thinking reasoning-parser models).
+
+    Exists so the catalog knob is reachable in Deep mode: the cap is resolved
+    BEFORE the Deep-mode branch writes the key, so the
+    ``"thinking_token_budget" not in body`` guard below can never shadow it.
+    """
+    raw = getattr(getattr(family, "serving", None), "default_thinking_budget", 0) or 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+    return value if value > 0 else int(default)
+
+
 def resolve_think_mode(provider: str, model: str) -> str:
     """Resolve the legacy adapter wire string ("template" | "key" | "none")
     for (provider, model) from capability data — the single resolution point
@@ -918,23 +939,38 @@ class OpenAICompatibleProvider(BaseProvider):
         # Send it ONLY for "template" families — for "none" the server decides
         # (Ollama /v1, llama.cpp, etc. would just ignore the extra kwarg, but
         # not sending keeps the contract explicit).
+        _fam = _resolve_family_for_model(model)
         if think is not None and think_mode == "template":
             body["chat_template_kwargs"] = {"enable_thinking": bool(think)}
             # Cap reasoning tokens to prevent thinking loops on large contexts.
             # Without this, Qwen3 defaults to xhigh effort and exhausts its
             # entire token budget in <think> before writing any answer.
             # Only applied in thinking-ON (Deep) mode — Fast mode skips this.
+            #
+            # Budget source of truth is the catalog ServingSpec
+            # (``serving.default_thinking_budget``); 4096 is only the fallback
+            # when the family ships no positive value. Previously the 4096 was
+            # unconditional, which made the catalog knob dead code for Deep
+            # mode (the block below skips when the key already exists).
             if bool(think):
-                body["thinking_token_budget"] = 4096
+                body["thinking_token_budget"] = _configured_thinking_budget(
+                    _fam, default=4096
+                )
 
         # Models served with a reasoning_parser (e.g. openai_gptoss) have
         # thinking always-ON regardless of think_mode/enable_thinking.
         # Send thinking_token_budget unconditionally so they never loop.
         # Resolved from the catalog ServingSpec; 0 means no cap (server default).
-        _fam = _resolve_family_for_model(model)
+        #
+        # Scoped to ALWAYS-THINKING families (think_mode != "template", i.e.
+        # reasoning-parser models whose thinking cannot be switched off). A
+        # template-controlled family (Qwen3) turns thinking off in Fast mode,
+        # and there is nothing to cap there — the key must stay absent exactly
+        # as it was before the catalog knob became reachable.
         if _fam is not None:
-            budget = getattr(getattr(_fam, "serving", None), "default_thinking_budget", 0)
-            if budget and budget > 0 and "thinking_token_budget" not in body:
+            budget = _configured_thinking_budget(_fam, default=0)
+            always_thinking = getattr(_fam, "think_mode", "none") != "template"
+            if budget > 0 and always_thinking and "thinking_token_budget" not in body:
                 body["thinking_token_budget"] = budget
 
         return body

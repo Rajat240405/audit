@@ -29,12 +29,14 @@ Also:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.models.qa_record import QARecord
@@ -106,12 +108,16 @@ def _peek_text(path: Path) -> str:
                 return peek
         except Exception:  # noqa: BLE001
             pass
-        # scanned PDF: pypdf gives no text — OCR a page so type detection
-        # sees the actual content (e.g. "ANNUAL REPORT 2028" -> annual_report)
+        # scanned PDF: pypdf gives no text — OCR the FIRST FEW pages so type
+        # detection sees the actual content (e.g. "ANNUAL REPORT 2028" ->
+        # annual_report). Capped at 3: the peek this feeds is truncated to
+        # 800 chars anyway, and without the cap every scanned PDF was OCR'd
+        # twice per run (once here, once in the real conversion) — the single
+        # biggest cost in the nightly crawl.
         try:
             from src.scripts.convert_sirs_knowledge import _ocr_pdf_text
 
-            ocr = _ocr_pdf_text(path)
+            ocr = _ocr_pdf_text(path, max_pages=3)
             return ocr[:800]
         except Exception:  # noqa: BLE001
             return ""
@@ -202,6 +208,89 @@ def qa_content_hash(rec) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# English-only corpus policy
+#
+# MoES/INCOIS publish every press release in two language variants that land
+# side by side in the same crawl folder: ``<id>-eng.pdf`` and ``<id>-hin.pdf``.
+# The searchable corpus is English-only, and language is NOT a filter axis in
+# this system: a record carries no language field, retrieval has no language
+# filter and the UI has none either — so a Hindi record that reached the corpus
+# is indistinguishable from an English one and surfaces in answers.
+#
+# Exclusion therefore happens at the source: language-variant files are skipped
+# BEFORE conversion, so they are never OCR'd, never embedded, never indexed.
+#
+# Default ON. Overrides (highest precedence first):
+#   * ``exclude_globs=`` argument            (source registry / direct caller)
+#   * ``INGEST_EXCLUDE_GLOBS`` env var       (comma-separated; replaces defaults)
+#   * ``INGEST_ALLOW_HINDI=1`` env var       (one-run escape hatch: off)
+#   * ``DEFAULT_EXCLUDE_GLOBS``              (built-in English-only default)
+#
+# Already-ingested Hindi rows are NOT removed here — use
+# ``python -m src.scripts.purge_hindi_rows`` (one-off cleanup) followed by a
+# full index rebuild.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# "*-hin" (extension-less) is included so ids/filenames such as
+# "01-28247-hin" are covered too.
+DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = ("*-hin.*", "*-hin")
+
+
+def _active_exclude_globs(exclude_globs: tuple[str, ...] | None = None
+                          ) -> tuple[str, ...]:
+    """Filename globs that must never be converted (English-only policy)."""
+    if exclude_globs is not None:
+        return tuple(g for g in exclude_globs if g)
+    env = os.environ.get("INGEST_EXCLUDE_GLOBS")
+    if env is not None:
+        return tuple(g.strip() for g in env.split(",") if g.strip())
+    if os.environ.get("INGEST_ALLOW_HINDI", "") in ("1", "true", "True"):
+        return ()
+    return DEFAULT_EXCLUDE_GLOBS
+
+
+def _glob_excluded(name: str, globs: tuple[str, ...]) -> bool:
+    """Case-insensitive filename glob match (``*.PDF`` == ``*.pdf``)."""
+    if not globs:
+        return False
+    low = (name or "").lower()
+    return any(fnmatch.fnmatch(low, g.lower()) for g in globs)
+
+
+def _unchanged_skip_enabled() -> bool:
+    """Global escape hatch: INGEST_SKIP_UNCHANGED=0 disables the OCR-cost
+    guard and restores the legacy convert-every-file scan."""
+    import os
+
+    return os.environ.get("INGEST_SKIP_UNCHANGED", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _parse_ts(value) -> float | None:
+    """Corpus ``scraped_at`` -> epoch seconds, or None when unusable.
+
+    Accepts the ISO strings QARecord serialises ("2026-08-28T05:38:21+00:00",
+    "...Z", or naive) and datetime objects. None makes the OCR-cost guard
+    CONVERT the file (fail-open: worst case is today's re-OCR behaviour).
+    """
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "timestamp"):          # datetime
+            return float(value.timestamp())
+        s = str(value).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:                     # naive -> treat as UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+        return float(dt.timestamp())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _purge_stale_url_rows(stale_urls: set[str], keep_hashes: dict[str, set[str]]) -> int:
     """Remove OLD corpus rows for files whose content changed this run.
 
@@ -246,7 +335,9 @@ def ingest_folder(folder: str, move_processed: bool = False,
                   meta_context: dict | None = None,
                   only_files: set[str] | None = None,
                   exclude_files: set[str] | None = None,
-                  seen_hashes: dict[str, str] | None = None) -> dict:
+                  seen_hashes: dict[str, str] | None = None,
+                  skip_unchanged: bool = True,
+                  exclude_globs: tuple[str, ...] | None = None) -> dict:
     """Convert every file in a folder, append new records to the corpus.
 
     ``meta_context`` is an additive per-source identity for hierarchical
@@ -274,17 +365,57 @@ def ingest_folder(folder: str, move_processed: bool = False,
     as ``changed`` (ids are content-derived, so it also lands as a new row —
     the superseded row is purged after the append). None (default) = legacy
     behavior: no change detection and ``changed`` is always 0.
+
+    ``skip_unchanged`` (additive, OCR-cost guard) skips conversion of a file
+    that is ALREADY represented in the corpus under the same ``source_url``
+    and has NOT been modified since that row was written (file mtime <= the
+    row's ``scraped_at``). Without it every nightly run re-OCRs every scanned
+    PDF in the source folders — hours of tesseract CPU — only for the
+    converter to discard the result at the id-dedup check. A file the crawler
+    re-downloads (mtime refreshed) is still converted, so nothing can be
+    missed; the worst case is today's behaviour. True (default) = skip.
+
+    Escape hatch: ``INGEST_SKIP_UNCHANGED=0`` forces the legacy
+    convert-everything scan for one run (e.g. after a crawler change that
+    rewrites files while preserving their old mtime).
+
+    ``exclude_globs`` (additive, English-only policy) is a tuple of
+    case-insensitive filename globs that are skipped BEFORE conversion —
+    never OCR'd, never embedded. Default (None) = the built-in English-only
+    policy (``*-hin.*``: MoES/INCOIS publish every release twice). Language
+    is NOT a metadata/filter axis in this system (records carry no language
+    field and retrieval/UI have no language filter), so a Hindi file that
+    reached the corpus would be indistinguishable from an English one and
+    would surface in answers. See ``_active_exclude_globs`` for overrides.
     """
+    _skip_unchanged = bool(skip_unchanged) and _unchanged_skip_enabled()
+
     p = Path(folder)
     if not p.exists():
         log(f"[ingest_folder] folder not found: {folder}")
-        return {"files": 0, "added": 0, "failed": 0, "changed": 0}
+        return {"files": 0, "added": 0, "failed": 0, "changed": 0, "unchanged": 0,
+                "skipped_language": 0}
 
     excluded = {n.lower() for n in (exclude_files or set())}
+    globs = _active_exclude_globs(exclude_globs)
+    # English-only policy: language variants are dropped here, BEFORE any
+    # conversion/OCR work (and before the unchanged-file skip counts them).
     all_files = sorted(
         f for f in p.iterdir()
-        if f.is_file() and f.name.lower() not in excluded
+        if f.is_file()
+        and f.name.lower() not in excluded
+        and not _glob_excluded(f.name, globs)
     )
+    skipped_language = sum(
+        1 for f in p.iterdir()
+        if f.is_file() and f.name.lower() not in excluded
+        and _glob_excluded(f.name, globs)
+    )
+    if skipped_language:
+        log(
+            f"[ingest_folder] english-only: skipped {skipped_language} "
+            f"non-English file(s) in {folder} (globs: {', '.join(globs)})"
+        )
     if only_files is not None:
         files = [f for f in all_files if f.name in only_files]
     else:
@@ -292,13 +423,16 @@ def ingest_folder(folder: str, move_processed: bool = False,
     if not files:
         scope = f" (filter matched 0 of {len(all_files)} on disk)" if only_files is not None else ""
         log(f"[ingest_folder] no files in {folder}{scope}")
-        return {"files": 0, "added": 0, "failed": 0, "changed": 0}
+        return {"files": 0, "added": 0, "failed": 0, "changed": 0, "unchanged": 0,
+                "skipped_language": skipped_language}
 
     log(f"[ingest_folder] scanning {folder}: {len(files)} file(s)")
     out: list = []
     seen: set[str] = set()
 
     # seed seen with existing corpus ids
+    # (and, for the OCR-cost guard, the newest scraped_at per source_url)
+    _ingested_ts: dict[str, float] = {}
     if CORPUS.exists():
         for line in open(CORPUS, encoding="utf-8"):
             line = line.strip()
@@ -308,11 +442,19 @@ def ingest_folder(folder: str, move_processed: bool = False,
                 r = json.loads(line)
                 if r.get("question_id"):
                     seen.add(r["question_id"])
+                if _skip_unchanged:
+                    url = (r.get("metadata") or {}).get("source_url")
+                    ts = _parse_ts(r.get("scraped_at"))
+                    if url and ts is not None:
+                        prev = _ingested_ts.get(url)
+                        if prev is None or ts > prev:
+                            _ingested_ts[url] = ts
             except Exception:  # noqa: BLE001
                 continue
 
     ok = fail = 0
     changed = 0
+    unchanged = 0
     _stale_urls: set[str] = set()              # urls whose content changed
     _new_hashes: dict[str, set[str]] = {}      # url -> hashes produced this run
     types_used: dict[str, int] = {}
@@ -329,6 +471,20 @@ def ingest_folder(folder: str, move_processed: bool = False,
         if f.suffix.lower() == ".txt" and _stem(f) in pdf_stems:
             log(f"  skip {f.name} (duplicate of its .pdf)")
             continue
+        # OCR-cost guard: a file already in the corpus that has not been
+        # touched since its row was written is NOT converted again. This is
+        # what stops the nightly run from re-OCRing every scanned PDF (5–14
+        # min each) only to discard the text at the id-dedup check below.
+        if _skip_unchanged:
+            ts = _ingested_ts.get(str(f))
+            if ts is not None:
+                try:
+                    if f.stat().st_mtime <= ts:
+                        unchanged += 1
+                        log(f"  skip {f.name} (unchanged since last ingest)")
+                        continue
+                except OSError:  # file vanished mid-scan
+                    pass
         try:
             before = len(out)
             n = convert_one_detected(f, out, seen, move_processed, meta_context)
@@ -381,7 +537,8 @@ def ingest_folder(folder: str, move_processed: bool = False,
         _purge_stale_url_rows(_stale_urls, _new_hashes)
 
     return {"files": len(files), "added": len(out), "failed": fail,
-            "changed": changed, "types": types_used}
+            "changed": changed, "unchanged": unchanged, "types": types_used,
+            "skipped_language": skipped_language}
 
 
 def _index_exists() -> bool:

@@ -120,6 +120,11 @@ class SourceSpec:
     exclude_files: list[str] = field(default_factory=list)  # exact names,
                                         # case-insensitive (crawler sidecars:
                                         # record.json / manifest.json / ...)
+    # ── English-only corpus policy (audit: corpus is English-only) ────────
+    exclude_globs: list[str] = field(default_factory=list)  # filename globs,
+                                        # case-insensitive, skipped BEFORE
+                                        # conversion/OCR (default ["*-hin.*"]
+                                        # when unset — see ingest_folder)
     # ── Presentation opt-out (Phase-5 integration) ──
     present_in_tree: bool = True        # hierarchical sources normally become
                                         # a ministry node in /api/sources; set
@@ -136,6 +141,7 @@ class LeafJob:
     doc_type_hint: str | None
     meta_context: dict
     exclude_files: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
 
 
 # Fallback used ONLY if config/sources.yaml is unreadable — must stay equal to
@@ -232,6 +238,7 @@ def _spec_from_dict(name: str, raw: dict) -> SourceSpec:
         ministry=(str(raw["ministry"]) if raw.get("ministry") else None),
         recursive=bool(raw.get("recursive", False)),
         exclude_files=[str(f) for f in (raw.get("exclude_files") or [])],
+        exclude_globs=[str(g) for g in (raw.get("exclude_globs") or [])],
         present_in_tree=bool(raw.get("present_in_tree", True)),
     )
 
@@ -258,6 +265,14 @@ def load_sources(config_file: str | Path | None = None
                     sources[str(name)] = _spec_from_dict(str(name), raw)
             disc = data.get("discovery") or {}
             excludes.update(str(d) for d in (disc.get("exclude_dirs") or []))
+            # Global English-only policy: applies to every source that does
+            # not declare its own exclude_globs. Empty list = opt out for
+            # that source; omitted = inherit the built-in default.
+            global_globs = [str(g) for g in (data.get("exclude_globs") or [])]
+            if global_globs:
+                for spec in sources.values():
+                    if not spec.exclude_globs:
+                        spec.exclude_globs = list(global_globs)
             hier = data.get("hierarchy") or {}
             file_cat = {
                 _normalize_segment(str(k)): str(v)
@@ -452,7 +467,8 @@ def expand_source(spec: SourceSpec, category_map: dict[str, str]) -> list[LeafJo
             jobs.append(LeafJob(folder=folder, org=spec.org,
                                 doc_type_hint=None,
                                 meta_context=flat_ctx or {},
-                                exclude_files=tuple(spec.exclude_files)))
+                                exclude_files=tuple(spec.exclude_files),
+                                exclude_globs=tuple(spec.exclude_globs)))
         return jobs
 
     for rel in spec.folders:
@@ -482,7 +498,8 @@ def expand_source(spec: SourceSpec, category_map: dict[str, str]) -> list[LeafJo
             org, hint = resolve_path_context(rel_parts, spec, category_map)
             jobs.append(LeafJob(folder=current, org=org, doc_type_hint=hint,
                                 meta_context=_ctx(org, hint),
-                                exclude_files=tuple(spec.exclude_files)))
+                                exclude_files=tuple(spec.exclude_files),
+                                exclude_globs=tuple(spec.exclude_globs)))
     return jobs
 
 
@@ -749,6 +766,7 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
             meta_context=job.meta_context or None,
             exclude_files=set(job.exclude_files) | dedup_excludes or None,
             seen_hashes=seen_hashes_by_url,
+            exclude_globs=job.exclude_globs or None,
         )
         total += res.get("added", 0)
         files += res.get("files", 0)
