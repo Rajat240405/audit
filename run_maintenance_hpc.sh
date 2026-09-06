@@ -146,6 +146,13 @@ else
     echo "[maintenance] no GPU visible — embedding on CPU"
 fi
 
+# Temporarily disable exit-on-error for the crawl command ONLY.
+# crawl_all.py exits 1 when any source has a partial failure (it still
+# ingests what it got). Under 'set -e' the shell would exit before
+# CRAWL_EXIT=$? executes, skipping the logging block and app-restart
+# below. 'set +e' is re-enabled immediately after capture so all
+# subsequent commands remain under strict error handling.
+set +e
 singularity exec \
     ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
     --env-file    "$ENV_FILE" \
@@ -158,8 +165,8 @@ singularity exec \
     --bind        "${TMP_REAL}:/tmp" \
     "$SIF" \
     python -m src.scripts.crawl_all "${CRAWL_ARGS[@]}"
-
 CRAWL_EXIT=$?
+set -e
 
 echo "[maintenance] ============================================================"
 echo "[maintenance] run finished: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -174,7 +181,14 @@ echo "[maintenance] ============================================================
 # otherwise the freshly crawled documents stay invisible until someone
 # restarts by hand. Marker line printed by src/scripts/ingest.py:
 #   [ingest] done: N new record(s) appended, M changed (replaced in corpus); index: <action>
-if [ "$CRAWL_EXIT" -eq 0 ] && [ "$APP_WAS_RUNNING" -eq 1 ] \
+#
+# NOTE: CRAWL_EXIT == 0 is NOT required for restart.  crawl_all exits 1 when
+# any individual source has a partial failure (e.g. INCOIS crashes) but earlier
+# sources (MoES, parliament) may have already written a new index to disk.
+# Without this change those successful updates would stay invisible in the
+# running app's in-memory pipeline until a manual restart.
+# CRAWL_EXIT is still preserved as the final exit code of this script.
+if [ "$APP_WAS_RUNNING" -eq 1 ] \
    && grep -qE "\[ingest\] done: .*; index: (incremental|rebuild)" "$RUN_LOG"; then
     echo "[maintenance] index was updated — restarting the app to load it"
     ./stop_hpc.sh || true

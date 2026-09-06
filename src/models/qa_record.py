@@ -199,6 +199,26 @@ class QARecordMetadata(BaseModel):
         description="Official Hindi answer-document URL (attribution).",
     )
 
+    # ── Converter provenance (additive, FIX A — verified findings #2/#3) ────
+    # How the folder converters derived subject/question_text (title_source)
+    # and date (date_source) for non-parliament rows. All optional with None
+    # defaults: old corpus lines and old converters are unaffected.
+    title_source: str | None = Field(
+        default=None,
+        description="Where subject/question_text came from: 'record.json' "
+                    "(sibling MoES staging record title), 'filename-stem' "
+                    "(legacy fallback), or None (parliament/legacy rows).",
+        examples=["record.json", "filename-stem"],
+    )
+    date_source: str | None = Field(
+        default=None,
+        description="Where date came from: 'record.json' (sibling MoES "
+                    "staging record post_date), 'pib-dateline' (Posted On "
+                    "line in the document text), 'filename-year' (year "
+                    "embedded in the file stem), or None (unknown).",
+        examples=["record.json", "pib-dateline", "filename-year"],
+    )
+
 
 class QARecord(BaseModel):
     """

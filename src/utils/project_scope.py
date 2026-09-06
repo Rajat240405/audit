@@ -7,6 +7,7 @@ Used by ingestion, Hybrid RAG, and GraphRAG.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -60,14 +61,39 @@ def resolve_effective_ministry_filter(
     return None
 
 
+def normalize_ministry(value: str | None) -> str:
+    """Canonical ministry key for comparison (FIX B — verified finding #1).
+
+    The corpus carries two vocabularies for the same ministry (parliament
+    rows use the ``earth-sciences`` slug; converted rows use the
+    ``EARTH SCIENCES`` label). This collapses both — plus the natural
+    ``Ministry of X`` phrasing — to one deterministic key: lowercase, a
+    leading "ministry of" stripped, all spacing/separator characters removed.
+    Distinct ministries (e.g. ``ocean-development``) keep distinct keys.
+    """
+    if not value:
+        return ""
+    t = value.strip().lower()
+    t = re.sub(r"^ministry\s+of\s+", "", t)
+    return re.sub(r"[\s\-_]+", "", t)
+
+
 def filter_records_by_ministry(records, ministry_filter: Optional[str]):
-    """Apply ministry filter to a list of QARecord objects (shared helper)."""
+    """Apply ministry filter to a list of QARecord objects (shared helper).
+
+    Comparison is on normalized keys (FIX B): "Ministry of Earth Sciences",
+    "EARTH SCIENCES" and "earth-sciences" all match both stored vocabularies.
+    """
     if not ministry_filter:
+        return records
+
+    needle = normalize_ministry(ministry_filter)
+    if not needle:
         return records
 
     return [
         r for r in records
-        if r.metadata.ministry and ministry_filter.lower() in r.metadata.ministry.lower()
+        if r.metadata.ministry and needle in normalize_ministry(r.metadata.ministry)
     ]
 
 

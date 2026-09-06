@@ -48,6 +48,79 @@ def _clean(text: str | None) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
+# ── FIX A: staging-aware title/date resolution (verified findings #2/#3) ────
+# MoES staging layout: <post>/documents/<file> + <post>/record.json, where
+# record.json carries the authoritative CMS title + post_date (see
+# src/scraping/moes/normalize.py). The folder converters previously ignored
+# it and stamped file stems ("Document: 01-24173-eng", no date). Resolution
+# order below; every value carries a provenance flag (title_source /
+# date_source). Nothing is fabricated: unknown stays None.
+
+_RECORD_CACHE: dict[str, dict] = {}
+
+
+def _sibling_record_json(path: Path) -> dict:
+    """The MoES staging record.json for this file, or {}.
+
+    Only consulted when the file sits in a ``documents/`` leaf (the MoES
+    staging convention) — flat sources (inbox, incois_reports, …) never match
+    and keep byte-identical behavior. Results are cached per directory.
+    """
+    try:
+        if path.parent.name.lower() != "documents":
+            return {}
+        rp = path.parent.parent / "record.json"
+        key = str(rp)
+        if key not in _RECORD_CACHE:
+            data = json.loads(rp.read_text(encoding="utf-8", errors="ignore")) if rp.exists() else {}
+            _RECORD_CACHE[key] = data if isinstance(data, dict) else {}
+        return _RECORD_CACHE[key]
+    except Exception:  # noqa: BLE001 — staging metadata is best-effort
+        return {}
+
+
+def _resolve_doc_title(path: Path, record: dict) -> tuple[str | None, str]:
+    """Real title from the sibling record.json, else None (the caller keeps
+    the legacy ``path.stem`` label). Returns (title, title_source)."""
+    title = re.sub(r"\s+", " ", str(record.get("title") or "")).strip()
+    if title:
+        return title, "record.json"
+    return None, "filename-stem"
+
+
+_PIB_DATELINE_RE = re.compile(
+    r"Posted On:\s*(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", re.IGNORECASE
+)
+_PIB_MONTHS = {
+    "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04", "MAY": "05", "JUN": "06",
+    "JUL": "07", "AUG": "08", "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12",
+}
+# Digit lookarounds (NOT \b): stems join segments with "_" (a word char), so
+# "AR_2008_..." has no \b around 2008. Still rejects years embedded in longer
+# digit runs (crawl timestamps like 20250807103950).
+_FILENAME_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+
+
+def _resolve_doc_date(path: Path, text: str, record: dict) -> tuple[str | None, str | None]:
+    """Best-effort date in precedence order: record.json post_date (ISO) →
+    PIB dateline in the document text (→ ISO) → year embedded in the file
+    stem (bare YYYY) → None. Returns (date, date_source); never fabricated.
+    """
+    d = str(record.get("date") or "").strip()
+    if d:
+        return d, "record.json"
+    m = _PIB_DATELINE_RE.search((text or "")[:8000])
+    if m:
+        mon = _PIB_MONTHS.get(m.group(2).upper())
+        day = int(m.group(1))
+        if mon is not None and 1 <= day <= 31:
+            return f"{m.group(3)}-{mon}-{day:02d}", "pib-dateline"
+    y = _FILENAME_YEAR_RE.search(path.stem)
+    if y:
+        return y.group(1), "filename-year"
+    return None, None
+
+
 # Module-level default ministry. Set via --ministry CLI arg; callers that
 # import individual converter functions inherit this automatically.
 _DEFAULT_MINISTRY = "EARTH SCIENCES"
@@ -66,6 +139,8 @@ def _make_record(
     default_ministry: str | None = _DEFAULT_MINISTRY,
     org: str | None = None,
     source: str | None = None,
+    title_source: str | None = None,
+    date_source: str | None = None,
 ) -> QARecord | None:
     """Build a record. Additive context kwargs (org/source/default_ministry)
     extend the legacy behavior without changing it: callers that pass nothing
@@ -90,6 +165,8 @@ def _make_record(
         answer_status="answered",
         org=org,
         source=source,
+        title_source=title_source,
+        date_source=date_source,
     )
     try:
         return QARecord(
@@ -260,12 +337,20 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
     text = path.read_text(encoding="utf-8", errors="ignore")
     if len(text.strip()) < 10:
         return 0  # only empty/whitespace guard — short notes are valid
+    # FIX A: staging title/date (record.json → dateline → filename-year → None)
+    _srec = _sibling_record_json(path)
+    _title, _title_source = _resolve_doc_title(path, _srec)
+    _date, _date_source = _resolve_doc_date(path, text, _srec)
+    _label = _title or path.stem
     rec = _make_record(
-        f"Document: {path.stem}",
+        f"Document: {_label}",
         text,
-        subject=path.stem,
+        subject=_label,
         source_url=str(path),
+        date=_date,
         document_type=doc_type,
+        title_source=_title_source,
+        date_source=_date_source,
         org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
@@ -281,10 +366,10 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
     # THE canonical PDF→text for folder ingestion (audit IW-7): table-aware
     # PyMuPDF first (borderless-table reconstruction), legacy pypdf as the
     # built-in fallback — one shared stack, not a second implementation.
-    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
-
+    # PyMuPDF work runs in a child subprocess (_extract_text_subprocess) so a
+    # native SIGSEGV in the MuPDF C layer cannot kill the parent ingestion process.
     try:
-        text = extract_pdf_text_with_fallback(path.read_bytes())
+        text = _extract_text_subprocess(path)
     except Exception as e:  # noqa: BLE001
         print(f"  [skip pdf] {path.name}: {e}")
         return 0
@@ -295,12 +380,20 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         if not text.strip():
             print(f"  [skip pdf] {path.name}: no extractable text (scanned image?)")
             return 0
+    # FIX A: staging title/date (record.json → dateline → filename-year → None)
+    _srec = _sibling_record_json(path)
+    _title, _title_source = _resolve_doc_title(path, _srec)
+    _date, _date_source = _resolve_doc_date(path, text, _srec)
+    _label = _title or path.stem
     rec = _make_record(
-        f"Document: {path.stem}",
+        f"Document: {_label}",
         text,
-        subject=path.stem,
+        subject=_label,
         source_url=str(path),
+        date=_date,
         document_type=doc_type,
+        title_source=_title_source,
+        date_source=_date_source,
         org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
@@ -310,28 +403,213 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
     return 0
 
 
+import os as _os
+import pickle as _pickle
+import subprocess as _subprocess
+import sys as _sys
+
 _OCR_DPI = 200
 
+# Project root injected into child subprocess sys.path so it can import
+# src.data.pdf_table_extract without a full package install.
+# __file__ = <root>/src/scripts/convert_sirs_knowledge.py  →  3 levels up.
+_FITZ_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+
+
+# ── Subprocess helpers — PyMuPDF process isolation ────────────────────────────
+#
+# PyMuPDF's MuPDF C layer can raise SIGSEGV on certain malformed or
+# rendering-edge-case PDFs.  SIGSEGV is a signal delivered to the OS process;
+# a threading.Lock cannot prevent it.  The only reliable fix is to run all
+# fitz operations inside a CHILD process: if the child crashes, the parent
+# receives a non-zero exit code / no output and continues normally.
+#
+# Design:
+#   _fitz_count_pages_subprocess   — fitz.open + len(doc)  → int
+#   _fitz_render_page_subprocess   — fitz.open + get_pixmap → (w, h, bytes)
+#   _extract_text_subprocess       — full table-aware text extraction → str
+#
+# All helpers communicate via pickle over stdout.  A SIGSEGV in the child
+# produces returncode -11 (Linux) or similar — the parent detects this,
+# logs a warning, and returns a safe empty/None result.
+
+def _fitz_count_pages_subprocess(path: Path, timeout: int = 60) -> int:
+    """Return the page count of ``path`` by opening it in a child process.
+
+    Isolates fitz.open() behind an OS process boundary.  Returns 0 on
+    crash, SIGSEGV, timeout, or when PyMuPDF is not installed.
+    """
+    child = (
+        "import sys, pickle, os\n"
+        # Suppress any text that fitz/MuPDF may write to stdout (warnings,
+        # version banners) — they would corrupt the pickle payload.
+        "_stdout_save = sys.stdout\n"
+        "sys.stdout = open(os.devnull, 'w')\n"
+        "try:\n"
+        "    import fitz\n"
+        f"    doc = fitz.open({str(path)!r})\n"
+        "    n = len(doc); doc.close()\n"
+        "except Exception:\n"
+        "    n = 0\n"
+        "finally:\n"
+        "    sys.stdout.close()\n"
+        "    sys.stdout = _stdout_save\n"
+        "sys.stdout.buffer.write(pickle.dumps(n))\n"
+    )
+    try:
+        r = _subprocess.run(
+            [_sys.executable, "-c", child],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode == 0 and r.stdout:
+            return int(_pickle.loads(r.stdout))
+        # Non-zero: child crashed (SIGSEGV → exit -11) or import error
+        if r.returncode != 0:
+            print(
+                f"  [fitz subprocess] page-count failed for {path.name} "
+                f"(child exit {r.returncode})"
+            )
+    except _subprocess.TimeoutExpired:
+        print(f"  [fitz subprocess] page-count timeout for {path.name}")
+    except Exception:
+        pass
+    return 0
+
+
+def _fitz_render_page_subprocess(
+    path: Path, page_index: int, dpi: int = _OCR_DPI, timeout: int = 120,
+) -> "tuple[int, int, bytes] | None":
+    """Render one PDF page to RGB in a child process.
+
+    Returns ``(width, height, rgb_samples_bytes)`` or ``None`` on crash /
+    SIGSEGV / timeout / import failure.  A SIGSEGV in the MuPDF C layer
+    kills only the child (exit code -11 on Linux); the parent receives
+    ``None`` and continues with remaining pages.
+    """
+    child = (
+        "import sys, pickle, os\n"
+        # Suppress any text that fitz/MuPDF may write to stdout.
+        "_stdout_save = sys.stdout\n"
+        "sys.stdout = open(os.devnull, 'w')\n"
+        "result = None\n"
+        "try:\n"
+        "    import fitz\n"
+        f"    doc = fitz.open({str(path)!r})\n"
+        f"    pix = doc[{page_index}].get_pixmap(dpi={dpi})\n"
+        "    result = (pix.width, pix.height, bytes(pix.samples))\n"
+        "    doc.close()\n"
+        "except Exception:\n"
+        "    result = None\n"
+        "finally:\n"
+        "    sys.stdout.close()\n"
+        "    sys.stdout = _stdout_save\n"
+        "sys.stdout.buffer.write(pickle.dumps(result))\n"
+    )
+    try:
+        r = _subprocess.run(
+            [_sys.executable, "-c", child],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode == 0 and r.stdout:
+            return _pickle.loads(r.stdout)  # (w, h, bytes) or None from child
+        # Non-zero returncode: SIGSEGV (-11), OOM, etc.
+        if r.returncode != 0:
+            print(
+                f"  [fitz subprocess] page {page_index + 1} render failed "
+                f"for {path.name} (child exit {r.returncode})"
+            )
+        return None
+    except _subprocess.TimeoutExpired:
+        print(
+            f"  [fitz subprocess] page {page_index + 1} render timeout "
+            f"for {path.name}"
+        )
+        return None
+    except Exception:
+        return None
+
+
+def _extract_text_subprocess(path: Path, timeout: int = 300) -> str:
+    """Run extract_pdf_text_with_fallback in a child process.
+
+    The child imports ``src.data.pdf_table_extract`` directly — no circular
+    imports (pdf_table_extract has no dependency on src.scripts) and no
+    recursive subprocess spawning (pdf_table_extract never calls back here).
+    Returns ``""`` on crash / SIGSEGV / timeout / import failure so callers
+    can apply their normal OCR fallback.
+    """
+    child = (
+        "import sys, pickle, os\n"
+        f"sys.path.insert(0, {_FITZ_PROJECT_ROOT!r})\n"
+        "from src.data.pdf_table_extract import extract_pdf_text_with_fallback\n"
+        # Suppress any text that fitz/MuPDF may write to stdout before the
+        # pickle payload — corruption would cause pickle.loads to fail silently.
+        "_stdout_save = sys.stdout\n"
+        "sys.stdout = open(os.devnull, 'w')\n"
+        "text = ''\n"
+        "try:\n"
+        f"    data = open({str(path)!r}, 'rb').read()\n"
+        "    text = extract_pdf_text_with_fallback(data)\n"
+        "except Exception:\n"
+        "    text = ''\n"
+        "finally:\n"
+        "    sys.stdout.close()\n"
+        "    sys.stdout = _stdout_save\n"
+        "sys.stdout.buffer.write(pickle.dumps(text or ''))\n"
+    )
+    try:
+        r = _subprocess.run(
+            [_sys.executable, "-c", child],
+            capture_output=True, timeout=timeout,
+        )
+        if r.returncode == 0 and r.stdout:
+            result = _pickle.loads(r.stdout)
+            return result if isinstance(result, str) else ""
+        if r.returncode != 0:
+            print(
+                f"  [fitz subprocess] text extraction failed for {path.name} "
+                f"(child exit {r.returncode})"
+            )
+        return ""
+    except _subprocess.TimeoutExpired:
+        print(f"  [pdf subprocess] timeout extracting text from {path.name}")
+        return ""
+    except Exception:
+        return ""
+
+
+# ── OCR helpers ───────────────────────────────────────────────────────────────
 
 def _ocr_page(args) -> tuple[int, str]:
-    """OCR ONE page. Each thread opens its own fitz document (PyMuPDF
-    documents are not thread-safe). Returns (page_index, text) — failures
-    return '' for that page, exactly like the sequential path."""
+    """OCR one page: PyMuPDF render in a child subprocess + Tesseract in parent.
+
+    The fitz.open + get_pixmap step runs in an isolated OS process
+    (_fitz_render_page_subprocess) so a SIGSEGV in the MuPDF C layer kills
+    only that child — the parent and all other page workers survive.
+
+    Tesseract (pytesseract.image_to_string) runs in the calling thread: it
+    shells out to the tesseract binary, not a C extension, so there is no
+    fitz crash risk.  Tesseract parallelism across pages is fully preserved
+    (the ThreadPoolExecutor in _ocr_pdf_text submits one task per page).
+
+    Returns (page_index, text); a failed render returns '' for that page.
+    """
     path, page_index = args
     try:
-        import fitz  # PyMuPDF
         import pytesseract
         from PIL import Image
     except ImportError:
         return page_index, ""
+
+    render = _fitz_render_page_subprocess(Path(path), page_index, dpi=_OCR_DPI)
+    if render is None:
+        # child crashed or timed out — log already emitted by the helper
+        return page_index, ""
+
+    width, height, samples = render
     try:
-        doc = fitz.open(str(path))
-        try:
-            pix = doc[page_index].get_pixmap(dpi=_OCR_DPI)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            t = pytesseract.image_to_string(img)
-        finally:
-            doc.close()
+        img = Image.frombytes("RGB", (width, height), samples)
+        t = pytesseract.image_to_string(img)
         return page_index, t or ""
     except Exception:  # noqa: BLE001
         return page_index, ""
@@ -341,44 +619,37 @@ def _ocr_workers() -> int:
     """Page-level OCR parallelism. pytesseract shells out to the tesseract
     binary, so threads scale near-linearly (the wait is a subprocess).
     Override with OCR_WORKERS; 1 disables pooling (sequential path)."""
-    import os
-
     try:
-        n = int(os.environ.get("OCR_WORKERS", "") or 0)
+        n = int(_os.environ.get("OCR_WORKERS", "") or 0)
     except ValueError:
         n = 0
     if n <= 0:
-        n = min(8, os.cpu_count() or 4)
+        n = min(8, _os.cpu_count() or 4)
     return max(1, n)
 
 
 def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
-    """OCR a scanned PDF via PyMuPDF render + pytesseract. Returns '' if
-    tesseract/pymupdf aren't installed or OCR yields nothing.
+    """OCR a scanned PDF via subprocess PyMuPDF render + pytesseract.
 
-    ``max_pages`` limits OCR to the first N pages — used by the type-
-    detection peek, which only needs the title page but used to OCR the
-    ENTIRE document (i.e. every scanned PDF was OCR'd twice per run).
+    Both the page-count query and every page render run in isolated child
+    subprocesses — a SIGSEGV in the MuPDF C layer kills only the relevant
+    child; the parent ingestion process and all remaining page workers survive.
 
-    Pages are OCR'd in a thread pool (OCR_WORKERS, default min(8, cpus)) and
-    re-joined in page order, so the result is BYTE-IDENTICAL to the old
-    sequential loop — same dpi, same engine, same page order. Only wall-clock
-    changes, which matters because the nightly crawls spend hours in here.
+    Tesseract parallelism is preserved: the ThreadPoolExecutor submits one
+    render+OCR task per page; each task spawns its own render subprocess then
+    runs Tesseract in the calling thread (pytesseract shells out — no fitz risk).
+
+    ``max_pages`` limits OCR to the first N pages (type-detection peek path,
+    which only needs the title page). Returns '' when all page counts return 0
+    or all renders fail.
     """
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        return ""
-    try:
-        doc = fitz.open(str(path))
-        n_pages = len(doc)
-        doc.close()
-    except Exception:  # noqa: BLE001
-        return ""
+    n_pages = _fitz_count_pages_subprocess(path)
     if n_pages <= 0:
         return ""
     if max_pages is not None:
         n_pages = max(0, min(n_pages, int(max_pages)))
+    if n_pages <= 0:
+        return ""
 
     workers = _ocr_workers()
     pages_text: list[str] = []
@@ -395,8 +666,8 @@ def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
 
         with ThreadPoolExecutor(max_workers=min(workers, n_pages)) as pool:
             results = list(pool.map(_ocr_page, [(str(path), i) for i in range(n_pages)]))
-    except Exception:  # noqa: BLE001 - never fail a conversion over pooling
-        results = [(_ocr_page((str(path), i))) for i in range(n_pages)]
+    except Exception:  # noqa: BLE001 — never fail a conversion over pooling
+        results = [_ocr_page((str(path), i)) for i in range(n_pages)]
 
     # pool.map preserves input order; sort anyway so output can never depend
     # on completion order.
@@ -413,13 +684,14 @@ def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     so every record carries metadata.date = <year> and a subject like
     "INCOIS Annual Report 2023-24". Long-doc chunking at index time splits
     the huge text (~200 pages) into searchable chunks.
-    """
-    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
 
+    Text extraction runs in a child subprocess (_extract_text_subprocess)
+    so a SIGSEGV in the MuPDF C layer cannot kill the parent ingestion process.
+    """
     m = re.search(r"(?:AR_|Report_|report_)?(\d{4}(?:-\d{2})?)", path.stem)
     year = m.group(1) if m else path.stem
     try:
-        text = extract_pdf_text_with_fallback(path.read_bytes())
+        text = _extract_text_subprocess(path)
     except Exception as e:  # noqa: BLE001
         print(f"  [skip annual] {path.name}: {e}")
         return 0
@@ -465,10 +737,10 @@ def convert_report_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     else:
         title = f"INCOIS Document {cleaned}"
         doc_type = "document"
-    from src.data.pdf_table_extract import extract_pdf_text_with_fallback
-
+    # Text extraction runs in a child subprocess so a SIGSEGV in the MuPDF
+    # C layer cannot kill the parent ingestion process.
     try:
-        text = extract_pdf_text_with_fallback(path.read_bytes())
+        text = _extract_text_subprocess(path)
     except Exception as e:  # noqa: BLE001
         print(f"  [skip report] {path.name}: {e}")
         return 0

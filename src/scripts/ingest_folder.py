@@ -497,8 +497,48 @@ def ingest_folder(folder: str, move_processed: bool = False,
                     types_used[at] = types_used.get(at, 0) + 1
                 log(f"  ingested {f.name} (+{n}, type={t})")
             else:
-                fail += 1
-                log(f"  WARN {f.name}: no records extracted")
+                # Metadata-drift check (Problem 3 fix): a file whose text content
+                # (and therefore question_id) is unchanged but whose metadata
+                # changed (title, date, title_source, date_source from FIX-A
+                # staging resolution) would be silently dropped by the
+                # id-in-seen guard inside the converter. When seen_hashes is
+                # active, detect this by re-converting with an empty seen and
+                # comparing the full qa_content_hash against the corpus hash for
+                # this source_url.
+                #
+                # Safety: the _skip_unchanged mtime guard already ensures
+                # OCR-heavy unchanged files are never processed (skipped before
+                # reaching this point). For text/embedded-text PDFs the
+                # re-parse in the subprocess is cheap. The _stale_urls /
+                # _purge_stale_url_rows mechanism then removes the old corpus
+                # row and appends the updated record — no duplicates result.
+                if seen_hashes is not None:
+                    _url = str(f)
+                    if _url in seen_hashes:
+                        _md_tmp: list = []
+                        _md_n = convert_one_detected(
+                            f, _md_tmp, set(), False, meta_context
+                        )
+                        if _md_n > 0 and _md_tmp:
+                            _md_h = qa_content_hash(_md_tmp[0])
+                            if _md_h != seen_hashes.get(_url):
+                                # Metadata changed — treat as changed row and
+                                # schedule replacement via stale-url purge.
+                                for _r in _md_tmp:
+                                    out.append(_r)
+                                n = _md_n
+                                ok += 1
+                                changed += 1
+                                _stale_urls.add(_url)
+                                seen_hashes[_url] = _md_h
+                                _new_hashes.setdefault(_url, set()).add(_md_h)
+                                log(
+                                    f"  METADATA-CHANGED {f.name} "
+                                    f"(metadata drift vs corpus, replacing row)"
+                                )
+                if n == 0:
+                    fail += 1
+                    log(f"  WARN {f.name}: no records extracted")
             # Changed-file detection (content-hash keyed on source_url):
             # document-kind ids are content-derived, so an updated upstream
             # file arrives under a NEW id and pure id-dedup cannot see the

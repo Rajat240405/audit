@@ -182,6 +182,8 @@ data/uploads/
 data/user-knowledge/
 data/corpus/
 src/scripts/data/
+corpus_reports.jsonl
+corpus_reports*.jsonl
 
 # Large generated files in data/
 data/*.jsonl
