@@ -81,6 +81,8 @@ fi
 # ── runtime directories ───────────────────────────────────────────────────────
 mkdir -p "$TMP_DIR"
 mkdir -p "$LOG_DIR"
+# see start_hpc.sh: whole storage/ tree is bound so the GraphRAG checkpoint persists
+mkdir -p storage/hybrid_rag storage/graphrag
 
 # ── remember whether the web app is up ────────────────────────────────────────
 # Sampled BEFORE the crawl: the crawl/ingest runs in its own container process
@@ -123,7 +125,7 @@ ln -sfn "maintenance/${RUN_TS}.log" "$LATEST_LINK"
 
 # ── bind mount paths ──────────────────────────────────────────────────────────
 DATA_REAL="$(realpath data)"
-STORAGE_REAL="$(realpath storage/hybrid_rag)"
+STORAGE_REAL="$(realpath storage)"
 MODELS_REAL="$(realpath models)"
 TMP_REAL="$(realpath "$TMP_DIR")"
 CONFIG_REAL="$(realpath config)"
@@ -159,7 +161,7 @@ singularity exec \
     --writable-tmpfs \
     --pwd         /app \
     --bind        "${DATA_REAL}:/data" \
-    --bind        "${STORAGE_REAL}:/storage/hybrid_rag" \
+    --bind        "${STORAGE_REAL}:/storage" \
     --bind        "${MODELS_REAL}:/models" \
     --bind        "${CONFIG_REAL}:/app/config" \
     --bind        "${TMP_REAL}:/tmp" \

@@ -1,385 +1,253 @@
+"""Canonical Neo4j GraphRAG CLI (Phase 2).
+
+    graphrag init                 apply schema (constraints + indexes, idempotent)
+    graphrag build                incremental corpus build (resumable; LLM by default)
+        --deterministic-only      no LLM (metadata graph only)
+        --limit N                 process at most N documents
+        --semantic-backfill       ONLY documents not yet semantically
+                                  extracted (--limit N then means "N documents
+                                  still needing semantic extraction")
+        --no-resume               ignore the checkpoint
+        --prune                   withdraw docs missing from the corpus
+    graphrag query "INCOIS tsunami"   graph-mode retrieval (top 5 by default)
+        --top-k N
+    graphrag stats                node/relationship counts
+    graphrag remove <doc_key>     withdraw ONE document's graph contribution
+    graphrag prune                same as `build --prune` (skips processing)
+
+Configuration is environment-driven (see src/graphrag/config.py):
+    GRAPHRAG_BACKEND=neo4j|inmemory   (default neo4j; inmemory = local validation)
+    GRAPHRAG_NEO4J_URI / _USER / _PASSWORD / _DATABASE
+    GRAPHRAG_CHECKPOINT, GRAPHRAG_CORPUS
+
+On HPC the commands run as:
+    python -m src.graphrag.cli init
+    python -m src.graphrag.cli build            (full incremental build)
+    python -m src.graphrag.cli build --prune    (after corpus deletions)
+See docs/phase2/DESIGN.md §8 for the deployment notes.
 """
-GraphRAG CLI — production Neo4j pipeline.
-
-Commands
---------
-graphrag build      Build/update the Neo4j graph from the enriched corpus
-                    (resumable; runs a 10-document verification first).
-graphrag rebuild    Drop the graph and rebuild from scratch.
-graphrag stats      Show graph statistics (nodes, relationships, indexes).
-graphrag query      Graph-aware query (entity expansion + vector search).
-
-This is a completely separate CLI from the legacy ``graph`` (NetworkX)
-command — nothing existing is modified.
-"""
-
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import sys
 
-import click
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
+from src.graphrag.config import GraphConfigError, load_graph_config
 
-from src.graphrag.config import GraphRAGConfig
-from src.graphrag.pipeline import GraphRAGPipeline
-from src.graphrag.query import GraphRAGQuerier
-from src.graphrag.verify import GraphVerifier
+__all__ = ["cli", "main"]
 
-console = Console()
-
-_GRAPHRAG_DEFAULT_ENRICHED = "data/enriched/enriched_*.jsonl"
-
-# LLM backends selectable via --llm-provider (must match build_llm_provider in llm.py).
-_LLM_PROVIDERS = ["ollama", "groq", "openai_compatible"]
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger("graphrag.cli")
 
 
-@click.group()
-def cli() -> None:
-    """Neo4j GraphRAG — production graph pipeline (separate from Hybrid RAG)."""
+def _store(config):
+    """Backend factory shared by all commands (raises for misconfiguration —
+    CLI commands fail LOUDLY; only the serving capability degrades)."""
+    if config.backend == "inmemory":
+        from src.graphrag.store import InMemoryGraphStore
+        log.warning("inmemory backend: local validation only (no persistence)")
+        return InMemoryGraphStore()
+    from src.graphrag.neo4j_store import Neo4jGraphStore
+    store = Neo4jGraphStore(config)
+    if not store.ping():
+        store.close()
+        raise GraphConfigError(f"Neo4j unreachable at {config.neo4j_uri}")
+    return store
 
 
-def _load_config(
-    enriched: str | None,
-    checkpoint: str | None,
-    embedding_model: str | None,
-    ollama_model: str | None,
-    limit: int | None,
-    no_resume: bool,
-    retry_failed: bool,
-    llm_provider: str | None = None,
-    llm_models: str | None = None,
-    debug_one: str | None = None,
-) -> GraphRAGConfig:
-    base = GraphRAGConfig()
-    return base.with_overrides(
-        enriched_glob=enriched,
-        checkpoint_path=checkpoint,
-        embedding_model=embedding_model,
-        ollama_model=ollama_model,
-        limit=limit,
-        resume=not no_resume,
-        retry_failed=retry_failed,
-        llm_provider=llm_provider,
-        llm_models=llm_models,
-        debug_one=debug_one,
-    )
+def _llm(deterministic_only: bool, config=None):
+    """Build the semantic-extraction client from the SHARED generation stack.
+
+    The registry/activation/policy chain resolves provider, model, context and
+    thinking exactly as for every other consumer — nothing is hardcoded here.
+
+    The ONE GraphRAG-scoped adjustment is the OUTPUT token budget. The shared
+    fast-mode profile allows 4096 completion tokens, which is right for chat
+    answers but truncates extraction JSON for fact-dense documents: vLLM
+    returns finish_reason="length" mid-object and the payload fails to parse
+    ("LLM returned non-JSON payload"). Extraction emits one JSON record per
+    entity/relationship, so its output scales with document density, not with
+    answer length.
+
+    This mutates only the LLMClient instance owned by this build process
+    (resolve_active_stack constructs a fresh client per call), so the serving
+    path, Hybrid RAG and every other generation consumer keep the shared
+    policy value untouched.
+    """
+    if deterministic_only:
+        return None
+    from src.generation.activation import resolve_active_stack
+    stack = resolve_active_stack("fast")
+    policy_max_tokens = stack.client.max_tokens
+    if config is not None:
+        stack.client.max_tokens = int(config.extract_max_tokens)
+    log.info("extraction model: provider=%s model=%s (source=%s)",
+             stack.provider, stack.model, stack.source)
+    log.info("extraction output budget: max_tokens=%s "
+             "(shared policy default %s; GRAPHRAG_EXTRACT_MAX_TOKENS), "
+             "num_ctx=%s",
+             stack.client.max_tokens, policy_max_tokens, stack.plan.num_ctx)
+    return stack.client
 
 
-@cli.command()
-@click.option("--enriched", type=str, default=None, help="Glob/path to enriched JSONL")
-@click.option("--checkpoint", type=str, default=None, help="Checkpoint file path")
-@click.option("--embedding-model", type=str, default=None, help="Override embedding model (default BAAI/bge-m3)")
-@click.option("--ollama-model", type=str, default=None, help="Override Ollama model (default qwen3:8b)")
-@click.option(
-    "--llm-provider",
-    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
-    default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
-)
-@click.option(
-    "--llm-models",
-    type=str,
-    default=None,
-    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
-)
-@click.option(
-    "--debug-one",
-    type=str,
-    default=None,
-    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
-)
-@click.option("--limit", type=int, default=None, help="Process at most N documents (testing)")
-@click.option("--no-resume", is_flag=True, help="Ignore the checkpoint and reprocess everything")
-@click.option("--retry-failed/--no-retry-failed", default=True, help="Retry failed documents on resume")
-@click.option("--verify-only", is_flag=True, help="Run only the 10-document verification, then stop")
-@click.option("--no-verify", is_flag=True, help="Skip the pre-build verification (use with care)")
-def build(
-    enriched: str | None,
-    checkpoint: str | None,
-    embedding_model: str | None,
-    ollama_model: str | None,
-    llm_provider: str | None,
-    llm_models: str | None,
-    debug_one: str | None,
-    limit: int | None,
-    no_resume: bool,
-    retry_failed: bool,
-    verify_only: bool,
-    no_verify: bool,
-) -> None:
-    """Build (or resume) the Neo4j graph from the enriched corpus."""
-    config = _load_config(
-        enriched, checkpoint, embedding_model, ollama_model, limit, no_resume, retry_failed,
-        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
-    )
-    console.print(Panel.fit("[bold cyan]GraphRAG — Build (Neo4j)[/bold cyan]", border_style="cyan"))
-
-    pipeline = GraphRAGPipeline(config)
+def cmd_init(config) -> int:
+    store = _store(config)
     try:
-        if not pipeline.store.ping():
-            console.print("[red]Neo4j is not reachable. Is it running?[/red]")
-            console.print(f"  URI: {config.neo4j_uri} | user: {config.neo4j_user}")
-            sys.exit(1)
-
-        records = pipeline.load_enriched()
-        console.print(f"[cyan]Loaded {len(records):,} enriched records.[/cyan]")
-
-        if verify_only:
-            result = pipeline.verify_sample(records, n=10)
-            console.print("[green]✓ Verification passed on 10 random documents.[/green]")
-            _print_result(result, title="Verification")
-            return
-
-        result = pipeline.build(records, verify_first=not no_verify, n_verify=10)
-        _print_result(result, title="Graph Build Complete")
+        store.init_schema()
+        print("schema applied (constraints + indexes, idempotent)")
+        return 0
     finally:
-        pipeline.close()
+        store.close()
 
 
-@cli.command()
-@click.option("--enriched", type=str, default=None)
-@click.option("--checkpoint", type=str, default=None)
-@click.option("--embedding-model", type=str, default=None)
-@click.option("--ollama-model", type=str, default=None)
-@click.option(
-    "--llm-provider",
-    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
-    default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
-)
-@click.option(
-    "--llm-models",
-    type=str,
-    default=None,
-    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
-)
-@click.option(
-    "--debug-one",
-    type=str,
-    default=None,
-    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
-)
-@click.option("--limit", type=int, default=None)
-def rebuild(
-    enriched: str | None,
-    checkpoint: str | None,
-    embedding_model: str | None,
-    ollama_model: str | None,
-    llm_provider: str | None,
-    llm_models: str | None,
-    debug_one: str | None,
-    limit: int | None,
-) -> None:
-    """Drop the graph and rebuild from scratch (destructive)."""
-    config = _load_config(
-        enriched, checkpoint, embedding_model, ollama_model, limit,
-        no_resume=True, retry_failed=True,
-        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
-    )
-    console.print(Panel.fit("[bold yellow]GraphRAG — Rebuild (drops existing graph)[/bold yellow]", border_style="yellow"))
-
-    pipeline = GraphRAGPipeline(config)
+def cmd_build(config, args) -> int:
+    from src.graphrag.pipeline import GraphBuilder
+    store = _store(config)
     try:
-        if not pipeline.store.ping():
-            console.print("[red]Neo4j is not reachable.[/red]")
-            sys.exit(1)
-        pipeline.store.reset_graph()
-        # Fresh checkpoint: remove any previous checkpoint file.
-        if config.checkpoint_file.exists():
-            config.checkpoint_file.unlink()
-            console.print(f"[yellow]Cleared checkpoint {config.checkpoint_file}[/yellow]")
-        records = pipeline.load_enriched()
-        console.print(f"[cyan]Loaded {len(records):,} enriched records.[/cyan]")
-        result = pipeline.build(records, verify_first=True, n_verify=10)
-        _print_result(result, title="Graph Rebuild Complete")
-    finally:
-        pipeline.close()
-
-
-@cli.command()
-@click.option("--enriched", type=str, default=None, help="Glob/path to enriched JSONL")
-@click.option("--embedding-model", type=str, default=None, help="Override embedding model (default BAAI/bge-m3)")
-@click.option("--ollama-model", type=str, default=None, help="Override Ollama model (default qwen3:8b)")
-@click.option(
-    "--llm-provider",
-    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
-    default=None,
-    help="LLM backend for extraction (ollama | groq | openai_compatible; default ollama)",
-)
-@click.option(
-    "--llm-models",
-    type=str,
-    default=None,
-    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
-)
-@click.option(
-    "--debug-one",
-    type=str,
-    default=None,
-    help="Question ID of the ONE document to debug (full LLM payload + raw response for that doc only)",
-)
-@click.option("--n", type=int, default=10, help="Number of random documents to verify")
-def verify(
-    enriched: str | None,
-    embedding_model: str | None,
-    ollama_model: str | None,
-    llm_provider: str | None,
-    llm_models: str | None,
-    debug_one: str | None,
-    n: int,
-) -> None:
-    """Verify extraction quality on a sample of documents (no full build)."""
-    config = _load_config(
-        enriched, None, embedding_model, ollama_model, None, False, True,
-        llm_provider=llm_provider, llm_models=llm_models, debug_one=debug_one,
-    )
-    console.print(Panel.fit("[bold cyan]GraphRAG — Verification (sample)[/bold cyan]", border_style="cyan"))
-
-    pipeline = GraphRAGPipeline(config)
-    try:
-        if not pipeline.store.ping():
-            console.print("[red]Neo4j is not reachable. Is it running?[/red]")
-            sys.exit(1)
-        records = pipeline.load_enriched()
-        console.print(f"[cyan]Loaded {len(records):,} enriched records. Verifying {n} random documents...[/cyan]")
-        verifier = GraphVerifier(config)
-        report = verifier.run(records, n=n)
-        verifier.render(report)
-        grade = report.grade()
-        if grade in ("Needs prompt tuning", "Poor"):
-            sys.exit(2)  # non-zero exit so scripts can gate the full build
-    finally:
-        pipeline.close()
-
-
-@cli.command()
-@click.option("--checkpoint", type=str, default=None)
-def stats(checkpoint: str | None) -> None:
-    """Show Neo4j graph statistics."""
-    config = _load_config(None, checkpoint, None, None, None, False, True)
-    pipeline = GraphRAGPipeline(config)
-    try:
-        if not pipeline.store.ping():
-            console.print("[red]Neo4j is not reachable.[/red]")
-            sys.exit(1)
-        s = pipeline.store.stats()
-        console.print(Panel.fit("[bold cyan]GraphRAG — Graph Statistics[/bold cyan]", border_style="cyan"))
-
-        tab = Table(title="Node Counts by Label")
-        tab.add_column("Label")
-        tab.add_column("Count", justify="right")
-        for label in sorted(s["labels"], key=lambda l: -s["labels"][l]):
-            tab.add_row(label, f"{s['labels'][label]:,}")
-        console.print(tab)
-
-        tab2 = Table(title="Relationship Counts by Type")
-        tab2.add_column("Type")
-        tab2.add_column("Count", justify="right")
-        for rt in sorted(s["relationships"], key=lambda r: -s["relationships"][r]):
-            if s["relationships"][rt]:
-                tab2.add_row(rt, f"{s['relationships'][rt]:,}")
-        console.print(tab2)
-
-        console.print(f"\n[b]Total nodes:[/b] {s['total_nodes']:,}  |  [b]Total relationships:[/b] {s['total_relationships']:,}")
-        vec = [i for i in s["indexes"] if i.get("type") == "VECTOR"]
-        console.print(f"[b]Vector indexes:[/b] {[(i['name'], i['labelsOrTypes'], i['properties']) for i in vec]}")
-        cp = pipeline.checkpoint.counts()
-        console.print(f"[b]Checkpoint:[/b] {cp}")
-    finally:
-        pipeline.close()
-
-
-@cli.command()
-@click.argument("question")
-@click.option("--top-k", type=int, default=10)
-@click.option("--embedding-model", type=str, default=None)
-@click.option("--ollama-model", type=str, default=None)
-@click.option(
-    "--llm-provider",
-    type=click.Choice(_LLM_PROVIDERS, case_sensitive=False),
-    default=None,
-    help="LLM backend for entity extraction (ollama | groq | openai_compatible; default ollama)",
-)
-@click.option(
-    "--llm-models",
-    type=str,
-    default=None,
-    help="Comma-separated model list for the active provider (e.g. 'm1,m2,m3')",
-)
-@click.option("--json-output", is_flag=True, help="Emit results as JSON")
-def query(
-    question: str,
-    top_k: int,
-    embedding_model: str | None,
-    ollama_model: str | None,
-    llm_provider: str | None,
-    llm_models: str | None,
-    json_output: bool,
-) -> None:
-    """Graph-aware query: entity expansion + vector search."""
-    config = _load_config(
-        None, None, embedding_model, ollama_model, None, False, True,
-        llm_provider=llm_provider, llm_models=llm_models,
-    )
-    querier = GraphRAGQuerier(config)
-    try:
-        results = querier.query(question, top_k=top_k)
-        if json_output:
-            click.echo(json.dumps([r.as_dict() for r in results], indent=2))
-            return
-        if not results:
-            console.print("[yellow]No results found in the graph.[/yellow]")
-            return
-        table = Table(title=f"GraphRAG Results — {question[:60]}")
-        table.add_column("#", style="dim")
-        table.add_column("Doc ID", style="cyan")
-        table.add_column("Subject")
-        table.add_column("Ministry", style="dim")
-        table.add_column("Date", style="dim")
-        table.add_column("Score", justify="right")
-        table.add_column("Matched Entities", style="dim")
-        table.add_column("Via", style="dim")
-        for i, r in enumerate(results, start=1):
-            table.add_row(
-                str(i),
-                r.doc_id,
-                (r.subject or "")[:45],
-                r.ministry or "-",
-                r.date or "-",
-                f"{r.score:.3f}",
-                ", ".join(r.matched_entities[:4]),
-                r.via,
-            )
-        console.print(table)
-    finally:
-        querier.close()
-
-
-def _print_result(result, title: str) -> None:
-    d = result.to_dict()
-    lines = [
-        f"Documents processed : {d['documents_processed']:,}",
-        f"Nodes created       : {d['nodes_created']:,}",
-        f"Relationships created: {d['relationships_created']:,}",
-        f"Embedding count     : {d['embedding_count']:,}",
-        f"Failures            : {d['failures']}",
-        f"Retries             : {d['retries']}",
-        f"Build duration      : {d['duration_seconds']:.1f}s",
-        f"Checkpoint counts   : {d['checkpoint']}",
-        f"Skipped via checkpoint: {d['skipped_from_checkpoint']}",
-    ]
-    if d["failed_docs"]:
-        lines.append(f"Failed docs         : {d['failed_docs'][:20]}")
-    console.print(Panel.fit("\n".join(lines), title=f"[bold green]{title}[/bold green]", border_style="green"))
-    if d["failures"]:
-        console.print(
-            f"[yellow]Warning: {d['failures']} document(s) failed. "
-            "Re-run `graphrag build` to retry them (resume).[/yellow]"
+        if not config.corpus_path.exists():
+            log.error("corpus not found: %s", config.corpus_path)
+            return 1
+        builder = GraphBuilder(
+            store, config,
+            llm_client=_llm(args.deterministic_only, config))
+        if not args.deterministic_only:
+            log.info("LLM extraction concurrency: %d "
+                     "(GRAPHRAG_LLM_CONCURRENCY; keep <= vLLM --max-num-seqs)",
+                     config.llm_concurrency)
+        report = builder.run(
+            config.corpus_path,
+            limit=args.limit,
+            deterministic_only=args.deterministic_only,
+            prune=args.prune,
+            resume=not args.no_resume,
+            semantic_backfill=args.semantic_backfill,
         )
+        print(json.dumps(report.to_dict(), indent=2))
+        return 0 if report.failed == 0 else 2
+    finally:
+        store.close()
+
+
+def cmd_prune(config, args) -> int:
+    from src.graphrag.pipeline import GraphBuilder
+    store = _store(config)
+    try:
+        if not config.corpus_path.exists():
+            log.error("corpus not found: %s", config.corpus_path)
+            return 1
+        builder = GraphBuilder(store, config, llm_client=None)
+        report = builder.run(config.corpus_path, prune=True,
+                             resume=not args.no_resume)
+        print(json.dumps({"withdrawn": report.withdrawn}))
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_query(config, args) -> int:
+    from src.graphrag.capability import build_graph_capability
+    cap = build_graph_capability(config)
+    try:
+        results = cap.retrieve(args.query, top_k=args.top_k)
+        if not results:
+            print("(no graph results — backend disabled or no matching anchors)")
+            return 1
+        for r in results:
+            g = r.metadata.get("graph", {})
+            print(f"── {r.doc_id}  score={r.score}  via={g.get('via')}")
+            print(f"   Q: {r.question}")
+            print(f"   A: {(r.answer or '')[:300]}")
+            print(f"   anchors: {[a['name'] for a in g.get('anchors', [])]}")
+            for fk in g.get("fact_keys", [])[:5]:
+                print(f"   fact: {fk}")
+        # full provenance block (Phase-3 verification input)
+        print(json.dumps([e.to_dict() for e in cap.explain(results)],
+                         indent=2, default=str))
+        return 0
+    finally:
+        cap.close()
+
+
+def cmd_stats(config) -> int:
+    from src.graphrag.capability import build_graph_capability
+    cap = build_graph_capability(config)
+    try:
+        print(json.dumps(cap.stats(), indent=2))
+        return 0
+    finally:
+        cap.close()
+
+
+def cmd_remove(config, args) -> int:
+    import time
+    store = _store(config)
+    try:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        out = store.withdraw_document(args.doc_key, now=now)
+        print(json.dumps(out))
+        return 0
+    finally:
+        store.close()
+
+
+def cli(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="graphrag",
+                                description="Canonical Neo4j GraphRAG")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="apply schema (idempotent)")
+
+    b = sub.add_parser("build", help="incremental corpus build (resumable)")
+    b.add_argument("--deterministic-only", action="store_true",
+                   help="no LLM — metadata graph only")
+    b.add_argument("--limit", type=int, default=None)
+    b.add_argument("--semantic-backfill", action="store_true",
+                   help="process only documents whose checkpoint extraction "
+                        "mode is not 'semantic' (already-semantic documents "
+                        "are skipped; --limit counts documents that still "
+                        "need semantic extraction)")
+    b.add_argument("--no-resume", action="store_true")
+    b.add_argument("--prune", action="store_true",
+                   help="withdraw docs missing from the corpus")
+
+    q = sub.add_parser("query", help="graph-mode retrieval")
+    q.add_argument("query")
+    q.add_argument("--top-k", type=int, default=5)
+
+    sub.add_parser("stats", help="graph statistics")
+
+    rm = sub.add_parser("remove", help="withdraw one document's contribution")
+    rm.add_argument("doc_key")
+
+    pr = sub.add_parser("prune", help="withdraw docs missing from the corpus")
+    pr.add_argument("--no-resume", action="store_true")
+
+    args = p.parse_args(argv)
+    try:
+        config = load_graph_config()
+    except GraphConfigError as e:
+        print(f"configuration error: {e}", file=sys.stderr)
+        return 3
+
+    if args.cmd == "init":
+        return cmd_init(config)
+    if args.cmd == "build":
+        return cmd_build(config, args)
+    if args.cmd == "prune":
+        return cmd_prune(config, args)
+    if args.cmd == "query":
+        return cmd_query(config, args)
+    if args.cmd == "stats":
+        return cmd_stats(config)
+    if args.cmd == "remove":
+        return cmd_remove(config, args)
+    return 2
+
+
+def main() -> None:  # pragma: no cover
+    raise SystemExit(cli())
 
 
 if __name__ == "__main__":
-    cli()
+    main()

@@ -277,3 +277,4 @@ slurm-*.out
 slurm-*.err
 *.out
 *.err
+src/graphrag/cli.py

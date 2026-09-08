@@ -9,5 +9,6 @@ export type {
   GroundingClaim,
   ServerStatus,
   GraphBuildStatus,
+  GraphBuildState,
   StreamEvent,
 } from "./api";

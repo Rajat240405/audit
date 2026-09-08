@@ -1,136 +1,165 @@
+"""Graph query layer (Phase 2 / WS2-F).
+
+A thin, backend-agnostic API over the GraphStore ABC: entity lookup,
+one-hop / multi-hop traversal, temporal/facet filtering, provenance
+retrieval — plus DETERMINISTIC anchor resolution from free-text queries
+(the WS5 graph-mode entry point). No LLM at query time (spec §8: the LLM is
+for build-time extraction only), no automatic routing (spec §19).
+
+Anchor resolution rules (all deterministic, corpus-justified):
+  1. Phase-1 controlled concepts (surface forms, word-boundary, casefold)
+     → nodes keyed "c:<canonical>" (if present in the graph)
+  2. controlled org / ministry / house canonical names (exact folded
+     match on word boundaries) → their node keys
+  3. entity-name matching: the graph's own entity names (substring,
+     casefold) — lets LLM-built entities (facilities, places) be found by
+     the names the corpus uses
+Results are ranked: controlled anchors first, then name matches, by
+specificity (longer match = better) then name order (deterministic).
 """
-GraphRAG query path.
-
-Combines:
-1. Entity expansion — extract entities from the user query (via the same
-   grounded extractor) and pull documents connected to those entities.
-2. Vector search — embed the query with bge-m3 and use the Neo4j vector index.
-
-Results are de-duplicated and ranked. This is a standalone GraphRAG retrieval
-path (separate from Hybrid RAG); the two will be fused later.
-"""
-
 from __future__ import annotations
 
-from typing import Optional
+import re
+from dataclasses import dataclass
+from typing import Iterable, Optional
 
-from src.graphrag.config import GraphRAGConfig
-from src.graphrag.embeddings import GraphEmbedder
-from src.graphrag.extractor import EntityRelationshipExtractor
-from src.graphrag.neo4j_client import Neo4jGraphStore
+from src.vocabulary import Vocabulary
+from src.vocabulary.normalize import concept_mentions
 
+from src.graphrag.models import FactView, NodeView, fold_surface
+from src.graphrag.store import GraphStore
 
-class GraphRAGQueryResult:
-    """One retrieved document with its graph-derived score."""
-
-    def __init__(
-        self,
-        doc_id: str,
-        subject: Optional[str],
-        ministry: Optional[str],
-        date: Optional[str],
-        score: float,
-        matched_entities: list[str],
-        via: str,
-    ) -> None:
-        self.doc_id = doc_id
-        self.subject = subject
-        self.ministry = ministry
-        self.date = date
-        self.score = score
-        self.matched_entities = matched_entities
-        self.via = via
-
-    def as_dict(self) -> dict:
-        return {
-            "doc_id": self.doc_id,
-            "subject": self.subject,
-            "ministry": self.ministry,
-            "date": self.date,
-            "score": round(self.score, 4),
-            "matched_entities": self.matched_entities,
-            "via": self.via,
-        }
+__all__ = ["GraphQuery", "Anchor"]
 
 
-class GraphRAGQuerier:
-    """Graph-aware retrieval over the Neo4j GraphRAG store."""
+@dataclass(frozen=True)
+class Anchor:
+    """A resolved query anchor: a graph node the query points at."""
 
-    def __init__(self, config: GraphRAGConfig) -> None:
-        self.config = config
-        self.store = Neo4jGraphStore(config)
-        self.embedder = GraphEmbedder(config)
-        self.extractor = EntityRelationshipExtractor(config)
+    key: str
+    label: str
+    name: str
+    via: str          # "concept" | "ministry" | "org" | "house" | "member" | "name-match"
+    match_length: int
 
-    def query(self, query_text: str, top_k: int = 10) -> list[GraphRAGQueryResult]:
-        if not self.store.ping():
-            raise RuntimeError("Neo4j is not reachable — cannot query the graph.")
+    def to_dict(self) -> dict:
+        return {"key": self.key, "label": self.label, "name": self.name,
+                "via": self.via}
 
-        scored: dict[str, GraphRAGQueryResult] = {}
 
-        # ── 1. Entity expansion ─────────────────────────────────────────
-        try:
-            entities, _ = self.extractor.extract(
-                self._query_as_document(query_text)
-            )
-            for ent in entities:
-                docs = self.store.documents_by_entity(ent.label, ent.name, limit=top_k)
-                for d in docs:
-                    res = scored.get(d["id"])
-                    if res is None:
-                        res = GraphRAGQueryResult(
-                            doc_id=d["id"],
-                            subject=d.get("subject"),
-                            ministry=d.get("ministry"),
-                            date=d.get("date"),
-                            score=0.0,
-                            matched_entities=[ent.name],
-                            via="entity",
-                        )
-                        scored[d["id"]] = res
-                    else:
-                        if ent.name not in res.matched_entities:
-                            res.matched_entities.append(ent.name)
-                        res.score += 1.0
-        except Exception:  # noqa: BLE001 - entity extraction must not break querying
-            pass
+_WORD = r"[a-z0-9][a-z0-9'\-\.]*"
 
-        # ── 2. Vector search ────────────────────────────────────────────
-        try:
-            qv = self.embedder.embed(query_text)
-            hits = self.store.vector_search(qv, k=top_k)
-            for i, h in enumerate(hits):
-                doc_id = h["id"]
-                res = scored.get(doc_id)
-                if res is None:
-                    res = GraphRAGQueryResult(
-                        doc_id=doc_id,
-                        subject=h.get("subject"),
-                        ministry=h.get("ministry"),
-                        date=h.get("date"),
-                        score=float(h.get("score", 0.0)),
-                        matched_entities=[],
-                        via="vector",
-                    )
-                    scored[doc_id] = res
-                else:
-                    res.score = max(res.score, float(h.get("score", 0.0)))
-                    res.via = "entity+vector"
-        except Exception:  # noqa: BLE001 - vector search must not break querying
-            pass
 
-        results = sorted(scored.values(), key=lambda r: r.score, reverse=True)[:top_k]
-        return results
+def _boundary_pattern(surface: str) -> re.Pattern:
+    """Word-boundary casefold pattern for a controlled surface form."""
+    return re.compile(rf"(?<![a-z0-9]){re.escape(fold_surface(surface))}(?![a-z0-9])")
 
-    def _query_as_document(self, text: str):
-        """Wrap the raw query so the extractor can process it."""
-        from src.graphrag.models import DocumentRecord
 
-        return DocumentRecord(
-            question_id="__query__",
-            question_text=text,
-            answer_text="",
-        )
+class GraphQuery:
+    """Query API over any GraphStore implementation."""
 
-    def close(self) -> None:
-        self.store.close()
+    def __init__(self, store: GraphStore, voc: Vocabulary) -> None:
+        self.store = store
+        self.voc = voc
+
+    # ── entity lookup ─────────────────────────────────────────────────────
+
+    def lookup_entity(self, name: str, *, label: Optional[str] = None,
+                      limit: int = 20) -> list[NodeView]:
+        """Exact (folded) then substring entity search."""
+        needle = fold_surface(name)
+        exact = [n for n in self.store.find_nodes(label=label, limit=1000)
+                 if fold_surface(n.name) == needle]
+        if exact:
+            return exact[:limit]
+        return self.store.find_nodes(label=label, name_contains=name, limit=limit)
+
+    def get_node(self, key: str) -> Optional[NodeView]:
+        return self.store.get_node(key)
+
+    # ── traversal ─────────────────────────────────────────────────────────
+
+    def one_hop(self, key: str, *, rel: Optional[str] = None,
+                labels: Optional[Iterable[str]] = None) -> list[NodeView]:
+        return self.store.neighbors(key, depth=1, rel=rel, labels=labels)
+
+    def multi_hop(self, key: str, depth: int, *, rel: Optional[str] = None,
+                  labels: Optional[Iterable[str]] = None) -> list[NodeView]:
+        return self.store.neighbors(key, depth=depth, rel=rel, labels=labels)
+
+    def facts(self, key: str, *, rel: Optional[str] = None,
+              direction: str = "out") -> list[FactView]:
+        if direction == "in":
+            return self.store.facts_in(key, rel=rel)
+        return self.store.facts_out(key, rel=rel)
+
+    # ── documents (temporal / facet filters) ──────────────────────────────
+
+    def documents(self, entity_key: str, *, rel: Optional[str] = None,
+                  year: Optional[int] = None, ls_term: Optional[int] = None,
+                  limit: int = 100) -> list[dict]:
+        return self.store.documents_for_entity(
+            entity_key, rel=rel, year=year, ls_term=ls_term, limit=limit)
+
+    # ── provenance ────────────────────────────────────────────────────────
+
+    def provenance(self, fact_key: str) -> Optional[dict]:
+        return self.store.provenance(fact_key)
+
+    def stats(self) -> dict:
+        return self.store.stats()
+
+    # ── anchor resolution from free text ──────────────────────────────────
+
+    def resolve_anchors(self, text: str, *, limit: int = 8) -> list[Anchor]:
+        """Deterministic query → graph-node anchors (see module docstring)."""
+        anchors: list[Anchor] = []
+        seen: set[str] = set()
+        folded = fold_surface(text)
+
+        def add(key: str, label: str, name: str, via: str, length: int) -> None:
+            if key in seen:
+                return
+            node = self.store.get_node(key)
+            if node is None:
+                return  # not in the graph — never invent anchors
+            seen.add(key)
+            anchors.append(Anchor(key=key, label=label, name=node.name,
+                                  via=via, match_length=length))
+
+        # 1) controlled concepts (longest surface wins span claims)
+        for canon, _count in concept_mentions(self.voc, text).items():
+            node = self.store.get_node(f"c:{canon}")
+            if node is not None:
+                add(f"c:{canon}", node.label, canon, "concept", len(canon))
+
+        # 2) controlled org / ministry / house canonical surfaces
+        pairs = ([ (e, "org") for e in self.voc.org ]
+                 + [(e, "ministry") for e in self.voc.ministry]
+                 + [(e, "house") for e in self.voc.house])
+        for entry, via in pairs:
+            for surface in entry.surface_forms():
+                if _boundary_pattern(surface).search(folded):
+                    add(entry.canonical, _label_for(via), entry.label, via,
+                        len(surface))
+                    break
+
+        # 3) graph entity names (LLM-built facilities/places/orgs/people)
+        for word in re.findall(_WORD, folded):
+            if len(word) < 4:
+                continue
+            for node in self.store.find_nodes(name_contains=word, limit=50):
+                if node.label in ("Document", "Year", "Fact"):
+                    continue
+                add(node.key, node.label, node.name, "name-match", len(word))
+
+        # controlled first, then by specificity, then by name (deterministic)
+        rank = {"concept": 0, "org": 0, "ministry": 0, "house": 0, "member": 0,
+                "name-match": 1}
+        anchors.sort(key=lambda a: (rank.get(a.via, 2), -a.match_length, a.name))
+        return anchors[:limit]
+
+
+def _label_for(via: str) -> str:
+    return {"org": "Organization", "ministry": "Ministry", "house": "House",
+            "member": "Member"}.get(via, "Organization")

@@ -49,6 +49,7 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
         "numpy>=1.24.0" \
         "pandas>=2.0.0" \
         "networkx>=3.0.0" \
+        "neo4j>=5.14.0" \
         "faiss-cpu==1.15.0" \
         "sentence-transformers>=3.0.0" \
         "rank-bm25==0.2.2" \
@@ -57,4 +58,4 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
         "PyMuPDF>=1.24.0" \
         "pytesseract>=0.3.10"
 
-RUN mkdir -p /data /storage/hybrid_rag /models /models/hf-cache
+RUN mkdir -p /data /storage/hybrid_rag /storage/graphrag /models /models/hf-cache

@@ -1,0 +1,220 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain vocabulary — SINGLE SOURCE OF TRUTH for controlled vocabularies.
+#
+# Phase 1 (WS1) of the GraphRAG/Neo4j migration: this is the canonical data
+# foundation a future graph will map onto. It is DATA, not code:
+#   * every alias list below was mined from the shipped corpus
+#     (corpus_reports.jsonl, 2,648 rows — see docs/phase1/corpus_quality_report)
+#   * unknowns are deliberately NOT mapped: a value with no corpus-justified
+#     canonical identity stays "unknown" (see src/vocabulary/normalize.py)
+#
+# Consumers: src/vocabulary/ (loader + normalizers + corpus-quality report).
+# NOTHING here is a model/provider registry; it does not touch retrieval.
+#
+# Rule for adding an entry: it must be backed by corpus evidence (rows, or an
+# official label already present in the corpus metadata). Do not invent
+# organizations, people, or concepts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+# ── Ministry of the answer (metadata.ministry, 3 raw surfaces → 2 identities)
+ministry:
+  - canonical: earth-sciences
+    label: "Ministry of Earth Sciences"
+    aliases:
+      - earth-sciences
+      - EARTH SCIENCES
+      - Earth Sciences
+      - Ministry of Earth Sciences
+      - ministry of earth sciences
+    # sansad elibrary ministry codes observed in the corpus (100% of the
+    # 2,345 parliamentary rows; see docs/phase1/corpus_quality_report):
+    #   (lok-sabha,  earth-sciences) -> 23   (all 1,377 LS rows)
+    #   (rajya-sabha, earth-sciences) -> 95   (866 RS rows)
+    #   (rajya-sabha, ocean-development) -> 23 (102 RS rows)
+    # (lok-sabha, ocean-development) has NO rows in the corpus.
+    sansad_codes:
+      lok-sabha: 23
+      rajya-sabha: 95
+  - canonical: ocean-development
+    label: "Ocean Development (predecessor of MoES)"
+    aliases:
+      - ocean-development
+      - OCEAN DEVELOPMENT
+      - Ocean Development
+      - Ministry of Ocean Development
+      - ministry of ocean development
+    sansad_codes:
+      rajya-sabha: 23
+
+# ── Producing organization (metadata.org)
+org:
+  - canonical: sansad
+    label: "Sansad (elibrary.sansad.in / rsdoc.nic.in)"
+    aliases: [sansad, SANSAD, sansad.in, elibrary.sansad.in]
+  - canonical: moes_hq
+    label: "MoES Headquarters (website press releases / documents)"
+    aliases: [moes_hq, MOES_HQ, moes, MoES HQ]
+  - canonical: incois
+    label: "INCOIS (annual reports)"
+    aliases: [incois, INCOIS, India National Centre for Ocean Information Services]
+
+# ── Ingestion source (metadata.source)
+source:
+  - canonical: parliamentary-qa
+    label: "Parliamentary questions & answers (LS + RS)"
+    aliases: [parliamentary-qa, Parliamentary QA, parliamentary_qa]
+  - canonical: moes_website
+    label: "MoES website crawl"
+    aliases: [moes_website, MoES Website]
+  - canonical: incois
+    label: "INCOIS folder crawl"
+    aliases: [incois, INCOIS]
+
+# ── House (metadata.house; 100% consistent with the doc-id prefix)
+house:
+  - canonical: lok-sabha
+    label: "Lok Sabha"
+    aliases: [lok-sabha, Lok Sabha, LOK SABHA, Lok Sabha (House of the People)]
+    id_prefix: "ls-"
+  - canonical: rajya-sabha
+    label: "Rajya Sabha"
+    aliases: [rajya-sabha, Rajya Sabha, RAJYA SABHA, Council of States]
+    id_prefix: "rs-"
+
+# ── Lok Sabha terms present in the corpus (doc-id `ls-<lok>-...`)
+#     Year ranges are the corpus-observed date span for each term.
+ls_terms:
+  - term: 14
+    years: [2006, 2009]
+  - term: 15
+    years: [2009, 2014]
+  - term: 16
+    years: [2014, 2019]
+  - term: 17
+    years: [2019, 2024]
+  - term: 18
+    years: [2024, 2026]
+
+# ── Rajya Sabha sessions present in the corpus (integer identities; the
+#     session NUMBER itself is the canonical form — no aliasing, no
+#     semantic mapping. The observed range is informational only.)
+rs_sessions:
+  observed_min: 185
+  observed_max: 271
+
+# ── Document types (metadata.document_type — the full controlled set)
+document_type:
+  - canonical: parliamentary_qa
+    label: "Parliamentary question & answer"
+    aliases: [parliamentary_qa, parliamentary-qa, Parliamentary QA]
+  - canonical: press_release
+    label: "Press release"
+    aliases: [press_release, press-release, Press Release]
+  - canonical: annual_report
+    label: "Annual report"
+    aliases: [annual_report, annual-report, Annual Report]
+  - canonical: document
+    label: "Document (generic)"
+    aliases: [document, Document]
+  - canonical: research_publication
+    label: "Research publication"
+    aliases: [research_publication, research-publication, Research Publication]
+  - canonical: general_report
+    label: "General report"
+    aliases: [general_report, general-report, General Report]
+  - canonical: technical_report
+    label: "Technical report"
+    aliases: [technical_report, technical-report, Technical Report]
+
+# ── Question types (metadata.question_type — mirrors the QuestionType enum in
+#     src/models/qa_record.py; the corpus uses starred/unstarred/unknown).
+question_type:
+  - canonical: starred
+    aliases: [starred, Starred, STARRED]
+  - canonical: unstarred
+    aliases: [unstarred, Unstarred, UNSTARRED]
+  - canonical: short_notice
+    aliases: [short_notice, short-notice, Short Notice]
+  - canonical: half_hour
+    aliases: [half_hour, half-hour, Half Hour]
+  - canonical: privilege
+    aliases: [privilege, Privilege]
+  - canonical: adjournment
+    aliases: [adjournment, Adjournment]
+  - canonical: calling_attention
+    aliases: [calling_attention, calling-attention, Calling Attention]
+  - canonical: unknown
+    aliases: [unknown, Unknown, UNKNOWN]
+
+# ── Member honorifics (metadata.member). Stripping these is the ONLY
+#     member-merge rule: corpus analysis shows the raw variants of a person
+#     differ only by case and by a leading honorific (87 multi-variant keys,
+#     all of these two kinds). No similarity-based merging is ever applied.
+member_honorifics:
+  - Shri
+  - Sri
+  - Smt
+  - Shrimati
+  - Hon'ble
+  - Hon.
+  - Dr.
+  - Dr
+  - Prof.
+  - Prof
+  - Adv.
+  - Adv
+
+# ── Controlled CONCEPTS (organizations/programmes mentioned in answer text).
+#     These are mining anchors for the corpus-quality report and (later) a
+#     graph — they are NOT entities in any store. Surface forms are matched
+#     case-insensitively on word boundaries; the longest form wins so e.g.
+#     "India Meteorological Department" is not also counted as "IMD".
+concepts:
+  - canonical: MoES
+    label: "Ministry of Earth Sciences"
+    surfaces: [MoES, Ministry of Earth Sciences, Ministry of Earth Sciences (MoES)]
+  - canonical: IMD
+    label: "India Meteorological Department"
+    surfaces: [IMD, India Meteorological Department, Indian Meteorological Department]
+  - canonical: INCOIS
+    label: "India National Centre for Ocean Information Services"
+    surfaces: [INCOIS, India National Centre for Ocean Information Services,
+               Indian National Centre for Ocean Information Services]
+  - canonical: NIOT
+    label: "National Institute of Ocean Technology"
+    surfaces: [NIOT, National Institute of Ocean Technology]
+  - canonical: NDMA
+    label: "National Disaster Management Authority"
+    surfaces: [NDMA, National Disaster Management Authority]
+  - canonical: DWR
+    label: "Disaster Warning Centre network"
+    surfaces: [DWR, DWRs, Disaster Warning Centre, Disaster Warning Centers]
+  - canonical: AWS
+    label: "Automatic Weather Stations"
+    surfaces: [AWS, AWSs, Automatic Weather Station, Automatic Weather Stations]
+  - canonical: ISRO
+    label: "Indian Space Research Organisation"
+    surfaces: [ISRO, Indian Space Research Organisation]
+  - canonical: CWC
+    label: "Central Water Commission"
+    surfaces: [CWC, Central Water Commission]
+  - canonical: WMO
+    label: "World Meteorological Organization"
+    surfaces: [WMO, World Meteorological Organization]
+  - canonical: IITM
+    label: "IIT Bombay (monsoon mission partner)"
+    surfaces: [IITM, IIT Bombay, Indian Institute of Technology Mumbai]
+  - canonical: Deep Ocean Mission
+    label: "Deep Ocean Mission"
+    surfaces: [Deep Ocean Mission, DOM]
+  - canonical: Mausam
+    label: "Mausam mobile weather app"
+    surfaces: [Mausam, Mausam app]
+  - canonical: National Monsoon Mission
+    label: "National Monsoon Mission"
+    surfaces: [National Monsoon Mission, NMM]
+  - canonical: Deep Ocean Drilling
+    label: "Deep ocean drilling (ODP/IODP/DOME expeditions)"
+    surfaces: [Deep Ocean Drilling, DOD, ODP, IODP]

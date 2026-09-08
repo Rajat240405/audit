@@ -12,6 +12,7 @@ Ensures perfect, secure propagation of in-memory API keys across runtime boundar
 from __future__ import annotations
 
 import io
+import calendar
 import json
 import os
 import re
@@ -374,11 +375,13 @@ class _LazyPipeline:
 
 
 class _LazyGraph:
-    """Loads GraphStore/GraphRetriever on first use.
+    """Loads the GraphRAG capability on first use.
 
-    Defers importing networkx and reading/loading the graph file until the
-    first GraphRAG retrieval, so startup (even with APP_MODE=serve) never
-    touches the graph stack. Forwards all access to the built retriever."""
+    Defers the Neo4j store/connection until the first graph-mode retrieval,
+    so startup (even with APP_MODE=serve) never touches the graph backend.
+    Forwards all access to the built capability. When no graph backend is
+    configured/reachable the capability is a disabled stand-in that returns
+    [] (the honest-empty graph-mode behavior, frozen in Phase 1 WS0)."""
 
     def __init__(self) -> None:
         self._retriever = None
@@ -388,13 +391,8 @@ class _LazyGraph:
         if self._retriever is None:
             with self._lock:
                 if self._retriever is None:
-                    from src.retrieval.graph.retriever import GraphRetriever  # lazy: networkx
-                    from src.retrieval.graph.store import GraphStore  # lazy: networkx
-
-                    store = GraphStore(storage_dir=str(graph_dir))
-                    if store.graph_file.exists():
-                        store.load()
-                    self._retriever = GraphRetriever(store=store)
+                    from src.graphrag.capability import build_graph_capability  # lazy
+                    self._retriever = build_graph_capability()
         return self._retriever
 
     def __getattr__(self, name):
@@ -1122,371 +1120,41 @@ def _sse(obj: dict) -> str:
 
 import re as _re
 
-_ACRONYM_STOPWORDS = {
-    "THE", "AND", "FOR", "NOT", "ARE", "WAS", "WERE", "BUT", "HAS", "HAVE",
-    "HAD", "ITS", "YOU", "OUR", "OUT", "OFF", "CAN", "MAY", "THIS", "THAT",
-    "WITH", "FROM", "INTO", "WHEN", "WHAT", "WHY", "HOW", "THAN", "THEN",
-    "INDIA", "GOVERNMENT", "MINISTRY", "ANSWER", "QUESTION", "STATE",
-}
+# ── WS3: centralized Verification Authority ──────────────────────────────
+# Phase 3 moved this module's grounding/verification implementation into
+# src/verification/ so that Hybrid RAG and GraphRAG share ONE engine. The
+# private names below are kept as BINDINGS to the central implementation —
+# same functions, same behavior, same code path (Phase 1's frozen
+# verification contract is the acceptance gate). Nothing is reimplemented
+# here; edit src/verification/ to change verification behavior.
 
-_FIGURE_RE = _re.compile(
-    r"\b\d+(?:[.,]\d+)?\s?(?:%|mm|cm|km|m\b|MW|GW|KW|sq\.?\s?km|crore|lakh|"
-    r"million|billion|hrs?|hours?|years?|deg(?:ree)?s?|₹|rs\.?)\b",
-    _re.IGNORECASE,
-)
-# "48 Doppler Weather Radars", "32 Water Quality Buoys", "675 AWS" — number +
-# a capitalized noun phrase (up to 4 words). Catches list-number swaps that a
-# bare figure+unit regex misses ("32 Water Quality Buoys" vs the source's
-# "2 Water Quality Buoys").
-_NUM_WORD_RE = _re.compile(
-    r"\b\d+(?:[.,]\d+)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,3}\b"
-)
-_QUOTE_RE = _re.compile(r"\"([^\"\\]{6,80})\"")
-_ACRONYM_RE = _re.compile(r"\b[A-Z]{2,8}\b")
-_ACRONYM_PLURAL_RE = _re.compile(r"\b[A-Z]{2,7}[a-z]{1,2}\b")
-_NAMED_ABBR_RE = _re.compile(r"\b[A-Z][A-Za-z&.\- ]{2,60}\s*\([A-Z]{2,10}\)")
+from src.verification import text_support as _ts
+from src.verification.authority import VerificationAuthority as _VerificationAuthority
 
+# claim extraction / normalization / support matching / filtering
+_extract_claims = _ts.extract_claims
+_normalize = _ts.normalize
+_singularize = _ts.singularize
+_claim_candidates = _ts.claim_candidates
+_claim_supported = _ts.claim_supported
+_grounding_report = _ts.grounding_report
+_apply_citation_filter = _ts.apply_citation_filter
+_remove_rejected_sentences = _ts.remove_rejected_sentences
 
-def _extract_claims(answer: str, max_claims: int = 12) -> list[str]:
-    """Extract a bounded set of checkable claims from the answer."""
-    claims: list[str] = []
-    for m in _FIGURE_RE.finditer(answer):
-        claims.append(m.group(0).strip())
-    for m in _NUM_WORD_RE.finditer(answer):
-        claims.append(m.group(0).strip())
-    for m in _QUOTE_RE.finditer(answer):
-        claims.append(m.group(1).strip())
-    for m in _NAMED_ABBR_RE.finditer(answer):
-        claims.append(m.group(0).strip())
-    for m in _ACRONYM_RE.finditer(answer):
-        tok = m.group(0)
-        if tok in _ACRONYM_STOPWORDS or len(tok) < 3:
-            continue
-        claims.append(tok)
-    for m in _ACRONYM_PLURAL_RE.finditer(answer):
-        tok = m.group(0)
-        if tok in _ACRONYM_STOPWORDS or len(tok) < 3:
-            continue
-        claims.append(tok)
-    # de-dup, keep order, cap
-    seen: set[str] = set()
-    out: list[str] = []
-    for c in claims:
-        key = c.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(c)
-        if len(out) >= max_claims:
-            break
-    return out
+# data/tables the frozen tests pin
+_ACRONYM_STOPWORDS = _ts.ACRONYM_STOPWORDS
+_ALIAS_GROUPS = _ts.ALIAS_GROUPS
 
-
-# ── Citation / grounding-aware filter (#3, non-destructive) ───────────────
-# Original behavior dropped ANY sentence lacking "[Source N]", which cut
-# correct-but-uncited prose and made answers look truncated. New behavior is
-# claim-aware: a sentence is removed ONLY if it contains a checkable claim
-# (figure, acronym, named phrase) that is NOT found in the retrieved sources —
-# i.e. an actual hallucination risk. Plain prose, headings, and correctly
-# grounded statements are never removed just for missing a citation token.
-
-_CITATION_RE = _re.compile(r"\[\s*[Ss]ource\s*(\d+)\s*\]")
-
-
-def _apply_citation_filter(
-    answer: str,
-    sources: list[dict],
-    max_drop: int = 3,
-) -> tuple[str, list[str]]:
-    """Drop only sentences carrying UNVERIFIED claims. Returns
-    (filtered_answer, dropped_sentences). Never empties the answer."""
-    if not answer.strip() or not sources:
-        return answer, []
-
-    # Build a source haystack for per-sentence grounding.
-    haystack = " ".join(
-        f"{s.get('question','')} {s.get('answer','')}" for s in sources
-    ).lower()
-
-    import re as _re2
-    sentences = _re2.split(r"(?<=[.!?])\s+|\n+", answer)
-    kept: list[str] = []
-    dropped: list[str] = []
-
-    for s in sentences:
-        s = s.strip()
-        if not s:
-            continue
-        # A citation token always lets a sentence through.
-        if _CITATION_RE.search(s):
-            kept.append(s)
-            continue
-        # No claims to verify -> plain prose/connective -> keep.
-        claims = _extract_claims(s)
-        if not claims:
-            kept.append(s)
-            continue
-        # Has claims but none are grounded -> hallucination risk -> drop.
-        ungrounded = [c for c in claims if c.lower() not in haystack]
-        if ungrounded and len(dropped) < max_drop:
-            dropped.append(s)
-            continue
-        kept.append(s)
-
-    if not kept:
-        # never return an empty answer
-        return answer, dropped
-    return "\n\n".join(kept), dropped
-
-
-# ── Normalized + alias-aware grounding (#1 recall fix) ────────────────────
-# The raw verbatim check ("is the exact string in the source?") is precise but
-# has poor recall: "Indian Space Research Organisation" vs "ISRO" is the same
-# fact, but exact matching flags it. We keep the STRICT floor (a claim must
-# have genuine textual support in a source) but make matching smarter:
-#   1. normalize both sides (lowercase, unify currency/abbrevs, strip
-#      punctuation, collapse whitespace),
-#   2. resolve known alias groups (acronym <-> full name),
-#   3. strip trailing plurals ("DWRs" -> "DWR").
-# Invented names like "VSSC" stay NOT-FOUND because they are not in any alias
-# group of a concept actually present in the sources.
-
-_TOKEN_ALIASES = {
-    "rs": "rupee", "inr": "rupee", "₹": "rupee",
-    "&": "and", "ltd": "limited", "dept": "department",
-    "govt": "government", "yr": "year", "hrs": "hours", "hr": "hour",
-}
-
-# Equivalent surface forms of the SAME entity/concept. These are true
-# synonyms mined from the corpus — deliberately NOT including things like
-# "VSSC" for ISRO (VSSC is a sub-entity; documents never use it for the
-# personnel sphere, so it must keep failing the check).
-# Equivalent surface forms of the same entity — SINGLE SOURCE of truth:
-# frontend/src/utils/grounding_aliases.json. Editing the JSON is the ONLY way
-# to change aliases; this list is loaded from it so backend and frontend can
-# never drift again (was: two hardcoded copies, frontend missing 7 terms).
-_ALIAS_GROUPS: list[list[str]] = json.loads(
-    (PROJECT_ROOT / "frontend" / "src" / "utils"
-     / "grounding_aliases.json").read_text(encoding="utf-8")
-)["groups"]
-
-
-def _normalize(text: str) -> str:
-    """Lowercase, unify currency/abbrev tokens, strip punctuation, collapse."""
-    t = text.lower()
-    # remove digit-grouping commas first: "2,000" -> "2000" so it matches "2000"
-    t = _re.sub(r"(?<=\d),(?=\d)", "", t)
-    # token aliases with word boundaries, space-padded so they never glue to
-    # neighbours ("₹2,000" -> "rupee 2000", "rs." -> "rupee")
-    for k, v in _TOKEN_ALIASES.items():
-        t = _re.sub(rf"\b{_re.escape(k)}\b", f" {v} ", t)
-    # replace anything non-alphanumeric with a space
-    t = _re.sub(r"[^a-z0-9]+", " ", t)
-    return _re.sub(r"\s+", " ", t).strip()
-
-
-def _singularize(norm: str) -> str:
-    """Strip a trailing plural 's' if it leaves a meaningful token."""
-    if len(norm) > 4 and norm.endswith("s") and not norm.endswith("ss"):
-        return norm[:-1]
-    return norm
-
-
-def _claim_candidates(claim: str) -> list[str]:
-    """All normalized surface forms that represent the same concept as the
-    claim — the claim itself, its singular form, and every alias-group member
-    if the claim names a known entity. Number+entity claims ("48 DWRs",
-    "675 AWS") additionally expand the entity across its alias group and are
-    matched with the number BEFORE or AFTER the entity (tables often list
-    "AWS 675"), so a swapped figure ("32 Water Quality Buoys" vs the source's
-    "2 Water Quality Buoys") still fails every candidate.
-    """
-    c = _normalize(claim)
-    cands = [c, _singularize(c)]
-    m = _re.match(r"^(\d+)\s+(.+)$", c)
-    if m:
-        num, phrase = m.group(1), m.group(2)
-        phrases = {phrase, _singularize(phrase)}
-        for group in _ALIAS_GROUPS:
-            if any(mem in phrase or phrase in mem for mem in group if len(mem) > 2):
-                phrases.update(group)
-        for p in phrases:
-            if p:
-                cands.append(f"{num} {p}")
-                cands.append(f"{p} {num}")
-    else:
-        for group in _ALIAS_GROUPS:
-            if c in group or any(m in c for m in group if len(m) > 4):
-                cands.extend(group)
-    # de-dup
-    seen: set[str] = set()
-    out: list[str] = []
-    for x in cands:
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-
-def _claim_supported(claim: str, src_normalized: str) -> bool:
-    """True if any surface form of the claim appears in the normalized source."""
-    for cand in _claim_candidates(claim):
-        if cand and cand in src_normalized:
-            return True
-    return False
-
-
-def _grounding_report(answer: str, sources: list[dict]) -> list[dict]:
-    """Verify each extracted claim against the sources using normalized +
-    alias-aware matching. Returns [{text, found, source}]."""
-    if not sources:
-        return []
-    claims = _extract_claims(answer)
-    src_texts = [
-        {
-            "doc_id": s["doc_id"],
-            "text": _normalize(f"{s.get('question','')} {s.get('answer','')}"),
-        }
-        for s in sources
-    ]
-    report: list[dict] = []
-    for c in claims:
-        found = False
-        src = None
-        for st in src_texts:
-            if _claim_supported(c, st["text"]):
-                found = True
-                src = st["doc_id"]
-                break
-        report.append({"text": c, "found": found, "source": src})
-    return report
-
-
-# ── LLM judge (#2) ───────────────────────────────────────────────────────
-# The regex grounding pass is fast but dumb: it only does verbatim substring
-# matching, so a CITED-but-wrong claim (e.g. "VSSC" instead of "ISRO") slips
-# through. The LLM judge re-verifies the claims the regex flagged as
-# NOT-FOUND (and, optionally, the cited ones) by READING the sources and
-# returning a supported/not-supported verdict per claim. It's a single short
-# call over the flagged claims — NOT a regeneration of the whole answer — so
-# latency stays near the generation cost (+10-20%, not 2x).
-
-_JUDGE_JSON_RE = _re.compile(r"\{.*\}", _re.DOTALL)
+# The one engine. The LLM client is INJECTED per call (never captured at
+# import time) so runtime provider/model switches — and tests that
+# monkeypatch ``llm_client`` — are always honored.
+_verification_authority = _VerificationAuthority()
 
 
 def _llm_judge_claims(claims: list[dict], sources: list[dict]) -> list[dict]:
-    """Verify flagged claims with an LLM judge against the sources.
-
-    Returns the claims list with updated ``found`` / ``source`` / ``note``.
-    On any failure (LLM offline, parse error) returns the original claims
-    unchanged — the regex verdicts remain authoritative.
-    """
-    if not claims or not sources:
-        return claims
-    # Only judge claims the regex could NOT verify (the interesting ones).
-    pending = [c for c in claims if not c.get("found")]
-    if not pending:
-        return claims
-
-    try:
-        # Compact source text: id + answer (truncated) per doc.
-        src_blocks = []
-        for i, s in enumerate(sources[:6], start=1):
-            ans = (s.get("answer") or "")[:1500]
-            src_blocks.append(f"[Source {i}] {s.get('doc_id','')}\n{ans}")
-        src_text = "\n\n".join(src_blocks)
-
-        claim_lines = "\n".join(
-            f"{i}. {c['text']}" for i, c in enumerate(pending, start=1)
-        )
-        prompt = (
-            "You are a strict evidence auditor. Below are source documents and a "
-            "list of claims. For EACH claim decide whether it is SUPPORTED by the "
-            "sources — supported means the claim's fact appears in the source text "
-            "verbatim or is directly implied. If a claim names an organization, "
-            "programme, or figure that does not appear in the sources, it is NOT "
-            "supported.\n"
-            "Return ONLY JSON (no prose):\n"
-            '{"verdicts":[{"index":1,"supported":true,"source":"18-3-2571"},'
-            '{"index":2,"supported":false,"source":null}]}\n\n'
-            f"SOURCES:\n{src_text}\n\nCLAIMS:\n{claim_lines}"
-        )
-        resp = llm_client.generate(
-            prompt=prompt,
-            system=(
-                "You are an evidence-verification assistant. Answer strictly with "
-                "the requested JSON. Never invent claims or sources."
-            ),
-        )
-        raw = resp.text
-        m = _JUDGE_JSON_RE.search(raw or "")
-        if not m:
-            return claims
-        data = json.loads(m.group(0))
-        verdicts = data.get("verdicts") or []
-
-        by_index = {}
-        for v in verdicts:
-            try:
-                by_index[int(v.get("index"))] = v
-            except (TypeError, ValueError):
-                continue
-
-        out = []
-        pending_i = 0
-        for c in claims:
-            if c.get("found"):
-                out.append(c)  # already verified verbatim by regex — keep
-                continue
-            pending_i += 1  # index within the pending list the judge saw
-            v = by_index.get(pending_i)
-            if v is None:
-                out.append(c)  # judge gave no verdict — keep regex verdict
-                continue
-            supported = bool(v.get("supported"))
-            src = v.get("source") or None
-            # CRITICAL: the judge's "supported" is only trusted if it can name
-            # a source that ACTUALLY contains the claim. The judge is the same
-            # model that hallucinated the claim (e.g. "VSSC" — it "remembers"
-            # VSSC is ISRO's space centre), so a bare "supported: true" must
-            # NOT override a verbatim miss. Only accept the judge's verdict
-            # when the claim text appears in the cited source's text (using the
-            # same normalized+alias matcher as the grounding pass).
-            judge_trusted = False
-            if supported and src:
-                for s in sources:
-                    if s.get("doc_id") == src:
-                        stxt = _normalize(
-                            f"{s.get('question','')} {s.get('answer','')}"
-                        )
-                        if _claim_supported(c["text"], stxt):
-                            judge_trusted = True
-                        break
-            if supported and not judge_trusted:
-                # Judge said supported but cannot back it with verbatim text
-                # in a real source → keep the regex verdict (rejected).
-                out.append({
-                    "text": c["text"],
-                    "found": False,
-                    "source": None,
-                    "note": "rejected by LLM judge (no verbatim source support)",
-                })
-            else:
-                out.append({
-                    "text": c["text"],
-                    "found": judge_trusted,
-                    "source": src if judge_trusted else None,
-                    "note": (
-                        "verified by LLM judge" if judge_trusted
-                        else "rejected by LLM judge"
-                    ),
-                })
-        return out
-    except Exception as e:  # noqa: BLE001 - judge must never break the stream
-        import traceback
-        print(f"[llm-judge] failed ({type(e).__name__}: {e}) — using regex verdicts")
-        print(traceback.format_exc(limit=3))
-        return claims
+    """Judge flagged claims via the central authority using the server's
+    ACTIVE llm_client (resolved at call time, not import time)."""
+    return _verification_authority.judge_claims(claims, sources, llm_client)
 
 
 def _llm_rewrite_answer(
@@ -1494,73 +1162,10 @@ def _llm_rewrite_answer(
     rejected_claims: list[str],
     sources: list[dict],
 ) -> str:
-    """Second LLM call: rewrite the answer WITHOUT the judge-rejected claims.
-
-    The rewrite keeps the structure and all supported content, but removes
-    (or corrects) the unsupported statements. Returns the rewritten markdown
-    answer. Raises on failure — the caller falls back to the original.
-    """
-    src_blocks = []
-    for i, s in enumerate(sources[:6], start=1):
-        ans = (s.get("answer") or "")[:1500]
-        src_blocks.append(f"[Source {i}] {s.get('doc_id','')}\n{ans}")
-    src_text = "\n\n".join(src_blocks)
-
-    rejected_lines = "\n".join(f"- {c}" for c in rejected_claims)
-    prompt = (
-        "You are an evidence auditor. Below is a draft answer and a list of "
-        "claims that were REJECTED because they are NOT supported by the source "
-        "documents.\n\n"
-        f"REJECTED CLAIMS:\n{rejected_lines}\n\n"
-        f"DRAFT ANSWER:\n{answer}\n\n"
-        f"SOURCES:\n{src_text}\n\n"
-        "Rewrite the draft answer so that it:\n"
-        "1. Removes every statement based on a rejected claim.\n"
-        "2. Keeps all supported statements verbatim where possible.\n"
-        "3. Does NOT add any new facts, names, or figures.\n"
-        "4. Preserves markdown formatting and keeps the answer free of "
-        "[Source N] citation markers (attribution is handled separately).\n"
-        "If everything was rejected, say the context does not support the "
-        "claim.\n"
-        "Return ONLY the rewritten answer, no commentary."
-    )
-    resp = llm_client.generate(
-        prompt=prompt,
-        system=(
-            "You are an evidence-verification assistant. Rewrite the answer to "
-            "remove unsupported claims. Never invent facts."
-        ),
-    )
-    return (resp.text or "").strip()
-
-
-
-def _remove_rejected_sentences(answer: str, rejected_claims: list[str]) -> tuple[str, list[str]]:
-    """Remove sentences containing judge-rejected claims from the answer.
-
-    Returns (cleaned_answer, removed_sentences). Only sentences that carry a
-    claim the LLM judge explicitly rejected are removed — never plain prose,
-    never grounded claims. This is the targeted enforcement that makes the
-    visible answer correct, not just flagged.
-    """
-    if not answer.strip() or not rejected_claims:
-        return answer, []
-    import re as _re2
-    sentences = _re2.split(r"(?<=[.!?])\s+|\n+", answer)
-    kept: list[str] = []
-    removed: list[str] = []
-    for s in sentences:
-        s = s.strip()
-        if not s:
-            continue
-        sl = s.lower()
-        if any(rc.lower() in sl for rc in rejected_claims):
-            removed.append(s)
-        else:
-            kept.append(s)
-    if not kept:
-        return answer, removed  # never empty the answer
-    return "\n\n".join(kept), removed
+    """Rewrite the answer without judge-rejected claims, via the central
+    authority using the server's ACTIVE llm_client."""
+    return _verification_authority.rewrite_answer(
+        answer, rejected_claims, sources, llm_client)
 
 
 def _resolve_exec(request: ChatStreamRequest):
@@ -1929,61 +1534,11 @@ def verify_answer(payload: dict):
     # Mode-aware depth: Fast = light (regex only, no LLM judge/rewrite —
     # instant). Deep = full (regex + LLM judge + rewrite).
     depth = payload.get("depth") or ACTIVE_CONFIG.get("verify_depth", "full")
-    if not answer or not sources:
-        return {"text": answer, "grounding": [], "judge_rewritten": False,
-                "judge_removed_count": 0, "error": "missing answer or sources"}
-
-    try:
-        # 1. regex grounding
-        grounding = _grounding_report(answer, sources)
-
-        # 2. claim-aware filter (identify unverified sentences, informational)
-        citation_dropped: list[str] = []
-        if answer.strip():
-            _filtered, citation_dropped = _apply_citation_filter(answer, sources)
-
-        # 3. LLM judge — only in DEEP mode (Fast skips the extra LLM call)
-        if depth == "full" and grounding and any(not c.get("found") for c in grounding):
-            grounding = _llm_judge_claims(grounding, sources)
-
-        # 4. rewrite — remove judge-rejected claims.
-        # NOTE: the judge emits TWO rejection notes:
-        #   "rejected by LLM judge"                                    (judge said unsupported)
-        #   "rejected by LLM judge (no verbatim source support)"       (judge said supported but
-        #                                                            couldn't back it verbatim —
-        #                                                            the VSSC-type hallucination guard)
-        # Both must be collected — use a prefix match so neither is missed.
-        rejected_claims = [
-            c["text"] for c in grounding
-            if (not c.get("found"))
-            and str(c.get("note", "")).startswith("rejected by LLM judge")
-        ]
-        final_text = answer
-        judge_rewritten = False
-        if depth == "full" and rejected_claims and answer.strip():
-            rewrite = _llm_rewrite_answer(
-                answer=answer, rejected_claims=rejected_claims, sources=sources,
-            )
-            if rewrite and rewrite.strip():
-                final_text = rewrite
-                judge_rewritten = True
-                # deterministic safety net
-                final_text, _ = _remove_rejected_sentences(final_text, rejected_claims)
-
-        return {
-            "text": final_text,
-            "grounding": grounding,
-            "judge_rewritten": judge_rewritten,
-            "judge_removed_count": len(rejected_claims),
-            "judge_removed": rejected_claims[:20],
-            "citation_dropped_count": len(citation_dropped),
-        }
-    except Exception as e:  # noqa: BLE001 - never break the app
-        import traceback
-        print(f"[api/verify] failed ({type(e).__name__}: {e})")
-        print(traceback.format_exc(limit=3))
-        return {"text": answer, "grounding": [], "judge_rewritten": False,
-                "judge_removed_count": 0, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    # WS3: the engine lives in the central Verification Authority (identical
+    # behavior and identical response contract — Phase 1 frozen). The ACTIVE
+    # llm_client is injected per call so runtime provider switches are honored.
+    return _verification_authority.verify_answer(
+        answer=answer, sources=sources, depth=depth, llm_client=llm_client)
 
 
 @app.post("/api/edit")
@@ -2676,27 +2231,113 @@ async def ingest_upload(request: Request):
     }
 
 
+# A detached build (nohup singularity exec ... graphrag build) cannot be
+# observed by this process, so the checkpoint file is the shared source of
+# truth. If the heartbeat stops advancing the build is presumed dead — this
+# is what stops the UI from showing "running" forever after a SIGKILL.
+GRAPH_BUILD_STALE_SECONDS = 900  # 15 min > slowest single-document extraction
+
+
+def _pid_alive(pid) -> bool | None:
+    """True/False if determinable, None if not (e.g. build ran in another
+    container/PID namespace, where the PID is meaningless here)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+
+
 @app.get("/api/graph/build-status")
 def graph_build_status():
-    """Live Graph build progress read from the checkpoint file (if any)."""
+    """Live GraphRAG build progress, read from the checkpoint file.
+
+    Source of truth is the build process (via the checkpoint), never the UI.
+    Survives browser refresh and app restart because it is file-backed.
+    """
     cp = resolve_graph_dir() / "checkpoint.json"
+    empty = {
+        "state": "idle", "running": False, "documents_processed": 0,
+        "total": 0, "percent": 0.0, "failed": 0, "added": 0,
+        "reconciled": 0, "skipped_unchanged": 0, "current_doc": None,
+        "last_doc": None, "started_at": None, "elapsed_seconds": None,
+        "error": None, "last_updated": None, "checkpoint_exists": False,
+    }
     if not cp.exists():
-        return {"running": False, "documents_processed": 0, "failed": 0,
-                "last_updated": None, "checkpoint_exists": False}
+        return empty
     try:
         data = json.loads(cp.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {"running": False, "documents_processed": 0, "failed": 0,
-                "last_updated": None, "checkpoint_exists": True}
+    except Exception:  # noqa: BLE001 — mid-write read; UI retries on next poll
+        return {**empty, "checkpoint_exists": True, "path": str(cp)}
+
     docs = data.get("documents", {}) if isinstance(data, dict) else {}
     done = sum(1 for v in docs.values() if v.get("status") == "done")
-    failed = sum(1 for v in docs.values() if v.get("status") == "failed")
+    failed_docs = sum(1 for v in docs.values() if v.get("status") == "failed")
+    run = data.get("run") if isinstance(data, dict) else None
+    run = run if isinstance(run, dict) else {}
+    mtime = cp.stat().st_mtime
+
+    state = run.get("state") or ("completed" if docs else "idle")
+    error = run.get("error")
+
+    # ── liveness: demote a stale/dead "running" build to "interrupted" ──
+    if state == "running":
+        stale = (time.time() - mtime) > GRAPH_BUILD_STALE_SECONDS
+        alive = _pid_alive(run.get("pid"))
+        if alive is False or (stale and alive is not True):
+            state = "interrupted"
+            error = error or (
+                "No checkpoint activity for >%d s; the build process is no "
+                "longer reporting progress." % GRAPH_BUILD_STALE_SECONDS
+            )
+
+    total = int(run.get("total") or 0) or len(docs)
+    processed = int(run.get("processed") or 0)
+    if state != "running" and not processed:
+        processed = done + failed_docs          # restart before any run block
+    processed = min(processed, total) if total else processed
+    percent = round((processed / total) * 100, 1) if total else 0.0
+    if state == "completed":
+        percent = 100.0 if total else 0.0
+
+    elapsed = run.get("seconds")
+    started_at = run.get("started_at")
+    if elapsed is None and state == "running" and started_at:
+        try:
+            t0 = time.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ")
+            elapsed = round(max(0.0, time.time() - calendar.timegm(t0)), 1)
+        except (ValueError, TypeError):
+            elapsed = None
+
     return {
-        "running": False,
-        "documents_processed": done,
-        "failed": failed,
-        "total": len(docs),
-        "last_updated": cp.stat().st_mtime,
+        "state": state,                       # idle|running|completed|failed|interrupted
+        "running": state == "running",
+        "mode": run.get("mode"),
+        "documents_processed": processed,
+        "total": total,
+        "percent": percent,
+        "added": int(run.get("added") or 0),
+        "reconciled": int(run.get("reconciled") or 0),
+        "skipped_unchanged": int(run.get("skipped_unchanged") or 0),
+        "failed": int(run.get("failed") or failed_docs),
+        "documents_done_total": done,
+        "current_doc": run.get("current_doc"),
+        "last_doc": run.get("last_doc"),
+        "started_at": started_at,
+        "finished_at": run.get("finished_at"),
+        "elapsed_seconds": elapsed,
+        "error": error,
+        "last_updated": mtime,
         "checkpoint_exists": True,
         "path": str(cp),
     }

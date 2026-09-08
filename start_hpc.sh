@@ -32,6 +32,10 @@ fi
 
 mkdir -p "$TMP_DIR"
 mkdir -p "$LOG_DIR"
+# GraphRAG checkpoint lives at /storage/graphrag/checkpoint.json (storage_dir()
+# = parent of APP_INDEX_DIR). The whole storage/ tree is bind-mounted below so
+# the checkpoint survives --writable-tmpfs; without it every build restarts at 0.
+mkdir -p storage/hybrid_rag storage/graphrag
 
 export SINGULARITY_TMPDIR="$(pwd)/$TMP_DIR"
 export SINGULARITY_CACHEDIR="$(pwd)/$TMP_DIR"
@@ -76,7 +80,7 @@ singularity exec \
     --env-file "$ENV_FILE" \
     --writable-tmpfs \
     --bind "$(realpath data):/data" \
-    --bind "$(realpath storage/hybrid_rag):/storage/hybrid_rag" \
+    --bind "$(realpath storage):/storage" \
     --bind "$(realpath models):/models" \
     --bind "$(realpath config):/app/config" \
     --bind "$(realpath "$TMP_DIR"):/tmp" \

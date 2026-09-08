@@ -105,11 +105,31 @@ export interface ServerStatus {
   effective_context_tokens?: number;
 }
 
+export type GraphBuildState =
+  | "idle"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
 export interface GraphBuildStatus {
+  state: GraphBuildState;
   running: boolean;
+  mode?: string | null;
   documents_processed: number;
-  failed: number;
   total: number;
+  percent: number;
+  added: number;
+  reconciled: number;
+  skipped_unchanged: number;
+  failed: number;
+  documents_done_total?: number;
+  current_doc?: string | null;
+  last_doc?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  elapsed_seconds?: number | null;
+  error?: string | null;
   last_updated: number | null;
   checkpoint_exists: boolean;
   path?: string;

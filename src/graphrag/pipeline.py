@@ -1,486 +1,478 @@
+"""Incremental graph ingestion pipeline (Phase 2 / WS2-E).
+
+Canonical corpus (``data/corpus_reports.jsonl``) → GraphStore, driven by the
+Phase-1 canonical content hash (``qa_content_hash`` — same identity the corpus
+ingestion uses):
+
+    new document        → extract + apply contribution          (ADD)
+    unchanged document  → skip (checkpoint hash matches)        (SKIP)
+    changed document    → withdraw old contribution → re-extract → apply
+                                                        (RECONCILE)
+    removed document    → withdraw contribution + Document node (WITHDRAW)
+
+Properties (spec §5):
+  * idempotent  — a second run over unchanged documents changes nothing
+    (skip at checkpoint level; upserts MERGE even when forced)
+  * restartable — per-document atomic checkpoint; crash at N resumes at N
+  * checkpointable — storage/graphrag/checkpoint.json (crash-safe writes)
+  * deterministic where possible — the deterministic pass needs no LLM;
+    semantic extraction runs through the existing generation architecture
+    and only when a client is provided (``deterministic_only`` / no llm)
+
+Every document is ONE atomic unit: upsert Document + entity nodes + facts +
+SUPPORTS provenance in a single transaction.
 """
-GraphRAG build pipeline.
-
-Pipeline (per the production spec):
-
-    Load JSONL → Extract entities → Extract relationships → Insert into Neo4j
-    → Generate embeddings → Create vector index → Verify graph → Statistics
-
-Checkpointing is mandatory and automatic: every successfully processed
-document is checkpointed immediately, so an interrupted ``graphrag build``
-resumes exactly where it stopped.
-
-Progress is reported per document with elapsed / ETA / nodes created /
-relationships created / failures / retries.
-"""
-
 from __future__ import annotations
 
+import json
 import logging
-import random
+import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from rich.console import Console
-from rich.live import Live
-
-from src.data.loader import DataLoader
-from src.graphrag.checkpoint import GraphCheckpoint
-from src.graphrag.config import GraphRAGConfig
-from src.graphrag.display import BuildStatusPanel
-from src.graphrag.embeddings import GraphEmbedder
-from src.graphrag.extractor import EntityRelationshipExtractor, ExtractionError
-from src.graphrag.llm import DocumentExtractionError, LLMBackendExhaustedError
-from src.graphrag.models import DocumentRecord, Entity, Relationship
-from src.graphrag.neo4j_client import Neo4jGraphStore
 from src.models.qa_record import QARecord
+from src.scripts.ingest_folder import qa_content_hash
+from src.vocabulary import Vocabulary, load_vocabulary
+
+from src.graphrag.checkpoint import (
+    EXTRACTION_DETERMINISTIC,
+    EXTRACTION_SEMANTIC,
+    GraphCheckpoint,
+)
+from src.graphrag.config import GraphConfig
+from src.graphrag.deterministic import build_contribution
+from src.graphrag.extract import ExtractionError, SemanticExtractor
+from src.graphrag.models import GraphContribution
+from src.graphrag.store import GraphStore
+
+__all__ = ["GraphBuilder", "BuildReport", "load_corpus"]
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
-class GraphBuildResult:
-    """Summary of a graph build / rebuild run."""
+def load_corpus(path: str | Path) -> list[QARecord]:
+    """Read the canonical corpus JSONL (one QARecord per line)."""
+    out: list[QARecord] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(QARecord.model_validate(json.loads(line)))
+    return out
 
-    def __init__(self) -> None:
-        self.documents_processed = 0
-        self.nodes_created = 0
-        self.relationships_created = 0
-        self.failures = 0
-        self.retries = 0
-        self.duration_seconds = 0.0
-        self.checkpoint_counts: dict = {}
-        self.embedding_count = 0
-        self.skipped_from_checkpoint = 0
-        self.failed_docs: list[str] = []
-        self.stopped_reason: Optional[str] = None   # set when the build stops early
-        self.last_completed_doc: Optional[str] = None
-        # Observability / failover accounting
-        self.llm_requests = 0
-        self.provider_model_usage: dict = {}
-        self.key_usage: dict = {}
-        self.provider_switches = 0
-        self.model_switches = 0
+
+@dataclass
+class BuildReport:
+    total: int = 0
+    added: int = 0
+    skipped_unchanged: int = 0
+    reconciled: int = 0
+    withdrawn: int = 0
+    failed: int = 0
+    extraction_errors: int = 0
+    documents: int = 0  # Document nodes applied
+    facts_applied: int = 0
+    supports_applied: int = 0
+    failures: list[dict] = field(default_factory=list)
+    seconds: float = 0.0
 
     def to_dict(self) -> dict:
         return {
-            "documents_processed": self.documents_processed,
-            "nodes_created": self.nodes_created,
-            "relationships_created": self.relationships_created,
-            "failures": self.failures,
-            "retries": self.retries,
-            "duration_seconds": round(self.duration_seconds, 2),
-            "embedding_count": self.embedding_count,
-            "skipped_from_checkpoint": self.skipped_from_checkpoint,
-            "failed_docs": self.failed_docs,
-            "stopped_reason": self.stopped_reason,
-            "last_completed_doc": self.last_completed_doc,
-            "checkpoint": self.checkpoint_counts,
-            "llm_requests": self.llm_requests,
-            "provider_model_usage": self.provider_model_usage,
-            "key_usage": self.key_usage,
-            "provider_switches": self.provider_switches,
-            "model_switches": self.model_switches,
+            "total": self.total, "added": self.added,
+            "skipped_unchanged": self.skipped_unchanged,
+            "reconciled": self.reconciled, "withdrawn": self.withdrawn,
+            "failed": self.failed, "extraction_errors": self.extraction_errors,
+            "documents": self.documents, "facts_applied": self.facts_applied,
+            "supports_applied": self.supports_applied,
+            "failures": self.failures[:20], "seconds": round(self.seconds, 2),
         }
 
 
-def _to_document_record(rec: QARecord) -> DocumentRecord:
-    return DocumentRecord(
-        question_id=rec.question_id,
-        question_text=rec.question_text,
-        answer_text=rec.answer_text,
-        ministry=rec.metadata.ministry,
-        subject=rec.metadata.subject,
-        session=rec.metadata.session,
-        question_number=rec.metadata.question_number,
-        parliament_number=rec.metadata.parliament_number,
-        date=rec.metadata.date,
-        source_url=rec.metadata.source_url,
-    )
+class _ExtractionPrefetcher:
+    """Runs semantic extraction for upcoming documents concurrently.
 
+    WHY only this step: extraction is the sole slow operation (~63 s/doc on a
+    27B model) and the sole *pure* one — ``SemanticExtractor.extract`` reads
+    the record plus read-only vocabulary maps and returns a fresh
+    ``ExtractionResult``; it mutates no shared state. Everything that DOES
+    mutate state (withdraw, apply_contribution, checkpoint) stays on the main
+    thread, in corpus order.
 
-class GraphRAGPipeline:
-    """Orchestrates the GraphRAG build (extract → insert → embed → verify)."""
+    Semantics deliberately preserved:
+      * results are consumed strictly in corpus order via ``take(doc_key)``,
+        so the graph is written in the same sequence as a serial run;
+      * a failure is captured and re-raised on ``take()``, i.e. at exactly the
+        point the serial code would have raised — so one document failing
+        never affects another's checkpoint entry;
+      * at most ``concurrency`` extractions are ever in flight, matching the
+        vLLM server's ``--max-num-seqs``;
+      * ``concurrency <= 1`` disables threading entirely (synchronous path).
+    """
 
-    def __init__(self, config: GraphRAGConfig) -> None:
-        self.config = config
-        self.store = Neo4jGraphStore(config)
-        self.embedder = GraphEmbedder(config)
-        self.extractor = EntityRelationshipExtractor(config)
-        self.checkpoint = GraphCheckpoint(
-            config.checkpoint_file, retry_failed=config.retry_failed
-        )
+    def __init__(self, extractor: SemanticExtractor, records: list,
+                 concurrency: int, *, now_fn, log) -> None:
+        self._extractor = extractor
+        self._records = records
+        self._now = now_fn
+        self._log = log
+        self._concurrency = max(1, int(concurrency))
+        self._pool = None
+        self._futures: "dict[str, object]" = {}
+        self._next = 0
+        if self._concurrency > 1 and records:
+            from concurrent.futures import ThreadPoolExecutor
+            self._pool = ThreadPoolExecutor(
+                max_workers=self._concurrency,
+                thread_name_prefix="graphrag-extract")
+            self._fill()
 
-    # ── input loading ──────────────────────────────────────────────────
+    # ── internals ─────────────────────────────────────────────────────────
 
-    def load_enriched(self) -> list[QARecord]:
-        import glob
+    def _submit(self, rec) -> None:
+        now = self._now()
+        self._futures[rec.question_id] = (
+            self._pool.submit(self._extractor.extract, rec, now=now), now)
 
-        files = sorted(glob.glob(self.config.enriched_glob))
-        if not files:
-            raise FileNotFoundError(
-                f"No enriched JSONL found matching {self.config.enriched_glob!r}. "
-                "Run `ingest` first or pass --enriched."
-            )
-        records: list[QARecord] = []
-        for fp in files:
-            records.extend(DataLoader.load_jsonl(fp))
-        return records
+    def _fill(self) -> None:
+        """Keep the in-flight window full (bounded by concurrency)."""
+        while self._pool is not None and len(self._futures) < self._concurrency \
+                and self._next < len(self._records):
+            self._submit(self._records[self._next])
+            self._next += 1
 
-    # ── verification (10 random documents) ──────────────────────────────
+    # ── main-thread API ───────────────────────────────────────────────────
 
-    def verify_sample(self, records: list[QARecord], n: int = 10) -> GraphBuildResult:
+    def take(self, doc_key: str):
+        """Return ``(ExtractionResult, now)`` for ``doc_key``.
+
+        Blocks until that document's extraction finishes. Re-raises its
+        exception unchanged, so ExtractionError still classifies as an
+        extraction error upstream.
         """
-        Verify the full path on ``n`` random documents BEFORE the full build.
+        if self._pool is None:
+            # synchronous fallback (concurrency == 1): identical behaviour to
+            # the original serial code path
+            rec = next(r for r in self._records if r.question_id == doc_key)
+            now = self._now()
+            return self._extractor.extract(rec, now=now), now
 
-        Exercises: load → extract → insert → embed → vector index → query.
-
-        Failure policy (consistent with the production build):
-        - ``DocumentExtractionError`` (e.g. HTTP 400 json_validate_failed) marks
-          ONLY that sampled document as failed and verification CONTINUES with
-          the remaining documents.
-        - Genuine infrastructure failures (Neo4j unreachable, provider
-          exhaustion, unexpected exceptions) still abort immediately.
-        - After the sample, the overall verification grade is computed from the
-          completed sample; the build is blocked ONLY when the grade falls
-          below ``verify_min_grade`` (default Good).
-        """
-        if len(records) < n:
-            raise ValueError(f"Need at least {n} records to verify, found {len(records)}")
-        sample = random.Random(20260806).sample(records, n)
-        console.print(f"[cyan]Verifying on {n} random documents...[/cyan]")
-
-        # Genuine infrastructure failures abort immediately (preserved).
-        if not self.store.ping():
-            raise RuntimeError("Neo4j is not reachable — cannot verify.")
-
-        # Ensure schema exists before writing anything.
-        self.store.apply_schema(self.embedder.embedding_dim)
-
-        result = GraphBuildResult()
-        # Track per-doc quality for the grade (same model as `graphrag verify`).
-        from src.graphrag.verify import GraphVerificationReport, DocumentVerification
-
-        report = GraphVerificationReport()
-        report.total_docs = len(sample)
-
-        for rec in sample:
-            try:
-                ok = self._process_one(rec, result, verify_mode=True)
-                if ok == "content":
-                    # Per-document content failure (e.g. json_validate_failed):
-                    # mark ONLY this doc failed, report it, and CONTINUE. It IS
-                    # a failed sampled document (counted in report.failed_docs
-                    # so the final summary matches the console output), but it
-                    # is NOT a genuine extraction-quality failure — the grade
-                    # reflects how well the successfully-extracted docs were
-                    # extracted, and a content rejection alone must not block
-                    # the build.
-                    result.failures += 1
-                    result.failed_docs.append(rec.question_id)
-                    dv = DocumentVerification(_to_document_record(rec))
-                    dv.error = "provider rejected document (json_validate/content)"
-                    dv.content_failure = True
-                    report.docs.append(dv)
-                    report.failed_docs += 1
-                    report.content_failures += 1
-                    console.print(
-                        f"[yellow]  verification doc {rec.question_id} failed "
-                        f"(json_validate/content)[/yellow]"
-                    )
-                    continue
-                if ok is not None:
-                    # A non-content failure (extraction / insert) — count it as
-                    # a failed sampled document; keep verifying the rest. It
-                    # lowers the grade (failed docs -> Poor) as it should.
-                    result.failures += 1
-                    result.failed_docs.append(rec.question_id)
-                    dv = DocumentVerification(_to_document_record(rec))
-                    dv.error = f"document failed during verification ({ok})"
-                    report.docs.append(dv)
-                    report.failed_docs += 1
-                    continue
-                # Success: record extraction quality for the grade.
-                dv = DocumentVerification(_to_document_record(rec))
-                try:
-                    ents, rels, _ = self.extractor.extract_with_rejections(dv.doc)
-                    dv.entities, dv.relationships = ents, rels
-                except Exception:  # noqa: BLE001 - quality re-derivation must not fail the gate
-                    pass
-                report.docs.append(dv)
-                report.total_entities += len(dv.entities)
-                report.total_relationships += len(dv.relationships)
-                report.total_problems += len(dv.check_grounding())
-            except LLMBackendExhaustedError:
-                # Genuine infrastructure failure — abort immediately (preserved).
-                raise
-            except Exception as e:  # noqa: BLE001 - unexpected infrastructure failure
-                raise RuntimeError(
-                    f"Verification FAILED on document {rec.question_id}: "
-                    f"{type(e).__name__}: {e}. This is an infrastructure/backend "
-                    "failure — fix it before starting the full build."
-                ) from e
-
-        # Vector search sanity check on the verified documents.
-        if result.embedding_count:
-            qv = self.embedder.embed("cyclone warning system")
-            hits = self.store.vector_search(qv, k=3)
-            console.print(f"[green]Vector index verified: {len(hits)} hits returned.[/green]")
-
-        # Overall grade from the completed sample; block only if below threshold.
-        grade = report.grade()
-        min_grade = getattr(self.config, "verify_min_grade", "Good")
-        console.print(
-            f"[cyan]Verification grade: {grade} (minimum required: {min_grade})[/cyan]"
-        )
-        if grade in ("Needs prompt tuning", "Poor"):
-            raise RuntimeError(
-                f"Verification grade '{grade}' is below the required "
-                f"'{min_grade}'. Fix extraction quality before starting the "
-                f"full build. ({report.failed_docs} of {len(sample)} sample "
-                f"documents failed; {report.total_problems} quality problems.)"
-            )
-        return result
-
-    # ── full build ─────────────────────────────────────────────────────
-
-    def build(
-        self,
-        records: list[QARecord],
-        *,
-        verify_first: bool = True,
-        n_verify: int = 10,
-    ) -> GraphBuildResult:
-        started = time.monotonic()
-        result = GraphBuildResult()
-
-        if verify_first:
-            self.verify_sample(records, n=n_verify)
-
-        if not self.store.ping():
-            raise RuntimeError("Neo4j is not reachable — cannot build.")
-        self.store.apply_schema(self.embedder.embedding_dim)
-
-        # Filter to records that need processing (checkpoint resume).
-        todo = []
-        for rec in records:
-            if self.config.resume and self.checkpoint.is_done(rec.question_id):
-                result.skipped_from_checkpoint += 1
-                continue
-            if self.config.resume and not self.checkpoint.should_retry(rec.question_id):
-                result.skipped_from_checkpoint += 1
-                continue
-            todo.append(rec)
-        if self.config.limit is not None:
-            todo = todo[: self.config.limit]
-
-        total = len(todo)
-        console.print(
-            f"[cyan]Graph build: {total} documents to process "
-            f"({result.skipped_from_checkpoint} skipped via checkpoint)[/cyan]"
-        )
-        if total == 0:
-            console.print("[green]Nothing to do — all documents already processed.[/green]")
-            self._finalize(result, started)
-            return result
-
-        status = BuildStatusPanel(total=total, started=started)
-        with Live(status.render(), console=console, refresh_per_second=10) as live:
-            for i, rec in enumerate(todo, start=1):
-                # Failover events from the previous document (if any).
-                for ev in self.extractor.drain_events():
-                    self._print_failover_event(ev)
-                status.update(current_id=rec.question_id)
-                live.update(status.render())
-                try:
-                    ok = self._process_one(rec, result)
-                except LLMBackendExhaustedError as e:
-                    # All providers/models/keys exhausted → stop cleanly;
-                    # checkpoint was already saved for the current doc.
-                    for ev in self.extractor.drain_events():
-                        self._print_failover_event(ev)
-                    result.stopped_reason = str(e)
-                    console.print()
-                    console.print(
-                        "[bold red]LLM backends exhausted — stopping build cleanly.[/bold red]"
-                    )
-                    console.print(f"[red]{e}[/red]")
-                    console.print(
-                        f"[yellow]Last completed document: "
-                        f"{result.last_completed_doc or '(none)'}[/yellow]"
-                    )
-                    console.print(
-                        "[yellow]Checkpoint saved. Re-run `graphrag build` to resume "
-                        "from where it stopped.[/yellow]"
-                    )
-                    break
-                # Drain any failover events raised during this document.
-                for ev in self.extractor.drain_events():
-                    self._print_failover_event(ev, current_doc=rec.question_id)
-
-                status.update(
-                    completed=i,
-                    current_id=rec.question_id,
-                    provider=self.extractor.stats.get("provider"),
-                    model=self.extractor.stats.get("model"),
-                    key=self.extractor.stats.get("key"),
-                    nodes=result.nodes_created,
-                    rels=result.relationships_created,
-                    failures=result.failures,
-                    retries=result.retries,
-                )
-                live.update(status.render())
-
-                if ok is None:
-                    # Success (None == no failure reason).
-                    result.last_completed_doc = rec.question_id
-                else:
-                    # Any failure reason (content/extraction/insert) counts as a
-                    # failed document; the build continues (resume retries it).
-                    result.failures += 1
-                    result.failed_docs.append(rec.question_id)
-                    if result.failures > self.config.max_failures:
-                        console.print(
-                            f"[red]Aborting build: failures exceeded {self.config.max_failures}.[/red]"
-                        )
-                        break
-
-        self._finalize(result, started)
-        return result
-
-    def _print_failover_event(self, ev: dict, current_doc: Optional[str] = None) -> None:
-        """Print a human-readable failover (key/model switch) message."""
-        etype = ev.get("type")
-        doc = f"document {current_doc}" if current_doc else f"document {ev.get('context') or '?'}"
-        if etype == "key_switch":
-            console.print(
-                f"[yellow]Rate limit / failure on key {ev.get('from_key')} "
-                f"(model {ev.get('model')})[/yellow]\n"
-                f"[bold]  Switching API key: {ev.get('from_key')} -> {ev.get('to_key')}[/bold]\n"
-                f"[dim]  Continuing from {doc}...[/dim]"
-            )
-        elif etype == "model_switch":
-            console.print(
-                f"[yellow]All keys exhausted for {ev.get('from_model')}[/yellow]\n"
-                f"[bold]  Switching model: {ev.get('from_model')} -> {ev.get('to_model')}[/bold]\n"
-                f"[dim]  Resuming from {doc}...[/dim]"
-            )
-        elif etype == "schema_downgrade":
-            console.print(
-                f"[yellow]{ev.get('model')} rejected the configured JSON format "
-                f"({ev.get('from_level')})[/yellow]\n"
-                f"[bold]  Downgrading to {ev.get('to_level')} "
-                f"(same model, same key)[/bold]\n"
-                f"[dim]  Continuing from {doc}...[/dim]"
-            )
-
-    def _finalize(self, result: GraphBuildResult, started: float) -> None:
-        result.duration_seconds = time.monotonic() - started
-        result.checkpoint_counts = self.checkpoint.counts()
-        stats = self.store.stats()
-        result.nodes_created = stats["total_nodes"]
-        result.relationships_created = stats["total_relationships"]
-        result.embedding_count = self.checkpoint.counts()["done"]
-
-        # LLM observability / failover accounting from the extractor.
-        result.llm_requests = self.extractor.stats.get("calls", 0)
-        result.provider_model_usage = self.extractor.usage_summary()
-        # Flatten key usage: provider -> model -> masked_key -> count
-        result.key_usage = self.extractor.usage_summary()
-        switches = self.extractor.switch_counts()
-        result.provider_switches = switches.get("key_switches", 0)
-        result.model_switches = switches.get("model_switches", 0)
-        result.schema_downgrades = switches.get("schema_downgrades", 0)
-        # Retries reported by the extractor (already added to result.retries in
-        # _process_one, but ensure it is consistent).
-        result.retries = max(result.retries, self.extractor.stats.get("retries", 0))
-
-    # ── per-document processing ─────────────────────────────────────────
-
-    def _process_one(
-        self, rec: QARecord, result: GraphBuildResult, verify_mode: bool = False
-    ) -> Optional[str]:
-        """Process one document.
-
-        Returns ``None`` on success, or a failure-reason string:
-        - ``"content"``    : per-document content failure (DocumentExtractionError,
-                             e.g. HTTP 400 json_validate_failed)
-        - ``"extraction"`` : generic extraction failure (ExtractionError)
-        - ``"insert"``     : embedding / Neo4j insertion failure
-
-        Truthiness is preserved for existing call sites (``if ok:`` works the
-        same as before); the reason string lets the verification gate
-        distinguish per-document content failures from other failures.
-        """
-        doc = _to_document_record(rec)
+        entry = self._futures.pop(doc_key, None)
+        if entry is None:
+            # Not prefetched (e.g. skipped ahead) — do it inline.
+            rec = next(r for r in self._records if r.question_id == doc_key)
+            now = self._now()
+            return self._extractor.extract(rec, now=now), now
+        future, now = entry
         try:
-            # 1. Extract entities + relationships (grounded).
-            entities, relationships = self.extractor.extract(doc)
-            # NOTE: extractor retries are cumulative across all documents;
-            # they are read once in _finalize, not accumulated per document.
-
-            # 2. Embed the document.
-            embedding = self.embedder.embed(doc.question_text + "\n" + doc.answer_text)
-
-            # 3. Insert into Neo4j (single transaction per document is safe
-            #    and keeps checkpoints accurate).
-            self.store.upsert_document(
-                doc.question_id,
-                doc.question_id,
-                doc.question_text,
-                doc.answer_text,
-                embedding,
-                ministry=doc.ministry,
-                subject=doc.subject,
-                session=doc.session,
-                question_number=doc.question_number,
-                parliament_number=doc.parliament_number,
-                date=doc.date,
-                source_url=doc.source_url,
-            )
-            if entities:
-                self.store.upsert_entities(entities)
-            if relationships:
-                self.store.upsert_relationships(relationships)
-            if entities:
-                self.store.link_document_entities(doc.question_id, entities)
-
-            result.documents_processed += 1
-            result.embedding_count += 1
-            if not verify_mode:
-                self.checkpoint.mark_done(doc.question_id)
-            return None
-        except LLMBackendExhaustedError as e:
-            # All providers/keys exhausted: record this doc as failed so the
-            # next run retries it, then let the build loop stop cleanly.
-            if not verify_mode:
-                self.checkpoint.mark_failed(doc.question_id, str(e))
-            raise
-        except DocumentExtractionError as e:
-            # Per-document content failure (e.g. HTTP 400 json_validate_failed).
-            # Mark ONLY this document as failed, save the checkpoint, and let
-            # the build loop continue with the remaining documents — this is
-            # NOT backend exhaustion and must not stop the build.
-            if not verify_mode:
-                self.checkpoint.mark_failed(doc.question_id, str(e))
-            logger.warning(
-                "Document %s skipped (extraction rejected by provider): %s",
-                doc.question_id, e,
-            )
-            return "content"
-        except ExtractionError as e:
-            if not verify_mode:
-                self.checkpoint.mark_failed(doc.question_id, str(e))
-            logger.warning("Extraction failed for %s: %s", doc.question_id, e)
-            return "extraction"
-        except Exception as e:  # noqa: BLE001 - insertion/embedding failures
-            if not verify_mode:
-                self.checkpoint.mark_failed(doc.question_id, str(e))
-            logger.exception("Document %s failed: %s", doc.question_id, e)
-            return "insert"
-
-    # ── cleanup ─────────────────────────────────────────────────────────
+            return future.result(), now
+        finally:
+            # refill only after a slot frees, keeping the window bounded
+            self._fill()
 
     def close(self) -> None:
-        self.store.close()
+        if self._pool is not None:
+            for future, _now in self._futures.values():
+                future.cancel()
+            self._futures.clear()
+            self._pool.shutdown(wait=True)
+            self._pool = None
+
+
+class GraphBuilder:
+    """Incremental corpus → graph builder (store-agnostic)."""
+
+    def __init__(
+        self,
+        store: GraphStore,
+        config: GraphConfig,
+        *,
+        voc: Optional[Vocabulary] = None,
+        llm_client=None,
+        now_fn: Optional[Callable[[], str]] = None,
+        checkpoint: Optional[GraphCheckpoint] = None,
+        log=logger,
+    ) -> None:
+        self.store = store
+        self.config = config
+        self.voc = voc or load_vocabulary()
+        self._llm = llm_client
+        self._now = now_fn or (lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        self._log = log
+        self.last_counters: dict = {"facts": 0, "supports": 0}
+        self.checkpoint = checkpoint or GraphCheckpoint(
+            config.checkpoint_path,
+            retry_failed=True,
+            max_attempts=max(1, config.extract_attempts),
+        )
+
+    # ── public ────────────────────────────────────────────────────────────
+
+    def run(
+        self,
+        corpus_path: str | Path,
+        *,
+        limit: Optional[int] = None,
+        deterministic_only: bool = False,
+        prune: bool = False,
+        resume: bool = True,
+        semantic_backfill: bool = False,
+    ) -> BuildReport:
+        started = time.monotonic()
+        report = BuildReport()
+        all_records = load_corpus(corpus_path)
+        # corpus membership for prune is the FULL corpus, never the slice
+        corpus_keys = {r.question_id for r in all_records}
+
+        if semantic_backfill:
+            if deterministic_only:
+                raise ValueError(
+                    "--semantic-backfill requires the LLM: it cannot be "
+                    "combined with --deterministic-only")
+            if self._llm is None:
+                raise ValueError(
+                    "--semantic-backfill requires an LLM client (none was "
+                    "configured)")
+            # Select FIRST, slice SECOND: --limit N means "N documents that
+            # still need semantic extraction", not "the first N corpus rows,
+            # then filtered" (which would re-visit the same rows every run).
+            records = [
+                r for r in all_records
+                if self.checkpoint.needs_extraction(
+                    r.question_id, qa_content_hash(r), EXTRACTION_SEMANTIC)
+            ]
+            self._log.info(
+                "[graph] semantic backfill: %d of %d document(s) still need "
+                "semantic extraction", len(records), len(all_records))
+        else:
+            records = all_records
+
+        if limit is not None:
+            records = records[: max(0, int(limit))]
+        report.total = len(records)
+
+        # Publish run state for /api/graph/build-status. The build usually runs
+        # detached, so the checkpoint file is the only channel back to the API.
+        self.checkpoint.begin_run(
+            total=report.total, now=self._now(), pid=os.getpid(),
+            mode="prune" if (prune and self._llm is None) else
+                 ("semantic-backfill" if semantic_backfill else
+                  ("deterministic" if deterministic_only else "build")),
+        )
+
+        extractor = (
+            SemanticExtractor(self._llm, self.voc,
+                              max_chars=self.config.extract_max_chars)
+            if (self._llm is not None and not deterministic_only)
+            else None
+        )
+        # What this run is capable of producing — persisted per document only
+        # after its contribution is actually applied.
+        run_extraction = (EXTRACTION_SEMANTIC if extractor is not None
+                          else EXTRACTION_DETERMINISTIC)
+
+        # Pre-extraction pipelining. The LLM call is the only slow, purely
+        # functional step (~63 s/doc vs ~1 ms for everything else), so it is
+        # the only thing parallelized. Results are consumed IN CORPUS ORDER by
+        # the single main thread below, which keeps merging, Neo4j writes,
+        # provenance and checkpoint updates serialized and deterministic —
+        # no concurrent writers, no second job system.
+        #
+        # Only documents that will ACTUALLY be processed are prefetched:
+        # eagerly extracting a document the loop is about to skip would burn a
+        # real LLM call (and GPU time) for nothing. This mirrors the loop's own
+        # skip rule; anything mis-predicted still falls back to an inline call
+        # inside take(), so the two can never disagree on correctness.
+        candidates = (
+            [r for r in records
+             if resume is False
+             or self.checkpoint.needs_extraction(
+                 r.question_id, qa_content_hash(r), run_extraction)]
+            if extractor is not None else []
+        )
+        prefetch = _ExtractionPrefetcher(
+            extractor, candidates, self.config.llm_concurrency,
+            now_fn=self._now, log=self._log,
+        ) if extractor is not None else None
+
+        try:
+            for rec in records:
+                doc_key = rec.question_id
+                h = qa_content_hash(rec)
+                entry = self.checkpoint.get(doc_key) if resume else None
+                in_graph = self.store.get_document(doc_key) is not None
+
+                # ── SKIP: unchanged content, already ingested by a pass at
+                # least as strong as this run's. An entry built by the
+                # deterministic pass does NOT satisfy a semantic run, which is
+                # what makes backfill possible without touching the file.
+                if (entry is not None and entry.status == "done"
+                        and entry.hash == h and entry.satisfies(run_extraction)):
+                    report.skipped_unchanged += 1
+                    # In-memory only: skips do not write the checkpoint (they change
+                    # nothing), so flush periodically to keep the UI moving during
+                    # long unchanged stretches on a re-run.
+                    self.checkpoint.update_run(
+                        now=self._now(), last_doc=doc_key,
+                        skipped_unchanged=report.skipped_unchanged,
+                        processed=report.skipped_unchanged + report.documents + report.failed,
+                    )
+                    if report.skipped_unchanged % self.config.write_batch_size == 0:
+                        self.checkpoint.flush_run()
+                    continue
+
+                # ── action classification ───────────────────────────────────
+                # A semantic upgrade of an already-deterministic document lands
+                # here as "reconcile": the document IS in the graph, so its
+                # previous (deterministic-only) contribution is withdrawn
+                # document-scoped before the combined deterministic+semantic
+                # contribution is applied. That is what prevents stale
+                # deterministic facts coexisting with the new semantic ones,
+                # and it reuses the existing reconcile path unchanged.
+                if entry is None or entry.status != "done":
+                    action = "add" if (entry is None and not in_graph) else \
+                        ("reconcile" if in_graph else "retry")
+                else:  # done, but hash differs OR a weaker extraction pass
+                    action = "reconcile" if in_graph else "retry"
+
+                # in-memory; persisted by the mark_done/mark_failed save below
+                self.checkpoint.update_run(now=self._now(), current_doc=doc_key)
+                try:
+                    self._process_one(rec, h, action, extractor,
+                                      prefetch=prefetch)
+                    if action in ("add", "retry"):
+                        report.added += 1
+                    elif action == "reconcile":
+                        report.reconciled += 1
+                    counters = self.last_counters
+                    self.checkpoint.update_run(
+                        now=self._now(), current_doc=None, last_doc=doc_key,
+                        added=report.added, reconciled=report.reconciled,
+                        failed=report.failed,
+                        processed=report.skipped_unchanged + report.documents + 1
+                                  + report.failed,
+                    )
+                    # Recorded ONLY here — after _process_one() applied the
+                    # contribution to the store without raising. A document is
+                    # never marked "semantic" on the strength of an attempt.
+                    self.checkpoint.mark_done(
+                        doc_key, h, now=self._now(),
+                        facts=counters["facts"], supports=counters["supports"],
+                        extraction=run_extraction)
+                    report.documents += 1
+                    report.facts_applied += counters["facts"]
+                    report.supports_applied += counters["supports"]
+                except ExtractionError as e:
+                    report.failed += 1
+                    report.extraction_errors += 1
+                    report.failures.append({"doc": doc_key, "error": str(e)[:300]})
+                    self._run_progress(report, doc_key)
+                    self.checkpoint.mark_failed(doc_key, h, str(e), now=self._now())
+                    if report.failed >= self.config.max_failures:
+                        self._log.warning("aborting: failures exceed max_failures=%d",
+                                          self.config.max_failures)
+                        break
+                except Exception as e:  # noqa: BLE001
+                    report.failed += 1
+                    report.failures.append({"doc": doc_key, "error": str(e)[:300]})
+                    self._run_progress(report, doc_key)
+                    self.checkpoint.mark_failed(doc_key, h, str(e), now=self._now())
+                    self._log.exception("graph ingest failed for %s", doc_key)
+
+            # ── WITHDRAW: checkpointed docs missing from the corpus ─────────
+            if prune:
+                for doc_key in sorted(self.checkpoint.keys() - corpus_keys):
+                    self.store.withdraw_document(doc_key, now=self._now())
+                    self.checkpoint.remove(doc_key)
+                    report.withdrawn += 1
+
+            report.seconds = time.monotonic() - started
+            self.checkpoint.update_run(
+                now=self._now(), withdrawn=report.withdrawn,
+                seconds=round(report.seconds, 2),
+                processed=report.skipped_unchanged + report.documents + report.failed,
+            )
+        except BaseException as e:  # noqa: BLE001
+            # SIGINT/SIGTERM or an unexpected fault: record a terminal state so
+            # the UI shows "failed" instead of a permanently "running" build.
+            self.checkpoint.end_run(now=self._now(), state="failed", error=repr(e))
+            raise
+        finally:
+            if prefetch is not None:
+                prefetch.close()
+        self.checkpoint.end_run(now=self._now(), state="completed")
+        self._log.info("[graph] build done: %s", report.to_dict())
+        return report
+
+    def _run_progress(self, report: "BuildReport", doc_key: str) -> None:
+        """Mirror report counters into the checkpoint run block (in-memory;
+        the following mark_done/mark_failed performs the atomic save)."""
+        self.checkpoint.update_run(
+            now=self._now(), current_doc=None, last_doc=doc_key,
+            added=report.added, reconciled=report.reconciled,
+            failed=report.failed,
+            processed=report.skipped_unchanged + report.documents + report.failed,
+        )
+
+    # ── per-document unit ─────────────────────────────────────────────────
+
+    def _process_one(self, rec: QARecord, h: str, action: str,
+                     extractor: Optional[SemanticExtractor],
+                     prefetch: "Optional[_ExtractionPrefetcher]" = None) -> None:
+        doc_key = rec.question_id
+
+        # Take the concurrently-computed extraction BEFORE any store mutation:
+        # if it failed, the exception propagates here and the document is left
+        # entirely untouched (no half-written state), exactly as in the serial
+        # path. Falls back to a synchronous call when there is no prefetcher.
+        sem_res = None
+        if extractor is not None:
+            if prefetch is not None:
+                sem_res, now = prefetch.take(doc_key)
+            else:
+                now = self._now()
+                sem_res = extractor.extract(rec, now=now)
+        else:
+            now = self._now()
+
+        # reconcile: retract this document's PREVIOUS contribution first
+        # (document-scoped — facts supported by other documents survive)
+        if action == "reconcile":
+            self.store.withdraw_document(doc_key, now=now)
+
+        # deterministic pass (metadata only — always)
+        doc, det = build_contribution(rec, self.voc, now=now)
+
+        # semantic pass (LLM via the existing generation architecture)
+        contrib = det
+        if extractor is not None:
+            sem = GraphContribution(
+                doc_key=doc_key,
+                nodes=list(sem_res.entities),
+                facts=list(sem_res.facts),
+                supports=list(sem_res.supports),
+            )
+            contrib = self._merge_contributions(det, sem)
+            if sem_res.rejected:
+                self._log.debug(
+                    "[graph] %s: %d LLM item(s) rejected: %s",
+                    doc_key, len(sem_res.rejected),
+                    sorted({r["reason"] for r in sem_res.rejected}))
+
+        counters = self.store.apply_contribution(contrib, now=now, doc=doc)
+        self.last_counters = {
+            "facts": counters["facts"], "supports": counters["supports"]}
+
+    @staticmethod
+    def _merge_contributions(a: GraphContribution, b: GraphContribution) -> GraphContribution:
+        nodes = list(a.nodes) + [n for n in b.nodes
+                                 if n.key not in {x.key for x in a.nodes}]
+        facts = list(a.facts) + [f for f in b.facts
+                                 if f.fact_key not in {x.fact_key for x in a.facts}]
+        supports = list(a.supports) + [s for s in b.supports
+                                       if (s.fact_key, s.doc_key) not in
+                                       {(x.fact_key, x.doc_key) for x in a.supports}]
+        return GraphContribution(doc_key=a.doc_key, nodes=nodes, facts=facts,
+                                 supports=supports)
