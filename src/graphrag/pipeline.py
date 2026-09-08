@@ -202,6 +202,8 @@ class GraphBuilder:
         self._now = now_fn or (lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         self._log = log
         self.last_counters: dict = {"facts": 0, "supports": 0}
+        # per-document LLM usage samples (instrumentation)
+        self.usage_samples: list[dict] = []
         self.checkpoint = checkpoint or GraphCheckpoint(
             config.checkpoint_path,
             retry_failed=True,
@@ -403,6 +405,9 @@ class GraphBuilder:
             if prefetch is not None:
                 prefetch.close()
         self.checkpoint.end_run(now=self._now(), state="completed")
+        summary = self.usage_summary()
+        if summary:
+            self._log.info("[graph] LLM usage: %s", summary)
         self._log.info("[graph] build done: %s", report.to_dict())
         return report
 
@@ -455,6 +460,7 @@ class GraphBuilder:
                 supports=list(sem_res.supports),
             )
             contrib = self._merge_contributions(det, sem)
+            self._record_usage(doc_key, sem_res)
             if sem_res.rejected:
                 self._log.debug(
                     "[graph] %s: %d LLM item(s) rejected: %s",
@@ -464,6 +470,66 @@ class GraphBuilder:
         counters = self.store.apply_contribution(contrib, now=now, doc=doc)
         self.last_counters = {
             "facts": counters["facts"], "supports": counters["supports"]}
+
+    def _record_usage(self, doc_key: str, sem_res) -> None:
+        """Log + accumulate per-document LLM usage (successful extractions).
+
+        Exists to answer one open question with data instead of estimates: how
+        many OUTPUT tokens does extraction actually need? ``completion_tokens``
+        is that number per document, and ``finish_reason == "length"`` marks a
+        response still being capped. The run summary reports the distribution
+        so the 18000 budget can be right-sized from evidence.
+        """
+        usage = dict(getattr(sem_res, "llm_usage", None) or {})
+        if not usage:
+            return
+        completion = usage.get("completion_tokens")
+        latency_ms = usage.get("latency_ms")
+        finish = usage.get("finish_reason")
+        self._log.info(
+            "[graph] %s: completion_tokens=%s latency_ms=%s finish_reason=%s "
+            "facts=%d",
+            doc_key, completion,
+            None if latency_ms is None else round(float(latency_ms)),
+            finish, len(getattr(sem_res, "facts", []) or []))
+        if isinstance(completion, int):
+            self.usage_samples.append({
+                "doc": doc_key,
+                "completion_tokens": completion,
+                "latency_ms": (None if latency_ms is None
+                               else round(float(latency_ms))),
+                "finish_reason": finish,
+            })
+        if finish == "length":
+            self._log.warning(
+                "[graph] %s: response hit the output cap "
+                "(finish_reason=length, completion_tokens=%s) — extraction "
+                "may be truncated; consider raising "
+                "GRAPHRAG_EXTRACT_MAX_TOKENS", doc_key, completion)
+
+    def usage_summary(self) -> dict:
+        """Aggregate of the per-document samples (empty when none collected)."""
+        toks = sorted(s["completion_tokens"] for s in self.usage_samples)
+        if not toks:
+            return {}
+        lats = sorted(s["latency_ms"] for s in self.usage_samples
+                      if s["latency_ms"] is not None)
+
+        def pct(vals, q):
+            return vals[min(len(vals) - 1, int(q * len(vals)))] if vals else None
+
+        return {
+            "samples": len(toks),
+            "completion_tokens": {
+                "min": toks[0], "median": pct(toks, 0.5),
+                "p90": pct(toks, 0.9), "p99": pct(toks, 0.99), "max": toks[-1],
+            },
+            "latency_ms": ({"min": lats[0], "median": pct(lats, 0.5),
+                            "p90": pct(lats, 0.9), "max": lats[-1]}
+                           if lats else {}),
+            "hit_output_cap": sum(1 for s in self.usage_samples
+                                  if s["finish_reason"] == "length"),
+        }
 
     @staticmethod
     def _merge_contributions(a: GraphContribution, b: GraphContribution) -> GraphContribution:

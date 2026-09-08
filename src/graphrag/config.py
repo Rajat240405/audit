@@ -15,6 +15,13 @@ Environment variables:
   GRAPHRAG_CHECKPOINT      default <storage>/graphrag/checkpoint.json
   GRAPHRAG_CORPUS          default <data>/corpus_reports.jsonl (canonical)
   GRAPHRAG_EXTRACT_MAX_CHARS   default 12000
+  GRAPHRAG_EXTRACT_TIMEOUT_SECONDS  default 2400 — HTTP read timeout for the
+                             extraction client only. The shared default
+                             (LLM_TIMEOUT_SECONDS=300) caps a NON-streaming
+                             request at 300 s of total generation, which the
+                             18000-token budget cannot fit for entity-dense
+                             documents (~7500 output tokens at ~15 tok/s
+                             single-stream). Serving and Hybrid RAG keep 300.
   GRAPHRAG_EXTRACT_MAX_TOKENS  default 18000 — OUTPUT token budget for semantic
                              extraction only. The shared policy's fast-mode
                              4096 truncates fact-dense documents mid-JSON
@@ -65,6 +72,8 @@ class GraphConfig:
     llm_concurrency: int = 2
     # OUTPUT token budget for semantic extraction (GraphRAG-scoped)
     extract_max_tokens: int = 18000
+    # HTTP read timeout for the extraction client (GraphRAG-scoped)
+    extract_timeout_seconds: int = 2400
 
     def validate(self) -> "GraphConfig":
         if self.backend not in ("neo4j", "inmemory"):
@@ -103,6 +112,8 @@ def load_graph_config(env: Optional[dict] = None) -> GraphConfig:
         extract_max_chars=int(e.get("GRAPHRAG_EXTRACT_MAX_CHARS") or 12000),
         extract_max_tokens=max(
             1, int(e.get("GRAPHRAG_EXTRACT_MAX_TOKENS") or 18000)),
+        extract_timeout_seconds=max(
+            1, int(e.get("GRAPHRAG_EXTRACT_TIMEOUT_SECONDS") or 2400)),
         extract_attempts=int(e.get("GRAPHRAG_EXTRACT_ATTEMPTS") or 3),
         max_failures=int(e.get("GRAPHRAG_MAX_FAILURES") or 50),
         write_batch_size=int(e.get("GRAPHRAG_WRITE_BATCH") or 50),

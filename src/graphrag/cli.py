@@ -62,32 +62,47 @@ def _llm(deterministic_only: bool, config=None):
     The registry/activation/policy chain resolves provider, model, context and
     thinking exactly as for every other consumer — nothing is hardcoded here.
 
-    The ONE GraphRAG-scoped adjustment is the OUTPUT token budget. The shared
-    fast-mode profile allows 4096 completion tokens, which is right for chat
-    answers but truncates extraction JSON for fact-dense documents: vLLM
-    returns finish_reason="length" mid-object and the payload fails to parse
-    ("LLM returned non-JSON payload"). Extraction emits one JSON record per
-    entity/relationship, so its output scales with document density, not with
-    answer length.
+    TWO GraphRAG-scoped adjustments are applied to the returned client:
 
-    This mutates only the LLMClient instance owned by this build process
+    1. OUTPUT token budget. The shared fast-mode profile allows 4096
+       completion tokens, which is right for chat answers but truncates
+       extraction JSON for fact-dense documents: vLLM returns
+       finish_reason="length" mid-object and the payload fails to parse
+       ("LLM returned non-JSON payload"). Extraction emits one JSON record per
+       entity/relationship, so its output scales with document density, not
+       with answer length.
+
+    2. HTTP read timeout. Generation is NON-streaming, so the whole completion
+       arrives in a single read and the httpx read timeout caps TOTAL
+       generation time. The shared 300 s default (LLM_TIMEOUT_SECONDS) fits
+       roughly 4700 output tokens at single-stream speed — below what
+       entity-dense documents need under an 18000-token budget, which
+       surfaced as "OpenAI-compatible generate failed: timed out". Raising
+       (1) without (2) simply moves the failure from truncation to timeout.
+
+    Both mutate only the LLMClient instance owned by this build process
     (resolve_active_stack constructs a fresh client per call), so the serving
     path, Hybrid RAG and every other generation consumer keep the shared
-    policy value untouched.
+    policy and LLM_TIMEOUT_SECONDS values untouched.
     """
     if deterministic_only:
         return None
     from src.generation.activation import resolve_active_stack
     stack = resolve_active_stack("fast")
     policy_max_tokens = stack.client.max_tokens
+    shared_timeout = stack.client.timeout_seconds
     if config is not None:
         stack.client.max_tokens = int(config.extract_max_tokens)
+        stack.client.timeout_seconds = int(config.extract_timeout_seconds)
     log.info("extraction model: provider=%s model=%s (source=%s)",
              stack.provider, stack.model, stack.source)
     log.info("extraction output budget: max_tokens=%s "
              "(shared policy default %s; GRAPHRAG_EXTRACT_MAX_TOKENS), "
              "num_ctx=%s",
              stack.client.max_tokens, policy_max_tokens, stack.plan.num_ctx)
+    log.info("extraction HTTP timeout: %ss "
+             "(shared default %ss; GRAPHRAG_EXTRACT_TIMEOUT_SECONDS)",
+             stack.client.timeout_seconds, shared_timeout)
     return stack.client
 
 
@@ -123,7 +138,13 @@ def cmd_build(config, args) -> int:
             resume=not args.no_resume,
             semantic_backfill=args.semantic_backfill,
         )
-        print(json.dumps(report.to_dict(), indent=2))
+        out = report.to_dict()
+        usage = builder.usage_summary()
+        if usage:
+            # observed OUTPUT requirement — the evidence for right-sizing
+            # GRAPHRAG_EXTRACT_MAX_TOKENS
+            out["llm_usage"] = usage
+        print(json.dumps(out, indent=2))
         return 0 if report.failed == 0 else 2
     finally:
         store.close()

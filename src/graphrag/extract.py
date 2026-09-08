@@ -145,10 +145,18 @@ class SemanticExtractor:
         resp = self._client.generate(user, system=_SYSTEM_PROMPT)
         payload = self._parse(resp.text)
         res = ExtractionResult(doc_key=doc_key, llm_raw=payload)
+        # Instrumentation for right-sizing the output budget: completion_tokens
+        # is the ACTUAL output requirement per document, and finish_reason
+        # distinguishes a complete answer ("stop") from one cut at the cap
+        # ("length"). Captured on the success path only — a failed parse raises
+        # above this point.
         res.llm_usage = {
             "model": getattr(resp, "model", None),
+            "prompt_tokens": getattr(resp, "prompt_tokens", None),
+            "completion_tokens": getattr(resp, "completion_tokens", None),
             "total_tokens": getattr(resp, "total_tokens", None),
             "latency_ms": getattr(resp, "latency_ms", None),
+            "finish_reason": getattr(resp, "finish_reason", None),
         }
         folded_text = _fold(text)
         self._extract_entities(payload, folded_text, res)
