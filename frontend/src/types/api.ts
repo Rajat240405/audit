@@ -10,6 +10,24 @@ export type DraftStyle =
   | "government"
   | "default";
 
+/** One entity matched from the query text (GraphRAG anchor). */
+export interface GraphAnchor {
+  key: string;
+  label: string;
+  name: string;
+  via: string;
+}
+
+/**
+ * Graph-traversal provenance attached to a GraphRAG result.
+ * Present only for retrieval_mode="graph"; `null`/absent for Hybrid RAG.
+ */
+export interface GraphProvenance {
+  anchors: GraphAnchor[];
+  via: string;
+  fact_keys: string[];
+}
+
 export interface SourceItem {
   doc_id: string;
   ministry: string;
@@ -22,6 +40,8 @@ export interface SourceItem {
   bm25_score: number | null;
   rrf_score: number | null;
   rerank_score: number | null;
+  /** GraphRAG traversal provenance — only on graph-mode results. */
+  graph?: GraphProvenance | null;
 }
 
 export interface RetrievalTrace {

@@ -1,6 +1,8 @@
 export type { ExecutionMode, RetrievalMode, DraftStyle } from "./api";
 export type {
   SourceItem,
+  GraphAnchor,
+  GraphProvenance,
   RetrievalTrace,
   GenerationMeta,
   PipelineStage,

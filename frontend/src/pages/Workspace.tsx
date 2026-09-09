@@ -4,6 +4,7 @@ import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useAppStore } from "@/store/useAppStore";
+import { useActivityStore } from "@/store/useActivityStore";
 import { DraftCanvas } from "@/components/workspace/DraftCanvas";
 import { NotesEditor } from "@/components/workspace/NotesEditor";
 import { HistoryPanel } from "@/components/workspace/HistoryPanel";
@@ -12,7 +13,7 @@ import { EvidencePanel } from "@/components/evidence/EvidencePanel";
 import { DocViewerModal } from "@/components/evidence/DocViewerModal";
 import { PipelineView } from "@/components/pipeline/PipelineView";
 import { Metrics } from "@/components/pipeline/Metrics";
-import { GraphPlaceholder } from "@/components/graph/GraphPlaceholder";
+import { GraphTab } from "@/components/graph/GraphTab";
 import { ModelActivityPanel } from "@/components/activity/ModelActivityPanel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/utils/cn";
@@ -40,6 +41,10 @@ export function Workspace() {
   const [tab, setTab] = useState<TabKey>("draft");
   const [copied, setCopied] = useState(false);
   const isGraph = useAppStore((s) => s.retrievalMode) === "graph";
+  // The Graph tab renders from the CURRENT answer's sources — the draft store
+  // already owns them, so no separate graph store is introduced.
+  const graphSources = useDraftStore((s) => s.sources);
+  const graphError = useActivityStore((s) => s.error);
 
   // expose the streaming actions + tab bridge to the sidebar/activity panel
   useEffect(() => {
@@ -125,7 +130,14 @@ export function Workspace() {
           </div>
         )}
         {tab === "notes" && <NotesTab />}
-        {tab === "graph" && <GraphPlaceholder />}
+        {tab === "graph" && (
+          <GraphTab
+            sources={graphSources}
+            loading={running}
+            error={graphError}
+            isGraphMode={isGraph}
+          />
+        )}
       </div>
       {/* Full-document reader — opened from the Sources tab or Cross-Verify Facts */}
       <DocViewerModal />

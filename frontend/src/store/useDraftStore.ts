@@ -61,7 +61,11 @@ export const useDraftStore = create<DraftState>((set) => ({
   activeSessionId: null,
   activeMessageId: null,
 
-  startStream: () => set({ isStreaming: true, streamingText: "", content: "" }),
+  // `sources` is cleared too: it carries the GraphRAG traversal provenance the
+  // Graph tab renders, so leaving the previous answer's sources in place would
+  // show a stale graph for the duration of the new query.
+  startStream: () =>
+    set({ isStreaming: true, streamingText: "", content: "", sources: [] }),
 
   appendToken: (text) => set((s) => ({ streamingText: s.streamingText + text })),
 

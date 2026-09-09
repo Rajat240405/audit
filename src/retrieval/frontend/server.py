@@ -1155,7 +1155,15 @@ def _chat_endpoint_body(request: ChatRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _to_sources(results: list) -> list[dict]:
-    """Normalize RetrievedResult objects into SourceItem dicts."""
+    """Normalize RetrievedResult objects into SourceItem dicts.
+
+    Graph-mode results additionally carry ``metadata["graph"]`` — the anchors
+    matched, the traversal path (``via``) and the ``fact_keys`` traversed, as
+    produced by GraphCapability.retrieve(). It was previously dropped here, so
+    the Graph tab had no data to render. Passing it through is purely additive:
+    hybrid results have no such metadata and get ``None``, leaving the existing
+    SourceItem contract unchanged for every other consumer.
+    """
     out = []
     for r in results:
         out.append({
@@ -1171,6 +1179,8 @@ def _to_sources(results: list) -> list[dict]:
             "bm25_score": float(r.bm25_score) if r.bm25_score is not None else None,
             "rrf_score": float(r.rrf_score) if r.rrf_score is not None else None,
             "rerank_score": float(r.rerank_score) if r.rerank_score is not None else None,
+            # graph-traversal provenance (None for hybrid results)
+            "graph": (r.metadata or {}).get("graph"),
         })
     return out
 
