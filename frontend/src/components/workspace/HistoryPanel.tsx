@@ -1,5 +1,6 @@
 import { History, MessagesSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import { useSessionStore } from "@/store/useSessionStore";
+import { startNewSession } from "@/lib/sessionTransitions";
 import { formatDate } from "@/utils/formatters";
 import { cn } from "@/utils/cn";
 
@@ -13,7 +14,6 @@ export function HistoryPanel({ onOpen }: { onOpen?: () => void }) {
   const sessions = useSessionStore((s) => s.sessions);
   const activeId = useSessionStore((s) => s.activeSessionId);
   const setActive = useSessionStore((s) => s.setActive);
-  const createSession = useSessionStore((s) => s.createSession);
   const renameSession = useSessionStore((s) => s.renameSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
 
@@ -33,8 +33,7 @@ export function HistoryPanel({ onOpen }: { onOpen?: () => void }) {
   };
 
   const newSession = () => {
-    const id = createSession();
-    setActive(id);
+    startNewSession();
   };
 
   const sorted = [...sessions]

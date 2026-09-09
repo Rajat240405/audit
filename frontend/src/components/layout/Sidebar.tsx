@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useSessionStore } from "@/store/useSessionStore";
+import { startNewSession } from "@/lib/sessionTransitions";
 import { useFilteredSessions } from "@/hooks/useSessions";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { Message } from "@/components/chat/Message";
@@ -13,8 +14,6 @@ import { ChatInput } from "@/components/chat/ChatInput";
 export function Sidebar() {
   const sessions = useFilteredSessions();
   const activeId = useSessionStore((s) => s.activeSessionId);
-  const setActive = useSessionStore((s) => s.setActive);
-  const createSession = useSessionStore((s) => s.createSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
   const renameSession = useSessionStore((s) => s.renameSession);
   const active = sessions.find((s) => s.id === activeId) ?? null;
@@ -23,9 +22,11 @@ export function Sidebar() {
   const stop = useChatActionsStore((s) => s.stop);
   const running = useChatActionsStore((s) => s.running);
 
+  // Shared transition: also clears canvas/sources/graph/activity so a new
+  // session never inherits the previous session's draft (see
+  // lib/sessionTransitions.ts).
   const newSession = () => {
-    const id = createSession();
-    setActive(id);
+    startNewSession();
   };
 
   const rename = () => {

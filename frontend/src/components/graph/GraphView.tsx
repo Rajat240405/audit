@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -6,10 +6,13 @@ import {
   MarkerType,
   ReactFlow,
   ReactFlowProvider,
+  applyNodeChanges,
   useReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeMouseHandler,
+  type OnNodeDrag,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Crosshair, RotateCcw } from "lucide-react";
@@ -74,20 +77,53 @@ function GraphCanvas({ model }: { model: GraphModel }) {
   const offsets = useMemo(() => labelOffsets(model, positions), [model, positions]);
   const dense = model.edges.length > DENSE_EDGE_THRESHOLD;
 
-  const nodes: Node<GraphNodeData>[] = useMemo(
-    () =>
+  // Node POSITIONS are owned by React Flow state, not recomputed from the
+  // layout on every render. Previously `nodes` was a useMemo over `positions`
+  // with no onNodesChange handler, so a drag was immediately overwritten by
+  // the next render and the node snapped back. The deterministic layout is now
+  // the INITIAL placement only; manual positions persist until Reset.
+  const [nodeState, setNodeState] = useState<Node<GraphNodeData>[]>([]);
+
+  // Re-seed only when the graph itself changes (new query), never on
+  // selection/hover — so dragging one node cannot rearrange the others.
+  useEffect(() => {
+    setNodeState(
       model.nodes.map((n) => ({
         id: n.id,
         type: "graphNode",
         position: positions.get(n.id) ?? { x: 0, y: 0 },
+        data: { model: n, dimmed: false, selected: false },
+        draggable: true,
+      }))
+    );
+  }, [model, positions]);
+
+  const onNodesChange = useCallback((changes: NodeChange<Node<GraphNodeData>>[]) => {
+    setNodeState((cur) => applyNodeChanges(changes, cur));
+  }, []);
+
+  /** Restore the deterministic initial layout (Reset). */
+  const resetLayout = useCallback(() => {
+    setNodeState((cur) =>
+      cur.map((n) => ({ ...n, position: positions.get(n.id) ?? n.position }))
+    );
+    setSelected(null);
+    window.setTimeout(() => void fitView({ padding: 0.2, duration: 200 }), 0);
+  }, [positions, fitView, setSelected]);
+
+  // Visual-only props are merged in at render time so highlighting never
+  // touches the stored positions.
+  const nodes: Node<GraphNodeData>[] = useMemo(
+    () =>
+      nodeState.map((n) => ({
+        ...n,
         data: {
-          model: n,
+          ...n.data,
           dimmed: Boolean(focus) && !focus?.has(n.id),
           selected: selected === n.id,
         },
-        draggable: true,
       })),
-    [model, positions, focus, selected]
+    [nodeState, focus, selected]
   );
 
   const edges: Edge<GraphEdgeData>[] = useMemo(
@@ -122,7 +158,32 @@ function GraphCanvas({ model }: { model: GraphModel }) {
     [model, focus, offsets, dense]
   );
 
+  // A drag ends with a click event on the node. Track whether the pointer
+  // actually moved so dragging never toggles selection/expansion.
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const draggedRef = useRef(false);
+
+  const onNodeDragStart: OnNodeDrag<Node<GraphNodeData>> = useCallback((_, node) => {
+    dragOrigin.current = { x: node.position.x, y: node.position.y };
+    draggedRef.current = false;
+  }, []);
+
+  const onNodeDragStop: OnNodeDrag<Node<GraphNodeData>> = useCallback((_, node) => {
+    const start = dragOrigin.current;
+    if (start) {
+      const moved =
+        Math.abs(node.position.x - start.x) > 2 ||
+        Math.abs(node.position.y - start.y) > 2;
+      draggedRef.current = moved;
+    }
+    dragOrigin.current = null;
+  }, []);
+
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
+    if (draggedRef.current) {
+      draggedRef.current = false; // consume the click that ends a drag
+      return;
+    }
     setSelected((cur) => (cur === node.id ? null : node.id));
   }, []);
 
@@ -135,6 +196,9 @@ function GraphCanvas({ model }: { model: GraphModel }) {
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        onNodesChange={onNodesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
         onPaneClick={() => setSelected(null)}
         fitView
@@ -156,17 +220,15 @@ function GraphCanvas({ model }: { model: GraphModel }) {
         >
           <Crosshair className="h-3 w-3" /> Fit
         </Button>
-        {selected && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="pointer-events-auto gap-1"
-            onClick={() => setSelected(null)}
-            title="Clear selection"
-          >
-            <RotateCcw className="h-3 w-3" /> Reset
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          className="pointer-events-auto gap-1"
+          onClick={resetLayout}
+          title="Restore the initial layout and clear selection"
+        >
+          <RotateCcw className="h-3 w-3" /> Reset
+        </Button>
       </div>
 
       {selectedNode && (

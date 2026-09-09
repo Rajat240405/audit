@@ -107,8 +107,12 @@ function GraphRelationshipEdgeImpl({
         markerEnd={markerEnd}
         style={{
           stroke,
-          strokeWidth: highlighted ? 1.8 : 1.2,
-          opacity: dimmed ? 0.12 : highlighted ? 0.95 : 0.5,
+          strokeWidth: highlighted ? 1.8 : 1.35,
+          // Inactive relationships must read as REAL edges, not noise, while
+          // staying clearly subordinate to the hovered/selected ones. The
+          // ordering dimmed < idle < highlighted is what keeps the hierarchy
+          // legible; only the absolute values were raised.
+          opacity: dimmed ? 0.28 : highlighted ? 0.95 : 0.72,
         }}
       />
       <EdgeLabelRenderer>

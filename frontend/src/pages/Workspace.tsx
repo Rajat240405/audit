@@ -3,6 +3,7 @@ import { useChatStream } from "@/hooks/useChatStream";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { restoreSession } from "@/lib/sessionTransitions";
 import { useAppStore } from "@/store/useAppStore";
 import { useActivityStore } from "@/store/useActivityStore";
 import { DraftCanvas } from "@/components/workspace/DraftCanvas";
@@ -101,19 +102,11 @@ export function Workspace() {
         {tab === "history" && (
           <HistoryPanel
             onOpen={() => {
-              // opening a session: load its LAST assistant answer onto the
-              // canvas, then jump to the draft tab
-              const sessions = useSessionStore.getState();
-              const active = sessions.sessions.find((s) => s.id === sessions.activeSessionId);
-              const last = active
-                ? [...active.messages].reverse().find((m) => m.role === "assistant")
-                : undefined;
-              if (last) {
-                useDraftStore.getState().setDraft(last.content || "", last.sources ?? []);
-                useDraftStore.getState().bindMessage(active?.id ?? null, last.id ?? null);
-              } else {
-                useDraftStore.getState().reset();
-              }
+              // Opening a session restores its canvas from the last assistant
+              // answer. Shared with the "+" path so the two transitions cannot
+              // drift (see lib/sessionTransitions.ts).
+              const activeId = useSessionStore.getState().activeSessionId;
+              if (activeId) restoreSession(activeId);
               setTab("draft");
             }}
           />

@@ -222,6 +222,93 @@ class SemanticExtractor:
         return re.sub(r'\\(?![\\"/bfnrtu])', r"\\\\", raw)
 
     @staticmethod
+    def _escape_control_chars_in_strings(raw: str) -> str:
+        r"""Escape literal control characters that appear INSIDE JSON strings.
+
+        RFC 8259 forbids any raw byte < 0x20 inside a string literal — and that
+        includes ``\n``, ``\r`` and ``\t``. The prompt demands VERBATIM evidence
+        snippets, so when a document is tabular or line-wrapped (parliamentary
+        answers frequently are) a contiguous quote crosses a newline or contains
+        a tab, and the model copies those bytes literally::
+
+            {"evidence":"S. No.<TAB>Sub-Division<NEWLINE>Monsoon Onset"}
+
+        which fails with ``Invalid control character``.
+
+        A character-level scan is used rather than a regex because only a
+        string-context state machine can distinguish a control character INSIDE
+        a literal (must be escaped) from JSON structural whitespace BETWEEN
+        tokens (must be left alone — reformatting it would mask genuinely
+        malformed output). Backslash escapes are consumed in pairs so an
+        escaped quote never ends the string early.
+
+        Round-trip safe: a literal newline becomes the two characters ``\``+``n``
+        in the JSON source, which ``json.loads`` decodes back to a newline, so
+        the parsed evidence equals the text the model intended.
+        """
+        # JSON's named escapes; anything else uses the \uXXXX form.
+        named = {"\n": "\\n", "\r": "\\r", "\t": "\\t",
+                 "\b": "\\b", "\f": "\\f"}
+        out: list[str] = []
+        in_string = False
+        i = 0
+        n = len(raw)
+        while i < n:
+            ch = raw[i]
+            if in_string:
+                if ch == "\\":
+                    # copy the escape pair verbatim (handles \" and \\)
+                    out.append(ch)
+                    if i + 1 < n:
+                        out.append(raw[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    continue
+                if ch == '"':
+                    in_string = False
+                    out.append(ch)
+                elif ch < " ":
+                    out.append(named.get(ch, f"\\u{ord(ch):04x}"))
+                else:
+                    out.append(ch)
+            else:
+                if ch == '"':
+                    in_string = True
+                # Structural whitespace outside strings stays untouched.
+                out.append(ch)
+            i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _classify_json_error(e: json.JSONDecodeError) -> str:
+        """Stable failure class for triage (never the raw payload)."""
+        msg = (e.msg or "").lower()
+        if "control character" in msg:
+            return "invalid_control_char"
+        if "\\escape" in msg or "invalid \\" in msg or "escape" in msg:
+            return "invalid_escape"
+        if "unterminated" in msg:
+            return "unterminated_string"
+        if "expecting" in msg:
+            return "structural"
+        return "other"
+
+    @staticmethod
+    def _error_context(raw: str, e: json.JSONDecodeError, width: int = 60) -> str:
+        """Bounded excerpt around the offending byte.
+
+        Deliberately small and ``repr``-escaped: enough to identify the exact
+        construct that broke, without persisting unbounded model output.
+        """
+        pos = getattr(e, "pos", None)
+        if not isinstance(pos, int) or pos < 0:
+            return ""
+        start = max(0, pos - width)
+        end = min(len(raw), pos + width)
+        return f" near={raw[start:end]!r}"
+
+    @staticmethod
     def _parse(raw: str) -> dict:
         raw = (raw or "").strip()
         # tolerate a single markdown fence even though the prompt forbids it
@@ -237,16 +324,32 @@ class SemanticExtractor:
             # against the document afterwards, so a repaired payload cannot
             # introduce ungrounded facts — the worst case is that it still
             # fails to parse and we raise below.
-            try:
-                data = json.loads(SemanticExtractor._repair_invalid_escapes(raw))
-            except json.JSONDecodeError:
-                # Include a bounded excerpt so the failure is diagnosable:
-                # llm_raw is only populated AFTER a successful parse, so
-                # without this the raw response was lost entirely.
-                excerpt = raw[:200].replace("\n", " ")
+            # Repairs are applied cumulatively and ONLY after a strict parse
+            # failed, so a well-formed payload can never be altered. Both
+            # repairs are confined to string literals / lone backslashes;
+            # structurally malformed JSON still fails.
+            data = None
+            for repair in (
+                SemanticExtractor._escape_control_chars_in_strings,
+                SemanticExtractor._repair_invalid_escapes,
+                lambda s: SemanticExtractor._repair_invalid_escapes(
+                    SemanticExtractor._escape_control_chars_in_strings(s)
+                ),
+            ):
+                try:
+                    data = json.loads(repair(raw))
+                    break
+                except json.JSONDecodeError:
+                    continue
+            if data is None:
+                # Bounded diagnostics: classify the failure and show the exact
+                # offending region. llm_raw is only populated AFTER a
+                # successful parse, so without this the payload is lost.
                 raise ExtractionError(
                     f"LLM returned non-JSON payload: {e} "
-                    f"[len={len(raw)} chars, starts: {excerpt!r}]"
+                    f"[class={SemanticExtractor._classify_json_error(e)} "
+                    f"len={len(raw)} chars"
+                    f"{SemanticExtractor._error_context(raw, e)}]"
                 ) from e
         if not isinstance(data, dict):
             raise ExtractionError("LLM payload is not a JSON object")
