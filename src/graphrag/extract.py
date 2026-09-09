@@ -143,6 +143,14 @@ class SemanticExtractor:
             text=text[: self._max_chars],
         )
         resp = self._client.generate(user, system=_SYSTEM_PROMPT)
+        # A response cut off at the output-token cap is NOT a usable
+        # extraction, even when what arrived happens to parse: the model was
+        # still emitting entities/relationships, so the payload is a silent
+        # PARTIAL result. Accepting it would checkpoint the document as
+        # "semantic" and permanently lose the remaining facts. Rejecting it
+        # here makes it a normal, retry-eligible extraction failure (the
+        # checkpoint records "failed" and keeps the prior extraction mode).
+        self._reject_if_truncated(doc_key, resp)
         payload = self._parse(resp.text)
         res = ExtractionResult(doc_key=doc_key, llm_raw=payload)
         # Instrumentation for right-sizing the output budget: completion_tokens
@@ -171,6 +179,49 @@ class SemanticExtractor:
         return "\n".join(parts)
 
     @staticmethod
+    def _reject_if_truncated(doc_key: str, resp) -> None:
+        """Fail when the provider stopped at the output cap.
+
+        ``finish_reason`` is the provider's own statement about WHY generation
+        ended; "length" means the token budget was exhausted mid-answer. This
+        is checked before parsing because JSON validity does not prove
+        completeness — a cut at a clean boundary yields well-formed JSON with
+        entities missing.
+
+        Only the explicit "length" signal is treated as truncation; unknown or
+        absent finish reasons are left alone so providers that do not report
+        one keep working exactly as before.
+        """
+        finish = getattr(resp, "finish_reason", None)
+        if str(finish or "").strip().lower() != "length":
+            return
+        completion = getattr(resp, "completion_tokens", None)
+        raise ExtractionError(
+            f"LLM response truncated at the output limit "
+            f"(finish_reason='length', completion_tokens={completion}). "
+            f"The extraction is incomplete and was NOT applied; raise "
+            f"GRAPHRAG_EXTRACT_MAX_TOKENS or reduce the document size, then "
+            f"retry {doc_key}."
+        )
+
+    @staticmethod
+    def _repair_invalid_escapes(raw: str) -> str:
+        r"""Escape lone backslashes that JSON does not allow.
+
+        The prompt demands VERBATIM evidence snippets, so a backslash present
+        in the source document (``C:\path``, ``5\% rise``) is copied straight
+        into a JSON string, where ``\p`` / ``\%`` are invalid escapes. About
+        1.5% of the corpus contains a backslash, which matches the observed
+        residual "Invalid \escape" failures.
+
+        Only backslashes NOT starting a valid JSON escape are doubled, so
+        legitimate ``\n``/``\t``/``\uXXXX`` sequences are left untouched. This
+        runs ONLY as a fallback after a strict parse has already failed, so it
+        can never alter a payload that was valid to begin with.
+        """
+        return re.sub(r'\\(?![\\"/bfnrtu])', r"\\\\", raw)
+
+    @staticmethod
     def _parse(raw: str) -> dict:
         raw = (raw or "").strip()
         # tolerate a single markdown fence even though the prompt forbids it
@@ -180,7 +231,23 @@ class SemanticExtractor:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise ExtractionError(f"LLM returned non-JSON payload: {e}") from e
+            # Fallback: retry once with lone backslashes escaped. Strict
+            # parsing is always attempted first, so well-formed payloads never
+            # reach this path. Grounding still validates every name/evidence
+            # against the document afterwards, so a repaired payload cannot
+            # introduce ungrounded facts — the worst case is that it still
+            # fails to parse and we raise below.
+            try:
+                data = json.loads(SemanticExtractor._repair_invalid_escapes(raw))
+            except json.JSONDecodeError:
+                # Include a bounded excerpt so the failure is diagnosable:
+                # llm_raw is only populated AFTER a successful parse, so
+                # without this the raw response was lost entirely.
+                excerpt = raw[:200].replace("\n", " ")
+                raise ExtractionError(
+                    f"LLM returned non-JSON payload: {e} "
+                    f"[len={len(raw)} chars, starts: {excerpt!r}]"
+                ) from e
         if not isinstance(data, dict):
             raise ExtractionError("LLM payload is not a JSON object")
         for k in ("entities", "relationships"):

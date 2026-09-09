@@ -31,7 +31,13 @@ from src.graphrag.models import (
     Support,
 )
 
-__all__ = ["GraphStore", "InMemoryGraphStore"]
+__all__ = ["GraphStore", "InMemoryGraphStore", "NEIGHBORS_LIMIT"]
+
+# Default cap on neighbour expansion. Hub entities can otherwise return
+# thousands of nodes, and callers issue further per-neighbour queries. Sized
+# in line with the existing find_nodes(limit=200) contract; callers that need
+# fewer pass an explicit limit.
+NEIGHBORS_LIMIT = 200
 
 
 class GraphStore(ABC):
@@ -110,9 +116,13 @@ class GraphStore(ABC):
 
     @abstractmethod
     def neighbors(self, key: str, *, depth: int = 1, rel: Optional[str] = None,
-                  labels: Optional[Iterable[str]] = None) -> list[NodeView]:
+                  labels: Optional[Iterable[str]] = None,
+                  limit: int = NEIGHBORS_LIMIT) -> list[NodeView]:
         """BFS expansion over relationship endpoints (undirected by default;
-        ``depth>=1``; deduplicated; deterministic order by (depth, key))."""
+        ``depth>=1``; deduplicated; deterministic order by (depth, key)).
+
+        At most ``limit`` nodes are returned, truncating the deterministic
+        (depth, key) ordering — nearest neighbours are kept first."""
 
     @abstractmethod
     def documents_for_entity(
@@ -343,9 +353,14 @@ class InMemoryGraphStore(GraphStore):
     def facts_in(self, key: str, rel: Optional[str] = None) -> list[FactView]:
         return self._facts_where(key, rel, "in")
 
-    def neighbors(self, key: str, *, depth=1, rel=None, labels=None) -> list[NodeView]:
+    def neighbors(self, key: str, *, depth=1, rel=None, labels=None,
+                  limit=NEIGHBORS_LIMIT) -> list[NodeView]:
         """BFS over relationship endpoints. ``labels`` filters the RESULT
-        (traversal passes through all node types); ``rel`` filters edges."""
+        (traversal passes through all node types); ``rel`` filters edges.
+
+        Bounded by ``limit`` for backend parity with Neo4j (same truncation of
+        the same deterministic ordering)."""
+        limit = max(1, int(limit))
         label_set = set(labels) if labels else None
         seen: set[str] = {key}
         depth_of: dict[str, int] = {}
@@ -368,7 +383,7 @@ class InMemoryGraphStore(GraphStore):
             if label_set and n["label"] not in label_set:
                 continue
             out.append(self._node_view(k, n))
-        return sorted(out, key=lambda v: (depth_of[v.key], v.key))
+        return sorted(out, key=lambda v: (depth_of[v.key], v.key))[:limit]
 
     def documents_for_entity(self, entity_key, *, rel=None, year=None,
                              ls_term=None, limit=100) -> list[dict]:

@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
+from src.generation.request_scope import request_scope
 from src.generation.policy import resolve_execution
 from src.generation.registry import (
     ModelFamily,
@@ -383,17 +384,46 @@ class _LazyGraph:
     configured/reachable the capability is a disabled stand-in that returns
     [] (the honest-empty graph-mode behavior, frozen in Phase 1 WS0)."""
 
+    # Seconds before a DISABLED capability is re-probed. A transient Neo4j
+    # outage (or a graph container that starts after the API) must not disable
+    # graph mode for the lifetime of the process, but the retry must not turn
+    # every graph query into a connection attempt either.
+    RETRY_AFTER_SECONDS = 30.0
+
     def __init__(self) -> None:
         self._retriever = None
         self._lock = _threading.Lock()
+        self._last_attempt = 0.0
+
+    @staticmethod
+    def _is_disabled(retriever) -> bool:
+        from src.graphrag.capability import DisabledGraphCapability  # lazy
+        return isinstance(retriever, DisabledGraphCapability)
 
     def _get(self):
-        if self._retriever is None:
-            with self._lock:
-                if self._retriever is None:
-                    from src.graphrag.capability import build_graph_capability  # lazy
-                    self._retriever = build_graph_capability()
-        return self._retriever
+        retriever = self._retriever
+        # Fast path: a working capability is cached forever, exactly as before.
+        if retriever is not None and not self._is_disabled(retriever):
+            return retriever
+        # Disabled (or not yet built): retry, but at most once per cooldown.
+        now = time.monotonic()
+        if retriever is not None and (now - self._last_attempt) < self.RETRY_AFTER_SECONDS:
+            return retriever
+        with self._lock:
+            retriever = self._retriever
+            if retriever is not None and not self._is_disabled(retriever):
+                return retriever
+            now = time.monotonic()
+            if (retriever is not None
+                    and (now - self._last_attempt) < self.RETRY_AFTER_SECONDS):
+                return retriever
+            from src.graphrag.capability import build_graph_capability  # lazy
+            self._last_attempt = now
+            built = build_graph_capability()
+            # Keep the previous disabled instance if we are still disabled, so
+            # callers holding a reference see a stable object.
+            self._retriever = built
+            return built
 
     def __getattr__(self, name):
         return getattr(self._get(), name)
@@ -406,6 +436,33 @@ graph_dir = resolve_graph_dir()
 pipeline = _LazyPipeline()
 
 graph_retriever = _LazyGraph()
+
+
+@app.on_event("shutdown")
+def _close_graph_backend() -> None:
+    """Release the Neo4j driver (and its connection pool) on shutdown.
+
+    Every other entry point closes the store explicitly (see graphrag/cli.py);
+    the server was the only long-lived owner that never did. Process exit does
+    reclaim the sockets, so this is not a cross-process leak — but closing
+    explicitly lets the driver end sessions cleanly instead of having the
+    server drop them, and makes reloads (uvicorn --reload, tests that import
+    the app repeatedly) deterministic rather than pool-accumulating.
+
+    Only closes a capability that was actually built: touching
+    ``graph_retriever`` through normal attribute access would CONSTRUCT one
+    during shutdown, so the private field is read directly.
+    """
+    retriever = graph_retriever._retriever
+    if retriever is None:
+        return
+    close = getattr(retriever, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as e:  # noqa: BLE001 — shutdown must never raise
+        print(f"[graph] driver close failed at shutdown: {type(e).__name__}: {e}")
 
 # Resolve default starting configuration dynamically from registry. When the
 # env selects a non-Ollama provider (HPC: APP_DEFAULT_PROVIDER=vllm), the
@@ -864,6 +921,16 @@ async def chat_endpoint(request: ChatRequest):
     """
     API routing chat requests dynamically based on execution mode and pathways.
     """
+    # Per-request isolation, same contract as /api/chat/stream. This handler is
+    # async and contains no await, so it cannot interleave with ITSELF — but it
+    # runs concurrently with the threadpool handlers (chat_stream, ai_edit).
+    # Without a scope its plan/model/think writes would land in the shared
+    # globals and perturb an in-flight streaming request.
+    with request_scope():
+        return _chat_endpoint_body(request)
+
+
+def _chat_endpoint_body(request: ChatRequest):
     query = request.message.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query message cannot be empty")
@@ -898,7 +965,10 @@ async def chat_endpoint(request: ChatRequest):
 
     if is_graph_result:
         # ── PATH A: DETERMINISTIC METADATA QUERY PATH ──
-        results = graph_retriever.retrieve(query, top_k=5)
+        # Honor the request's result limit, as PATH B (below) and
+        # /api/chat/stream already do. This was hardcoded to 5, so a client
+        # asking for more (or fewer) graph results silently got 5.
+        results = graph_retriever.retrieve(query, top_k=request.top_k)
         ret_latency = (time.perf_counter() - t_ret_start) * 1000
 
         # Format Retrieved Results into Source Items
@@ -1193,6 +1263,14 @@ def chat_stream(request: ChatStreamRequest):
     retrieved sources still delivered.
     """
     def event_stream():
+        # Per-request isolation: this handler is sync, so FastAPI runs it in a
+        # threadpool. The scope keeps this request's execution plan, tone
+        # suffix and think flag on THIS thread, so a concurrent request cannot
+        # overwrite them mid-generation.
+        with request_scope():
+            yield from _chat_stream_body(request)
+
+    def _chat_stream_body(request):
         query = request.message.strip()
         if not query:
             yield _sse({"type": "error", "message": "Query message cannot be empty"})
@@ -1556,6 +1634,12 @@ def ai_edit(payload: dict):
                                  media_type="text/event-stream")
 
     def event_stream():
+        # Per-request isolation (sync handler -> threadpool): the think flag
+        # this handler forces OFF must not leak into a concurrent chat request.
+        with request_scope():
+            yield from _ai_edit_body(instruction, document, style)
+
+    def _ai_edit_body(instruction, document, style):
         system = (
             "You are an AI editing assistant. Follow the user's instruction "
             "for the draft below — do whatever is asked (rewrite, restructure, "

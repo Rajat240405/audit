@@ -30,7 +30,7 @@ from src.graphrag.schema import (
     NODE_LABELS,
     schema_ddl,
 )
-from src.graphrag.store import GraphStore
+from src.graphrag.store import GraphStore, NEIGHBORS_LIMIT
 
 __all__ = ["Neo4jGraphStore"]
 
@@ -171,8 +171,18 @@ class Neo4jGraphStore(GraphStore):
                 # the relationship type string. `r.type` is the driver's
                 # accessor for the actual type name.
                 fact_key=props["fact_key"], rel=r.type,
-                src_key=row["src"] if direction == "out" else row["dst"],
-                dst_key=row["dst"] if direction == "out" else row["src"],
+                # FactView.src_key/dst_key describe the TRUE edge direction,
+                # not the direction the caller queried from. The Cypher pattern
+                # already binds `a` as the edge source and `b` as its target in
+                # BOTH branches ((a)-[r]->(b {key:$k}) for "in"), so the row is
+                # correctly oriented as-is. Swapping it for "in" reversed the
+                # endpoints, contradicting the fact_key stored on the same
+                # relationship ("REL:src->dst") and diverging from the
+                # InMemory backend. Callers such as GraphCapability filter
+                # facts_in(x) on `f.src_key == other`, so the reversal made
+                # those provenance fact_keys silently unmatchable.
+                src_key=row["src"],
+                dst_key=row["dst"],
                 origin=props.get("origin", "deterministic"),
                 doc_count=int(props.get("doc_count", 0)),
                 sample_evidence=props.get("sample_evidence"),
@@ -188,10 +198,20 @@ class Neo4jGraphStore(GraphStore):
     def facts_in(self, key: str, rel: Optional[str] = None) -> list[FactView]:
         return self._facts_where(key, rel, "in")
 
-    def neighbors(self, key: str, *, depth=1, rel=None, labels=None) -> list[NodeView]:
+    def neighbors(self, key: str, *, depth=1, rel=None, labels=None,
+                  limit=NEIGHBORS_LIMIT) -> list[NodeView]:
         depth = max(1, int(depth))
+        # Bounded expansion. Hub entities (a ministry MENTIONS-linked from most
+        # of the corpus) otherwise return every neighbour, and callers such as
+        # GraphCapability issue two further queries PER neighbour — unbounded
+        # work and memory driven by graph shape. Follows the same convention as
+        # find_nodes(limit=200) / documents_for_entity(limit=100): a keyword
+        # arg materialised as a bound $limit parameter, applied AFTER the
+        # deterministic ORDER BY so the truncation is stable (nearest first,
+        # then key) rather than arbitrary.
+        limit = max(1, int(limit))
         label_filter = ""
-        params: dict = {"k": key, "depth": depth}
+        params: dict = {"k": key, "depth": depth, "limit": limit}
         if rel:
             label_filter += " AND ALL(r IN relationships(path) WHERE type(r) = $rel)"
             params["rel"] = rel
@@ -210,7 +230,7 @@ class Neo4jGraphStore(GraphStore):
             f"MATCH path = (n {{key: $k}})-[r *1..{depth}]-(m) "
             "WHERE m.key <> $k" + label_filter + " "
             "WITH m, min(length(path)) AS d "
-            "RETURN m, d ORDER BY d, m.key",
+            "RETURN m, d ORDER BY d, m.key LIMIT $limit",
             **params,
         )
         return [self._node_view(r["m"]) for r in rows]

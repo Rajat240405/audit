@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from src.generation.request_scope import scoped_attr
 from src.generation.defaults import default_model_name
 
 
@@ -72,6 +74,21 @@ def ollama_base_url() -> str:
 
 
 class LLMClient:
+    # Per-request settings. The server owns ONE shared LLMClient and rebinds
+    # these per chat request from the execution plan; FastAPI runs the sync
+    # chat handlers in a threadpool, so concurrent requests would otherwise
+    # overwrite each other's generation parameters mid-flight. Inside
+    # ``request_scope()`` each thread reads/writes its own value; outside a
+    # scope (boot, /api/provider switch, CLI, GraphRAG build) behaviour is the
+    # plain shared attribute it has always been.
+    model = scoped_attr()
+    provider = scoped_attr()
+    max_tokens = scoped_attr()
+    temperature = scoped_attr()
+    num_ctx = scoped_attr()
+    timeout_seconds = scoped_attr()
+    think = scoped_attr()
+    api_key = scoped_attr()
     """
     Provider-agnostic LLM client for parliamentary grounded generation.
     Supports Ollama (local), HuggingFace (in-process HPC), and any

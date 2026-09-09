@@ -44,6 +44,7 @@ import httpx
 from rich.console import Console
 
 from src.generation.client import LLMClient
+from src.generation.request_scope import scoped_attr
 from src.retrieval.result import RetrievedResult
 from src.generation.registry import model_registry
 from src.generation.defaults import default_num_ctx
@@ -220,6 +221,16 @@ class AnswerGenerator:
     """
     Grounded answer generation using adaptive context budgeting.
     """
+
+    # Per-request settings rebound by the chat handlers (execution plan +
+    # per-request tone suffix on the system prompt). Isolated per thread
+    # inside ``request_scope()`` so concurrent requests cannot overwrite each
+    # other's plan/prompt; identical to a plain attribute outside a scope.
+    plan = scoped_attr()
+    system_prompt = scoped_attr()
+    max_doc_chars = scoped_attr()
+    max_context_docs = scoped_attr()
+    context_budget_ratio = scoped_attr()
 
     def __init__(
         self,
