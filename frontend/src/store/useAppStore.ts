@@ -45,7 +45,7 @@ export const useAppStore = create<AppState>((set) => ({
   modelFamily: "qwen2.5",
   model: "qwen2.5:7b",
   mode: "fast",
-  retrievalMode: "hybrid",
+  retrievalMode: "auto",
   draftStyle: "default",
   sourceFilter: { ministry: "all", orgs: [], docCategories: [] },
   gpu: "CPU",

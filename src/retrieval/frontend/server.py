@@ -28,6 +28,15 @@ from pydantic import BaseModel
 from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
 from src.generation.request_scope import request_scope
+from src.retrieval.evidence_merge import merge_evidence
+from src.retrieval.query_agent import (
+    ROUTE_BOTH,
+    ROUTE_GRAPH,
+    ROUTE_HYBRID,
+    UNSUPPORTED_LANGUAGE_MESSAGE,
+    QueryPlan,
+    run_query_agent,
+)
 from src.generation.policy import resolve_execution
 from src.generation.registry import (
     ModelFamily,
@@ -122,7 +131,7 @@ ACTIVE_CONFIG = {
     "model_family": default_family_id(),
     "model": default_model_name(),
     "mode": "fast",            # "fast" or "deep"
-    "retrieval_mode": "hybrid",# "hybrid" or "graph"
+    "retrieval_mode": "auto",  # auto | hybrid | graph | hybrid_and_graph
 }
 
 
@@ -555,7 +564,7 @@ class ProviderSwitchRequest(BaseModel):
 class ChatStreamRequest(BaseModel):
     message: str
     mode: str = "fast"            # Execution Mode: "fast" or "deep"
-    retrieval_mode: str = "hybrid"  # Retrieval Mode: "hybrid" or "graph"
+    retrieval_mode: str = "auto"  # auto | hybrid | graph | hybrid_and_graph
     top_k: int = 5
     draft_style: str | None = None  # e.g. formal / concise / executive
     doc_types: list[str] | None = None  # source filter: parliament / annual_report / ...
@@ -961,7 +970,15 @@ def _chat_endpoint_body(request: ChatRequest):
     sources: list[SourceItem] = []
 
     # ── Path Selection Matrix ──
-    is_graph_result = (ret_mode == "graph" and not is_semantic_synthesis_query(query))
+    # DECISION (2): every GraphRAG flow now goes through the existing answer
+    # generation (PATH B) so graph queries get the same final-answer LLM,
+    # response-language handling and streaming behaviour as the other modes.
+    # PATH A (deterministic card rendering, no LLM) is therefore disabled; it
+    # is retained below only as dead-but-documented reference and never runs.
+    #
+    # DECISION (1): the is_semantic_synthesis_query() override is gone —
+    # manual retrieval selection is authoritative and performs no routing.
+    is_graph_result = False
 
     if is_graph_result:
         # ── PATH A: DETERMINISTIC METADATA QUERY PATH ──
@@ -1030,13 +1047,59 @@ def _chat_endpoint_body(request: ChatRequest):
         )
 
     else:
-        # ── PATH B: SEMANTIC / SYNTHESIS QUERY PATH ──
-        if ret_mode == "graph":
-            results = graph_retriever.retrieve(query, top_k=request.top_k)
+        # ── PATH B: retrieval -> existing answer generation ──
+        # Same agent layer as /api/chat/stream: one call for language +
+        # English normalization (+ routing in AUTO only).
+        qplan, route = resolve_query_plan(query, ret_mode)
+        if not qplan.supported:
+            return ChatResponse(
+                answer=UNSUPPORTED_LANGUAGE_MESSAGE,
+                sources=[], retrieval_latency_ms=0.0, generation_latency_ms=0.0,
+                prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                is_fallback=False, is_graph_result=False,
+                active_provider=ACTIVE_CONFIG["provider"],
+                active_model=resolved_model, active_mode=exec_mode,
+                model_family=family.display_name, resolved_model=resolved_model,
+                context_window=family.context_window,
+                prompt_budget=prompt_budget, network_latency_ms=0.0,
+            )
+
+        retrieval_query = qplan.retrieval_query
+        want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
+        want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
+        lang_hint = _response_language_hint(qplan)
+        if lang_hint:
+            generator.system_prompt = (
+                generator.system_prompt or "").rstrip() + lang_hint
+
+        if want_graph and not want_hybrid:
+            results = _retrieve_graph_results(retrieval_query, request.top_k)
+            ret_latency = (time.perf_counter() - t_ret_start) * 1000
+        elif want_graph and want_hybrid:
+            from concurrent.futures import ThreadPoolExecutor
+
+            hybrid_results: list = []
+            with ThreadPoolExecutor(max_workers=2,
+                                    thread_name_prefix="retrieval") as pool:
+                graph_future = pool.submit(
+                    _retrieve_graph_results, retrieval_query, request.top_k)
+                try:
+                    hybrid_results, timings = pipeline.retrieve(
+                        retrieval_query,
+                        top_k=_effective_top_k(request.top_k, plan),
+                        doc_types=request.doc_types,
+                        orgs=request.orgs, doc_categories=request.doc_categories,
+                    )
+                    _maybe_enrich_deep_neighbors(plan, hybrid_results)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[agent] hybrid retrieval failed: {type(e).__name__}: {e}")
+                    hybrid_results = []
+                graph_results = graph_future.result()
+            results = merge_evidence(hybrid_results, graph_results)
             ret_latency = (time.perf_counter() - t_ret_start) * 1000
         else:
             results, timings = pipeline.retrieve(
-                query, top_k=_effective_top_k(request.top_k, plan),
+                retrieval_query, top_k=_effective_top_k(request.top_k, plan),
                 doc_types=request.doc_types,
                 orgs=request.orgs, doc_categories=request.doc_categories,
             )
@@ -1082,7 +1145,7 @@ def _chat_endpoint_body(request: ChatRequest):
 
         if llm_available and results:
             try:
-                gen_res = generator.generate(query, results)
+                gen_res = generator.generate(retrieval_query, results)
                 gen_latency = gen_res.generation_latency_ms
                 answer = gen_res.answer
                 prompt_tok = gen_res.prompt_tokens
@@ -1153,6 +1216,91 @@ def _chat_endpoint_body(request: ChatRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 # Workstation API (frontend redesign: streaming, status, build, export)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Query-understanding + routing orchestration (agent layer)
+#
+# Sits BETWEEN the request and the existing retrieval capabilities. It never
+# implements retrieval itself: it prepares the query (language + English
+# normalization), decides the route in AUTO mode only, and hands off to the
+# untouched Hybrid RAG / GraphRAG code paths.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: User-facing progress states. Emitted as real backend stages over the
+#: existing SSE "status" channel — no separate transport, no fake timers.
+PHASE_LABELS = {
+    "understanding": "Understanding query…",
+    "routing": "Routing…",
+    "retrieving_documents": "Retrieving documents…",
+    "retrieving_graph": "Retrieving graph…",
+    "combining_evidence": "Combining evidence…",
+    "generating": "Generating answer…",
+}
+
+RETRIEVAL_MODES = ("auto", "hybrid", "graph", "hybrid_and_graph")
+
+#: manual mode -> the route it pins. AUTO is decided by the agent.
+_MANUAL_ROUTES = {
+    "hybrid": ROUTE_HYBRID,
+    "graph": ROUTE_GRAPH,
+    "hybrid_and_graph": ROUTE_BOTH,
+}
+
+
+def normalize_retrieval_mode(value: object) -> str:
+    """Coerce a request's retrieval_mode to a supported value (default auto)."""
+    if not isinstance(value, str):
+        return "auto"
+    token = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if token in RETRIEVAL_MODES:
+        return token
+    if token in ("both", "hybrid+graph", "graph_and_hybrid"):
+        return "hybrid_and_graph"
+    return "auto"
+
+
+def resolve_query_plan(query: str, retrieval_mode: str) -> tuple[QueryPlan, str]:
+    """Run the single agent call and return ``(plan, route)``.
+
+    AUTO   -> one call for language + normalization + routing.
+    MANUAL -> the SAME single call for language + normalization only; the
+              user's selection is authoritative and no routing is performed.
+    """
+    mode = normalize_retrieval_mode(retrieval_mode)
+    auto = mode == "auto"
+    plan = run_query_agent(query, llm_client, auto=auto)
+    route = plan.route if auto else _MANUAL_ROUTES.get(mode, ROUTE_HYBRID)
+    return plan, route
+
+
+def _response_language_hint(plan: QueryPlan) -> str:
+    """System-prompt suffix pinning the ANSWER language.
+
+    English is the internal RETRIEVAL language only. The evidence is English,
+    so without this the model would answer in English regardless of what the
+    user wrote. Appended with the same save/restore discipline as the existing
+    TONE hint.
+    """
+    language = (plan.response_language or "").strip()
+    if not language or language.lower() == "english":
+        return ""
+    return (
+        f"\n\nRESPONSE LANGUAGE: The user wrote in {plan.language or language}. "
+        f"Write the ENTIRE answer in {language}, matching their style. "
+        f"The supporting documents are in English — translate the content you "
+        f"use into {language}. Keep organisation names, programme names, "
+        f"acronyms and [Source N] citation markers exactly as they appear."
+    )
+
+
+def _retrieve_graph_results(query: str, top_k: int) -> list:
+    """GraphRAG branch. Honest-empty on failure (existing capability contract)."""
+    try:
+        return graph_retriever.retrieve(query, top_k=top_k)
+    except Exception as e:  # noqa: BLE001 — existing degrade-gracefully contract
+        print(f"[agent] graph retrieval failed: {type(e).__name__}: {e}")
+        return []
+
 
 def _to_sources(results: list) -> list[dict]:
     """Normalize RetrievedResult objects into SourceItem dicts.
@@ -1376,17 +1524,94 @@ def chat_stream(request: ChatStreamRequest):
         t_ret_start = time.perf_counter()
         sources: list[dict] = []
         timings = None
-        is_graph = (ret_mode == "graph" and not is_semantic_synthesis_query(query))
+
+        # ── AGENT: language understanding (+ routing in AUTO only) ──
+        # ONE LLM call, on the SAME client the answer generation uses, so the
+        # currently-serving model is followed automatically.
+        yield _sse({"type": "status", "stage": "understanding",
+                    "message": PHASE_LABELS["understanding"], "done": False})
+        qplan, route = resolve_query_plan(query, ret_mode)
+        yield _sse({"type": "status", "stage": "understanding",
+                    "message": PHASE_LABELS["understanding"], "done": True})
+
+        if not qplan.supported:
+            # Stop the pipeline: no retrieval, no generation, no guessing.
+            yield _sse({"type": "tokens", "text": UNSUPPORTED_LANGUAGE_MESSAGE})
+            yield _sse({"type": "phase", "phase": "done"})
+            yield _sse({"type": "done"})
+            return
+
+        if normalize_retrieval_mode(ret_mode) == "auto":
+            yield _sse({"type": "status", "stage": "routing",
+                        "message": PHASE_LABELS["routing"], "done": False})
+            yield _sse({"type": "status", "stage": "routing",
+                        "message": PHASE_LABELS["routing"], "done": True,
+                        "route": route})
+
+        # English is the INTERNAL retrieval language; the original query and
+        # the response language travel separately.
+        retrieval_query = qplan.retrieval_query
+        want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
+        want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
+        is_graph = route == ROUTE_GRAPH
+
+        # Answer language: appended to the per-request system prompt, using the
+        # same save/restore discipline as the existing TONE hint.
+        lang_hint = _response_language_hint(qplan)
+        if lang_hint:
+            generator.system_prompt = (generator.system_prompt or "").rstrip() + lang_hint
 
         try:
-            if is_graph:
-                # ── GRAPH / metadata traversal path ──
-                stages = ["entities", "traversal", "expansion", "evidence"]
-                for s in stages:
-                    yield _sse({"type": "status", "stage": s, "message": s, "done": False})
-                results = graph_retriever.retrieve(query, top_k=request.top_k)
-                for s in stages:
-                    yield _sse({"type": "status", "stage": s, "message": s, "done": True})
+            if want_graph and not want_hybrid:
+                # ── GRAPH ONLY ──
+                yield _sse({"type": "status", "stage": "retrieving_graph",
+                            "message": PHASE_LABELS["retrieving_graph"], "done": False})
+                results = _retrieve_graph_results(retrieval_query, request.top_k)
+                yield _sse({"type": "status", "stage": "retrieving_graph",
+                            "message": PHASE_LABELS["retrieving_graph"], "done": True})
+                sources = _to_sources(results)
+                ret_latency = (time.perf_counter() - t_ret_start) * 1000
+            elif want_graph and want_hybrid:
+                # ── HYBRID + GRAPH: independent branches, run concurrently ──
+                # Neither branch consumes the other's output; both receive the
+                # SAME normalized English query.
+                yield _sse({"type": "status", "stage": "retrieving_documents",
+                            "message": PHASE_LABELS["retrieving_documents"], "done": False})
+                yield _sse({"type": "status", "stage": "retrieving_graph",
+                            "message": PHASE_LABELS["retrieving_graph"], "done": False})
+
+                from concurrent.futures import ThreadPoolExecutor
+
+                hybrid_results: list = []
+                graph_results: list = []
+                with ThreadPoolExecutor(max_workers=2,
+                                        thread_name_prefix="retrieval") as pool:
+                    graph_future = pool.submit(
+                        _retrieve_graph_results, retrieval_query, request.top_k)
+                    try:
+                        hybrid_results, timings = pipeline.retrieve(
+                            retrieval_query,
+                            top_k=_effective_top_k(request.top_k, plan),
+                            doc_types=request.doc_types,
+                            orgs=request.orgs,
+                            doc_categories=request.doc_categories,
+                        )
+                        _maybe_enrich_deep_neighbors(plan, hybrid_results)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[agent] hybrid retrieval failed: {type(e).__name__}: {e}")
+                        hybrid_results = []
+                    graph_results = graph_future.result()
+
+                yield _sse({"type": "status", "stage": "retrieving_documents",
+                            "message": PHASE_LABELS["retrieving_documents"], "done": True})
+                yield _sse({"type": "status", "stage": "retrieving_graph",
+                            "message": PHASE_LABELS["retrieving_graph"], "done": True})
+
+                yield _sse({"type": "status", "stage": "combining_evidence",
+                            "message": PHASE_LABELS["combining_evidence"], "done": False})
+                results = merge_evidence(hybrid_results, graph_results)
+                yield _sse({"type": "status", "stage": "combining_evidence",
+                            "message": PHASE_LABELS["combining_evidence"], "done": True})
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
             else:
@@ -1396,9 +1621,10 @@ def chat_stream(request: ChatStreamRequest):
                 def _collect(name: str, info: dict) -> None:
                     stage_events.append((name, info))
 
-                yield _sse({"type": "status", "stage": "embed", "message": "Embedding query…", "done": False})
+                yield _sse({"type": "status", "stage": "retrieving_documents",
+                            "message": PHASE_LABELS["retrieving_documents"], "done": False})
                 results, timings = pipeline.retrieve(
-                    query, top_k=_effective_top_k(request.top_k, plan),
+                    retrieval_query, top_k=_effective_top_k(request.top_k, plan),
                     on_stage=_collect,
                     doc_types=request.doc_types,
                     orgs=request.orgs,
@@ -1416,6 +1642,8 @@ def chat_stream(request: ChatStreamRequest):
                         "type": "status", "stage": name, "message": label,
                         "count": info.get("count"), "done": True,
                     })
+                yield _sse({"type": "status", "stage": "retrieving_documents",
+                            "message": PHASE_LABELS["retrieving_documents"], "done": True})
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
 
@@ -1423,8 +1651,10 @@ def chat_stream(request: ChatStreamRequest):
             # set from the shared prepare_context cache (generate_stream reuses
             # the identical assembly). Not a fixed count: as many relevant
             # documents as the evidence budget fits.
-            if not is_graph:
-                admitted, adiag = _admission_diag(query, results)
+            # Only the hybrid-ONLY branch populates stage_events, which the
+            # trace below reads; graph and merged routes skip it.
+            if route == ROUTE_HYBRID:
+                admitted, adiag = _admission_diag(retrieval_query, results)
                 # Runtime evidence trace (Bug-2 diagnostics). Reads:
                 #   CASE A  retrieved > admitted (budget) → correct Task-3
                 #           behavior; skipped/evidence_used tell you why.
@@ -1488,7 +1718,8 @@ def chat_stream(request: ChatStreamRequest):
                 return
 
             # ── Generation (streamed) ──
-            yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": False})
+            yield _sse({"type": "status", "stage": "generating",
+                        "message": PHASE_LABELS["generating"], "done": False})
             # Tell the UI the model is now thinking (qwen3 emits reasoning
             # tokens live; qwen2.5 doesn't, so the UI shows a spinner + timer).
             yield _sse({"type": "phase", "phase": "thinking", "model": resolved_model})
@@ -1522,7 +1753,7 @@ def chat_stream(request: ChatStreamRequest):
             ]
             # accumulate streamed text for the server-side grounding pass
             streamed_parts: list[str] = []
-            for ev in generator.generate_stream(query, context):
+            for ev in generator.generate_stream(retrieval_query, context):
                 if ev["type"] == "tokens":
                     streamed_parts.append(ev["text"])
                     yield _sse({"type": "tokens", "text": ev["text"]})
@@ -1589,7 +1820,8 @@ def chat_stream(request: ChatStreamRequest):
                 "judge_removed": [],
                 "judge_rewritten": False,
             })
-            yield _sse({"type": "status", "stage": "generate", "message": "Generating answer…", "done": True})
+            yield _sse({"type": "status", "stage": "generating",
+                        "message": PHASE_LABELS["generating"], "done": True})
             yield _sse({"type": "phase", "phase": "done"})
             yield _sse({"type": "done"})
 

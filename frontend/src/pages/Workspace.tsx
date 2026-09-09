@@ -5,6 +5,7 @@ import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { restoreSession } from "@/lib/sessionTransitions";
 import { useAppStore } from "@/store/useAppStore";
+import { requestsGraph } from "@/lib/retrievalMode";
 import { useActivityStore } from "@/store/useActivityStore";
 import { DraftCanvas } from "@/components/workspace/DraftCanvas";
 import { NotesEditor } from "@/components/workspace/NotesEditor";
@@ -41,7 +42,10 @@ export function Workspace() {
   // as an optional bridge for the Model Activity panel's "Go to canvas".
   const [tab, setTab] = useState<TabKey>("draft");
   const [copied, setCopied] = useState(false);
-  const isGraph = useAppStore((s) => s.retrievalMode) === "graph";
+  const retrievalMode = useAppStore((s) => s.retrievalMode);
+  // "graph-ish" = the request asks for graph evidence, OR the answer
+  // actually returned graph provenance (covers auto/hybrid_and_graph).
+  const isGraph = requestsGraph(retrievalMode);
   // The Graph tab renders from the CURRENT answer's sources — the draft store
   // already owns them, so no separate graph store is introduced.
   const graphSources = useDraftStore((s) => s.sources);

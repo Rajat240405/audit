@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { streamChat, verifyAnswer } from "@/api/chat";
 import { useAppStore } from "@/store/useAppStore";
+import { showsHybridStages } from "@/lib/retrievalMode";
 import { useDraftStore } from "@/store/useDraftStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
@@ -50,7 +51,7 @@ export function useChatStream() {
   useEffect(() => {
     usePipelineStore
       .getState()
-      .setStages(retrievalMode === "graph" ? graphStages() : hybridStages());
+      .setStages(showsHybridStages(retrievalMode) ? hybridStages() : graphStages());
   }, [retrievalMode]);
 
   const send = useCallback(
@@ -82,7 +83,7 @@ export function useChatStream() {
 
       const pipeline = usePipelineStore.getState();
       pipeline.start();
-      pipeline.setStages(retrievalMode === "graph" ? graphStages() : hybridStages());
+      pipeline.setStages(showsHybridStages(retrievalMode) ? hybridStages() : graphStages());
 
       const draft = useDraftStore.getState();
       draft.startStream();
@@ -114,7 +115,7 @@ export function useChatStream() {
             usePipelineStore.getState().setMessage(message);
             // Fallback for backends without explicit phase events: entering
             // the generate stage means the model is now thinking.
-            if (stage === "generate" && !done) {
+            if ((stage === "generate" || stage === "generating") && !done) {
               useActivityStore.getState().setPhase("thinking");
             }
           },

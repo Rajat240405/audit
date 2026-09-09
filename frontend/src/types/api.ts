@@ -1,7 +1,7 @@
 // Shared domain types for the INCOIS Audit Pro workstation.
 
 export type ExecutionMode = "fast" | "deep";
-export type RetrievalMode = "hybrid" | "graph";
+export type RetrievalMode = "auto" | "hybrid" | "graph" | "hybrid_and_graph";
 export type DraftStyle =
   | "formal"
   | "concise"

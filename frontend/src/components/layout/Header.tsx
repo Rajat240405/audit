@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Moon, Sun, Brain, Settings as SettingsIcon } from "lucide-react";
 import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
+import type { RetrievalMode } from "@/types";
 import { SourceFilter } from "./SourceFilter";
 import { useThemeStore } from "@/store/useThemeStore";
 import { useActivityStore } from "@/store/useActivityStore";
@@ -29,6 +30,18 @@ const DRAFT_STYLES = [
   { value: "parliamentary", label: "Parliamentary" },
   { value: "concise", label: "Concise" },
   { value: "detailed", label: "Detailed" },
+];
+
+/** Retrieval modes offered in the header pill (Auto is the default). */
+const RETRIEVAL_MODES: ReadonlyArray<{
+  value: RetrievalMode;
+  label: string;
+  title: string;
+}> = [
+  { value: "auto", label: "Auto", title: "Auto: the query agent picks Hybrid, Graph or both" },
+  { value: "hybrid", label: "Hybrid RAG", title: "Hybrid RAG: dense + BM25 + rerank" },
+  { value: "graph", label: "GraphRAG", title: "GraphRAG: knowledge-graph traversal" },
+  { value: "hybrid_and_graph", label: "Hybrid + Graph", title: "Run both and merge the evidence" },
 ];
 
 export function Header() {
@@ -165,21 +178,22 @@ export function Header() {
           </SelectContent>
         </Select>
 
-        {/* Retrieval mode — Hybrid RAG vs GraphRAG (was the chatbox pill) */}
+        {/* Retrieval mode — Auto routes via the query agent; the other three
+            are manual selections that skip routing entirely. */}
         <div className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold">
-          {(["hybrid", "graph"] as const).map((m) => (
+          {RETRIEVAL_MODES.map((m) => (
             <button
-              key={m}
-              onClick={() => app.setRetrievalMode(m)}
+              key={m.value}
+              onClick={() => app.setRetrievalMode(m.value)}
               className={cn(
                 "rounded-full px-2.5 py-1 transition-colors",
-                app.retrievalMode === m
+                app.retrievalMode === m.value
                   ? "bg-foreground text-background"
                   : "text-muted hover:text-foreground"
               )}
-              title={m === "hybrid" ? "Hybrid RAG: dense + BM25 + rerank" : "GraphRAG: knowledge-graph traversal"}
+              title={m.title}
             >
-              {m === "hybrid" ? "Hybrid RAG" : "GraphRAG"}
+              {m.label}
             </button>
           ))}
         </div>

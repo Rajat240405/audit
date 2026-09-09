@@ -3,6 +3,8 @@ import { useDraftStore } from "@/store/useDraftStore";
 import { EvidenceCard } from "./EvidenceCard";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppStore } from "@/store/useAppStore";
+import { requestsGraph } from "@/lib/retrievalMode";
+import { hasGraphProvenance } from "@/lib/graphModel";
 
 /**
  * Evidence tab — the audit-transparency heart. Each retrieved document shows
@@ -19,7 +21,7 @@ export function EvidencePanel() {
       <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
         <FileSearch className="h-8 w-8 text-muted" />
         <p className="text-xs text-muted">
-          {retrievalMode === "graph"
+          {requestsGraph(retrievalMode)
             ? "Entities, relationships and supporting documents will appear here when you run a GraphRAG query."
             : "Retrieved chunks, confidence scores and highlighted evidence will appear here after a query."}
         </p>
@@ -35,7 +37,7 @@ export function EvidencePanel() {
             key={s.doc_id}
             source={s}
             selected={selected?.doc_id === s.doc_id}
-            isGraph={retrievalMode === "graph"}
+            isGraph={hasGraphProvenance(s)}
           />
         ))}
       </div>
