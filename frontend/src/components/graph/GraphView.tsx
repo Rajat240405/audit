@@ -16,7 +16,11 @@ import { Crosshair, RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { GraphNodeCard, type GraphNodeData } from "./GraphNodeCard";
-import { layoutGraph } from "@/lib/graphLayout";
+import {
+  GraphRelationshipEdge,
+  type GraphEdgeData,
+} from "./GraphRelationshipEdge";
+import { labelOffsets, layoutGraph } from "@/lib/graphLayout";
 import {
   DEFAULT_MAX_NODES,
   buildGraphModel,
@@ -27,6 +31,14 @@ import {
 import type { SourceItem } from "@/types";
 
 const nodeTypes = { graphNode: GraphNodeCard };
+const edgeTypes = { graphEdge: GraphRelationshipEdge };
+
+/**
+ * Above this many edges the graph is treated as dense: relationship pills are
+ * hidden by default and revealed on hover / selection, so crossing edges stay
+ * readable instead of drowning in overlapping labels.
+ */
+export const DENSE_EDGE_THRESHOLD = 14;
 
 /** Neighbourhood of a selected node (itself + directly connected nodes). */
 function neighbourhood(model: GraphModel, id: string | null): Set<string> | null {
@@ -58,43 +70,56 @@ function GraphCanvas({ model }: { model: GraphModel }) {
 
   const focus = useMemo(() => neighbourhood(model, selected), [model, selected]);
 
-  const nodes: Node<GraphNodeData>[] = useMemo(() => {
-    const pos = layoutGraph(model);
-    return model.nodes.map((n) => ({
-      id: n.id,
-      type: "graphNode",
-      position: pos.get(n.id) ?? { x: 0, y: 0 },
-      data: {
-        model: n,
-        dimmed: Boolean(focus) && !focus?.has(n.id),
-        selected: selected === n.id,
-      },
-      draggable: true,
-    }));
-  }, [model, focus, selected]);
+  const positions = useMemo(() => layoutGraph(model), [model]);
+  const offsets = useMemo(() => labelOffsets(model, positions), [model, positions]);
+  const dense = model.edges.length > DENSE_EDGE_THRESHOLD;
 
-  const edges: Edge[] = useMemo(
+  const nodes: Node<GraphNodeData>[] = useMemo(
+    () =>
+      model.nodes.map((n) => ({
+        id: n.id,
+        type: "graphNode",
+        position: positions.get(n.id) ?? { x: 0, y: 0 },
+        data: {
+          model: n,
+          dimmed: Boolean(focus) && !focus?.has(n.id),
+          selected: selected === n.id,
+        },
+        draggable: true,
+      })),
+    [model, positions, focus, selected]
+  );
+
+  const edges: Edge<GraphEdgeData>[] = useMemo(
     () =>
       model.edges.map((e) => {
-        const dimmed = Boolean(focus) && !(focus?.has(e.source) && focus?.has(e.target));
+        const inFocus = Boolean(focus) && focus?.has(e.source) && focus?.has(e.target);
+        const dimmed = Boolean(focus) && !inFocus;
         return {
           id: e.id,
           source: e.source,
           target: e.target,
-          label: e.rel,
-          animated: !dimmed && e.onPath,
-          labelShowBg: true,
-          labelBgPadding: [4, 2] as [number, number],
-          labelStyle: { fontSize: 9, letterSpacing: "0.03em" },
-          labelBgStyle: { fill: "var(--color-surface-2, #1c2128)", fillOpacity: 0.9 },
-          style: {
-            strokeWidth: dimmed ? 1 : 1.6,
-            opacity: dimmed ? 0.15 : 0.9,
+          type: "graphEdge",
+          data: {
+            rel: e.rel,
+            labelOffset: offsets.get(e.id) ?? 0,
+            // In a dense graph, only the selected neighbourhood keeps its
+            // labels on; everything else reveals on hover.
+            labelHidden: dense && !inFocus,
+            dimmed,
+            highlighted: Boolean(inFocus),
           },
-          markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
-        } satisfies Edge;
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 12,
+            height: 12,
+            color: inFocus
+              ? "var(--color-accent, #6ea8fe)"
+              : "var(--color-border, #6b7280)",
+          },
+        } satisfies Edge<GraphEdgeData>;
       }),
-    [model, focus]
+    [model, focus, offsets, dense]
   );
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
@@ -109,6 +134,7 @@ function GraphCanvas({ model }: { model: GraphModel }) {
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
         onPaneClick={() => setSelected(null)}
         fitView
@@ -184,6 +210,7 @@ export function GraphView({ sources }: { sources: SourceItem[] }) {
   );
   const rels = useMemo(() => relationshipTypes(model), [model]);
   const labels = useMemo(() => nodeLabels(model), [model]);
+  const dense = model.edges.length > DENSE_EDGE_THRESHOLD;
 
   return (
     <div className="flex h-full flex-col" data-testid="graph-view">
@@ -191,6 +218,11 @@ export function GraphView({ sources }: { sources: SourceItem[] }) {
         <Badge variant="accent">{model.entityCount} entities</Badge>
         <Badge variant="success">{model.documentCount} documents</Badge>
         <Badge variant="muted">{model.edges.length} relationships</Badge>
+        {dense && (
+          <Badge variant="muted" title="Labels reveal on hover or selection">
+            labels on hover
+          </Badge>
+        )}
         {model.truncated && (
           <Badge variant="warning" title={`Showing the first ${DEFAULT_MAX_NODES} nodes`}>
             truncated
