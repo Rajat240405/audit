@@ -1268,8 +1268,32 @@ def resolve_query_plan(query: str, retrieval_mode: str) -> tuple[QueryPlan, str]
     """
     mode = normalize_retrieval_mode(retrieval_mode)
     auto = mode == "auto"
+    if auto:
+        print("[request] retrieval_mode=AUTO")
+    else:
+        print(f"[request] retrieval_mode=MANUAL selected={mode.upper()}")
+
     plan = run_query_agent(query, llm_client, auto=auto)
     route = plan.route if auto else _MANUAL_ROUTES.get(mode, ROUTE_HYBRID)
+
+    translated = plan.retrieval_query.strip() != (query or "").strip()
+    print(f"[query-agent] language={plan.language} supported={str(plan.supported).lower()}")
+    if not plan.supported:
+        # Nothing else runs; the caller stops the pipeline.
+        print("[query-agent] unsupported_language STOP")
+        return plan, route
+    print(f"[query-agent] translated={str(translated).lower()} "
+          f"response_language={plan.response_language}")
+    if translated:
+        # normalized query only — never the full prompt or model response
+        snippet = plan.retrieval_query[:120]
+        print(f'[query-agent] normalized_query="{snippet}"')
+    if plan.degraded:
+        print("[query-agent] degraded=true fallback=HYBRID")
+    if auto:
+        print(f"[query-agent] route={route}")
+    else:
+        print("[query-agent] routing=SKIPPED")
     return plan, route
 
 
@@ -1294,12 +1318,21 @@ def _response_language_hint(plan: QueryPlan) -> str:
 
 
 def _retrieve_graph_results(query: str, top_k: int) -> list:
-    """GraphRAG branch. Honest-empty on failure (existing capability contract)."""
+    """GraphRAG branch. Honest-empty on failure (existing capability contract).
+
+    Logs reflect ACTUAL execution: "started" is printed immediately before the
+    call and "completed" only after it returns.
+    """
+    print("[retrieval] graph started")
+    t0 = time.perf_counter()
     try:
-        return graph_retriever.retrieve(query, top_k=top_k)
+        results = graph_retriever.retrieve(query, top_k=top_k)
     except Exception as e:  # noqa: BLE001 — existing degrade-gracefully contract
-        print(f"[agent] graph retrieval failed: {type(e).__name__}: {e}")
+        print(f"[retrieval] graph FAILED error={type(e).__name__}: {e}")
         return []
+    print(f"[retrieval] graph completed results={len(results)} "
+          f"latency_ms={(time.perf_counter() - t0) * 1000:.0f}")
+    return results
 
 
 def _to_sources(results: list) -> list[dict]:
@@ -1588,6 +1621,8 @@ def chat_stream(request: ChatStreamRequest):
                                         thread_name_prefix="retrieval") as pool:
                     graph_future = pool.submit(
                         _retrieve_graph_results, retrieval_query, request.top_k)
+                    print("[retrieval] hybrid started (parallel with graph)")
+                    t_hy = time.perf_counter()
                     try:
                         hybrid_results, timings = pipeline.retrieve(
                             retrieval_query,
@@ -1597,11 +1632,15 @@ def chat_stream(request: ChatStreamRequest):
                             doc_categories=request.doc_categories,
                         )
                         _maybe_enrich_deep_neighbors(plan, hybrid_results)
+                        print(f"[retrieval] hybrid completed results={len(hybrid_results)} "
+                              f"latency_ms={(time.perf_counter() - t_hy) * 1000:.0f}")
                     except Exception as e:  # noqa: BLE001
-                        print(f"[agent] hybrid retrieval failed: {type(e).__name__}: {e}")
+                        print(f"[retrieval] hybrid FAILED error={type(e).__name__}: {e}")
                         hybrid_results = []
                     graph_results = graph_future.result()
 
+                print(f"[retrieval] hybrid completed results={len(results)} "
+                      f"latency_ms={(time.perf_counter() - _t_hy) * 1000:.0f}")
                 yield _sse({"type": "status", "stage": "retrieving_documents",
                             "message": PHASE_LABELS["retrieving_documents"], "done": True})
                 yield _sse({"type": "status", "stage": "retrieving_graph",
@@ -1609,7 +1648,10 @@ def chat_stream(request: ChatStreamRequest):
 
                 yield _sse({"type": "status", "stage": "combining_evidence",
                             "message": PHASE_LABELS["combining_evidence"], "done": False})
+                print(f"[evidence-merge] started hybrid={len(hybrid_results)} "
+                      f"graph={len(graph_results)}")
                 results = merge_evidence(hybrid_results, graph_results)
+                print(f"[evidence-merge] completed merged={len(results)}")
                 yield _sse({"type": "status", "stage": "combining_evidence",
                             "message": PHASE_LABELS["combining_evidence"], "done": True})
                 sources = _to_sources(results)
@@ -1623,6 +1665,8 @@ def chat_stream(request: ChatStreamRequest):
 
                 yield _sse({"type": "status", "stage": "retrieving_documents",
                             "message": PHASE_LABELS["retrieving_documents"], "done": False})
+                print("[retrieval] hybrid started")
+                _t_hy = time.perf_counter()
                 results, timings = pipeline.retrieve(
                     retrieval_query, top_k=_effective_top_k(request.top_k, plan),
                     on_stage=_collect,
@@ -1641,6 +1685,9 @@ def chat_stream(request: ChatStreamRequest):
                     yield _sse({
                         "type": "status", "stage": name, "message": label,
                         "count": info.get("count"), "done": True,
+                        # substage: feeds the RAG Pipeline tab, must NOT
+                        # replace the single left-chat phase status.
+                        "substage": True,
                     })
                 yield _sse({"type": "status", "stage": "retrieving_documents",
                             "message": PHASE_LABELS["retrieving_documents"], "done": True})
@@ -1718,6 +1765,9 @@ def chat_stream(request: ChatStreamRequest):
                 return
 
             # ── Generation (streamed) ──
+            print(f"[generation] started response_language={qplan.response_language}")
+            _t_gen = time.perf_counter()
+            _streaming_logged = False
             yield _sse({"type": "status", "stage": "generating",
                         "message": PHASE_LABELS["generating"], "done": False})
             # Tell the UI the model is now thinking (qwen3 emits reasoning
@@ -1755,6 +1805,9 @@ def chat_stream(request: ChatStreamRequest):
             streamed_parts: list[str] = []
             for ev in generator.generate_stream(retrieval_query, context):
                 if ev["type"] == "tokens":
+                    if not _streaming_logged:
+                        print("[generation] streaming_started")
+                        _streaming_logged = True
                     streamed_parts.append(ev["text"])
                     yield _sse({"type": "tokens", "text": ev["text"]})
                 elif ev["type"] == "reasoning":
@@ -1820,6 +1873,7 @@ def chat_stream(request: ChatStreamRequest):
                 "judge_removed": [],
                 "judge_rewritten": False,
             })
+            print(f"[request] completed latency_ms={(time.perf_counter() - t_ret_start) * 1000:.0f}")
             yield _sse({"type": "status", "stage": "generating",
                         "message": PHASE_LABELS["generating"], "done": True})
             yield _sse({"type": "phase", "phase": "done"})

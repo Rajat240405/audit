@@ -6,11 +6,32 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/utils/cn";
 import { saveKnowledge } from "@/api/model";
 import { useSessionStore } from "@/store/useSessionStore";
+import { useDraftStore } from "@/store/useDraftStore";
+import { usePipelineStore } from "@/store/usePipelineStore";
 
 /** Message card in the left assistant column (matches the Stitch design). */
 export function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const [saving, setSaving] = useState(false);
+
+  // Live state for the assistant message currently being generated. The
+  // session transcript only receives `content` at the END of the stream
+  // (onMeta), so without this the card renders a static "…" for the whole
+  // request and the real backend phases never appear in the left chat.
+  //
+  // `activeMessageId` is bound by useChatStream at stream start, so exactly
+  // ONE message can ever be the live one.
+  const isLive = useDraftStore((s) => s.activeMessageId) === message.id;
+  const streamingText = useDraftStore((s) => (isLive ? s.streamingText : ""));
+  // usePipelineStore.message is set by onStatus from the SSE "status" events —
+  // it is REPLACED on every phase, so it is inherently a single status with no
+  // accumulated history.
+  const phaseMessage = usePipelineStore((s) => (isLive ? s.message : ""));
+
+  // Streamed tokens win over the phase label: the moment real answer text
+  // arrives, "Generating answer…" disappears and the answer takes its place.
+  const liveBody = isLive ? streamingText : "";
+  const body = message.content || liveBody;
 
   const onSaveKnowledge = async () => {
     if (saving) return;
@@ -57,7 +78,7 @@ export function Message({ message }: { message: ChatMessage }) {
           message.meta?.is_fallback ? "border-warning/50" : "border-border"
         )}
       >
-        {message.content ? (
+        {body ? (
           <div className="md-body text-sm text-foreground/90">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -71,9 +92,17 @@ export function Message({ message }: { message: ChatMessage }) {
                 ),
               }}
             >
-              {message.content}
+              {body}
             </ReactMarkdown>
           </div>
+        ) : isLive && phaseMessage ? (
+          <p
+            data-testid="chat-progress-status"
+            className="flex items-center gap-2 text-sm text-muted"
+          >
+            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+            {phaseMessage}
+          </p>
         ) : (
           <p className="text-sm text-muted">…</p>
         )}

@@ -110,9 +110,15 @@ export function useChatStream() {
         docCategories: app.sourceFilter.docCategories,
         signal: abort.signal,
         handlers: {
-          onStatus: (stage, message, done) => {
+          onStatus: (stage, message, done, _count, substage) => {
             usePipelineStore.getState().markStage(stage, done ? "done" : "running");
-            usePipelineStore.getState().setMessage(message);
+            // Substage events (embed/dense/bm25/rrf/rerank) still drive the RAG
+            // Pipeline tab, but must NOT replace the single left-chat phase
+            // status — otherwise "Retrieving documents…" is immediately
+            // overwritten by "BM25 search".
+            if (!substage) {
+              usePipelineStore.getState().setMessage(message);
+            }
             // Fallback for backends without explicit phase events: entering
             // the generate stage means the model is now thinking.
             if ((stage === "generate" || stage === "generating") && !done) {

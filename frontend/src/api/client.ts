@@ -34,7 +34,13 @@ export async function apiFetch<T>(
 }
 
 export interface StreamHandlers {
-  onStatus?: (stage: string, message: string, done: boolean, count?: number) => void;
+  onStatus?: (
+    stage: string,
+    message: string,
+    done: boolean,
+    count?: number,
+    substage?: boolean
+  ) => void;
   onSources?: (sources: unknown[], isGraph: boolean) => void;
   onTrace?: (trace: unknown) => void;
   onTokens?: (text: string) => void;
@@ -102,7 +108,8 @@ export function consumeSSE(
               String(ev.stage ?? ""),
               String(ev.message ?? ""),
               Boolean(ev.done),
-              typeof ev.count === "number" ? ev.count : undefined
+              typeof ev.count === "number" ? ev.count : undefined,
+              Boolean(ev.substage)
             );
             break;
           case "sources":
