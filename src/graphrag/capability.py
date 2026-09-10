@@ -47,6 +47,12 @@ _DET_REL_SCORE = 1.0
 _MENTION_SCORE = 0.8
 _EXPAND_SCORE = 0.5
 
+#: Max neighbours expanded at depth-2 per anchor. Each one triggers a nested
+#: _collect (its own documents_for_entity + batched fact lookups), so the
+#: unbounded loop scaled with NEIGHBORS_LIMIT (200) and dominated hub queries.
+#: 25 preserves useful expansion while capping worst-case work ~8x.
+EXPANSION_FANOUT_LIMIT = 25
+
 
 @dataclass
 class GraphEvidence:
@@ -149,32 +155,60 @@ class GraphCapability:
                  out: dict[str, dict], *, depth: int,
                  hop_facts: frozenset | None = None) -> None:
         docs = self.store.documents_for_entity(anchor.key)
+        doc_keys = [d["key"] for d in docs]
+
+        # BATCHED: one round trip per direction for ALL documents, replacing
+        # a facts_out + facts_in (+ a duplicate facts_out) per document.
+        # Profiled on HPC: 1,761 single-key calls / 65.4 s of a 72.3 s query.
+        # Semantics are unchanged — the same FactViews, filtered identically.
+        out_by_doc = self.store.facts_for_keys(doc_keys, direction="out")
+        in_by_doc = self.store.facts_for_keys(doc_keys, direction="in")
+
         for d in docs:
             doc_key = d["key"]
             score = base
             via = f"{anchor.key} (depth {depth})"
             # the document's own facts toward this anchor (both directions)
-            doc_facts = {f.fact_key for f in self.store.facts_out(doc_key)
+            facts_out = out_by_doc.get(doc_key, [])
+            facts_in = in_by_doc.get(doc_key, [])
+            doc_facts = {f.fact_key for f in facts_out
                          if f.dst_key == anchor.key} | \
-                        {f.fact_key for f in self.store.facts_in(doc_key)
+                        {f.fact_key for f in facts_in
                          if f.src_key == anchor.key}
             if depth == 1 and doc_facts:
-                # refine by edge type (deterministic > MENTIONS-only)
-                rels = {f.rel for f in self.store.facts_out(doc_key)
+                # refine by edge type (deterministic > MENTIONS-only).
+                # Reuses the SAME facts_out result instead of re-querying.
+                rels = {f.rel for f in facts_out
                         if f.dst_key == anchor.key}
                 if "MENTIONS" in rels and not (rels - {"MENTIONS"}):
                     score = _MENTION_SCORE
             self._merge(out, doc_key, score, anchor, via,
                         doc_facts | (hop_facts or frozenset()))
+
         # one expansion hop (depth-2) — e.g. Org→(Facility)→MENTIONS→Doc
         if depth == 1:
+            # HOISTED: these two lookups depend only on `anchor.key`, which is
+            # invariant across the loop. They were previously re-issued once
+            # PER NEIGHBOUR (up to NEIGHBORS_LIMIT=200 identical queries).
+            anchor_out = self.store.facts_out(anchor.key)
+            anchor_in = self.store.facts_in(anchor.key)
+
+            # BOUNDED FAN-OUT: expansion is a relevance heuristic, not a
+            # completeness guarantee, and each neighbour costs a full nested
+            # _collect. `neighbors()` returns a deterministic (depth, key)
+            # ordering, so taking the first N keeps the nearest neighbours and
+            # stays reproducible.
+            expanded = 0
             for nbr in self.store.neighbors(anchor.key, depth=1):
                 if nbr.label in ("Document", "Year", "Fact"):
                     continue
+                if expanded >= EXPANSION_FANOUT_LIMIT:
+                    break
+                expanded += 1
                 hop = frozenset(
-                    f.fact_key for f in self.store.facts_out(anchor.key)
+                    f.fact_key for f in anchor_out
                     if f.dst_key == nbr.key) | frozenset(
-                    f.fact_key for f in self.store.facts_in(anchor.key)
+                    f.fact_key for f in anchor_in
                     if f.src_key == nbr.key)
                 self._collect(Anchor(key=nbr.key, label=nbr.label, name=nbr.name,
                                      via="expand", match_length=0),

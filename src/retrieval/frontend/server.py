@@ -447,6 +447,92 @@ pipeline = _LazyPipeline()
 graph_retriever = _LazyGraph()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid RAG startup warm-up
+#
+# Cold start measured on HPC: first query ~150 s, second ~19 s — roughly 130 s
+# of one-time initialisation paid by whoever asks the first question. The
+# production workflow already has an idle window (start_hpc.sh -> port forward
+# -> user opens the site), so that cost is moved into it.
+#
+# Loaded here (all through the EXISTING lazy path, never a second instance):
+#   1-4  BGE-M3 + FAISS + BM25 + doc/chunk maps   via pipeline._get()
+#   5    CrossEncoder                              via reranker.model
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Set by the warm-up thread; read by /health/ready for observability.
+_WARMUP_STATE: dict = {"enabled": False, "status": "idle", "seconds": None}
+
+
+def _warmup_enabled() -> bool:
+    """Warm up only for a serving process, and only when not disabled.
+
+    Read from the ENVIRONMENT at call time (``.env.hpc`` is passed to the
+    container via ``--env-file``), so flipping the flag never needs an SIF
+    rebuild. Absent => enabled, matching the production default.
+    """
+    if os.environ.get("APP_MODE", "serve").strip().lower() != "serve":
+        return False
+    raw = os.environ.get("APP_WARMUP")
+    if raw is None:
+        return True  # default ON for serve
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _run_hybrid_warmup() -> None:
+    """Force the Hybrid RAG components into memory. Never raises.
+
+    Uses ``pipeline._get()`` — the same double-checked-locked singleton path a
+    query takes — so a request arriving mid-warm-up blocks on that lock and
+    receives the SAME instance. No duplicate pipeline, embedder or reranker.
+    """
+    started = time.perf_counter()
+    _WARMUP_STATE["status"] = "running"
+    print("[hybrid-warmup] started")
+    try:
+        # stages 1-4: BGE-M3 (via HybridRAGPipeline.__init__ reading
+        # embedder.embedding_dim), FAISS, BM25, doc_map/chunk_map
+        p = pipeline._get()
+        print("[hybrid-warmup] pipeline loaded")
+
+        # stage 5: the CrossEncoder is lazy until the first rerank(). Touch the
+        # model property directly rather than running a throwaway rerank():
+        # rerank() mutates `last_truncated_docs`, which the request trace
+        # reads, so this loads the identical weights with no state change.
+        _ = p.reranker.model
+        print("[hybrid-warmup] reranker loaded")
+
+        elapsed = time.perf_counter() - started
+        _WARMUP_STATE.update(status="ready", seconds=round(elapsed, 1))
+        print(f"[hybrid-warmup] READY in {elapsed:.1f}s")
+    except Exception as e:  # noqa: BLE001 — must never take down the server
+        elapsed = time.perf_counter() - started
+        _WARMUP_STATE.update(status="failed", seconds=round(elapsed, 1))
+        # bounded: type + message only, no config/prompt/evidence
+        print(f"[hybrid-warmup] FAILED: {type(e).__name__}: {str(e)[:200]}")
+        print("[hybrid-warmup] lazy loading remains available for the first query")
+
+
+@app.on_event("startup")
+def _start_hybrid_warmup() -> None:
+    """Kick warm-up off in the BACKGROUND so the port binds immediately.
+
+    Blocking here would delay uvicorn's bind by ~2 minutes, making
+    start_hpc.sh look hung and failing orchestrator liveness probes.
+    """
+    if not _warmup_enabled():
+        print(
+            f"[hybrid-warmup] skipped "
+            f"(APP_MODE={os.environ.get('APP_MODE', 'serve')} "
+            f"APP_WARMUP={os.environ.get('APP_WARMUP', '1')})"
+        )
+        return
+    _WARMUP_STATE["enabled"] = True
+    _threading.Thread(
+        target=_run_hybrid_warmup, name="hybrid-warmup", daemon=True
+    ).start()
+
+
 @app.on_event("shutdown")
 def _close_graph_backend() -> None:
     """Release the Neo4j driver (and its connection pool) on shutdown.
@@ -1065,8 +1151,15 @@ def _chat_endpoint_body(request: ChatRequest):
             )
 
         retrieval_query = qplan.retrieval_query
+        # see the note in the streaming path: retrieval stays English,
+        # generation receives the user's original query.
+        generation_query = qplan.original_query or retrieval_query
         want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
         want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
+        # Bound up-front: only the branches that actually run Hybrid RAG assign
+        # it, and the route is decided by the agent (AUTO), so keying the trace
+        # off the REQUESTED mode left it unbound on a graph route.
+        timings = None
         lang_hint = _response_language_hint(qplan)
         if lang_hint:
             generator.system_prompt = (
@@ -1145,7 +1238,7 @@ def _chat_endpoint_body(request: ChatRequest):
 
         if llm_available and results:
             try:
-                gen_res = generator.generate(retrieval_query, results)
+                gen_res = generator.generate(generation_query, results)
                 gen_latency = gen_res.generation_latency_ms
                 answer = gen_res.answer
                 prompt_tok = gen_res.prompt_tokens
@@ -1181,7 +1274,10 @@ def _chat_endpoint_body(request: ChatRequest):
             total_tok = comp_tok
 
         trace_payload = None
-        if ret_mode != "graph":
+        # Guard on the timings object itself. `ret_mode` is the REQUESTED mode:
+        # in AUTO the agent may route to GRAPH, which runs no Hybrid pipeline
+        # and therefore produces no stage timings (UnboundLocalError before).
+        if timings is not None:
             trace_payload = {
                 "dense_search_ms": round(timings.dense_search_ms, 2),
                 "bm25_search_ms": round(timings.bm25_search_ms, 2),
@@ -1315,6 +1411,25 @@ def _response_language_hint(plan: QueryPlan) -> str:
         f"use into {language}. Keep organisation names, programme names, "
         f"acronyms and [Source N] citation markers exactly as they appear."
     )
+
+
+def _log_retrieval_timings(timings, *, label: str, total_ms: float) -> None:
+    """Print the per-stage retrieval breakdown after retrieval completes.
+
+    Uses the EXISTING ``RetrievalTimings`` instrumentation
+    (src/retrieval/hybrid/pipeline.py) — no new measurement is introduced and
+    no retrieval behaviour is changed. Graph retrieval has no stage breakdown,
+    so callers pass ``timings=None`` and only the total is printed, correctly
+    labelled so graph work is never reported as Hybrid retrieval.
+    """
+    print(f"[retrieval] {label} stages")
+    if timings is not None:
+        print(f"[retrieval]   Embed query:   {timings.embed_query_ms:8.1f} ms")
+        print(f"[retrieval]   Dense (FAISS): {timings.dense_search_ms:8.1f} ms")
+        print(f"[retrieval]   BM25:          {timings.bm25_search_ms:8.1f} ms")
+        print(f"[retrieval]   RRF fusion:    {timings.rrf_fusion_ms:8.1f} ms")
+        print(f"[retrieval]   Rerank:        {timings.rerank_ms:8.1f} ms")
+    print(f"[retrieval]   Total:         {total_ms:8.1f} ms")
 
 
 def _retrieve_graph_results(query: str, top_k: int) -> list:
@@ -1584,6 +1699,13 @@ def chat_stream(request: ChatStreamRequest):
         # English is the INTERNAL retrieval language; the original query and
         # the response language travel separately.
         retrieval_query = qplan.retrieval_query
+        # RETRIEVAL uses the English-normalized query; GENERATION receives the
+        # user's ORIGINAL query so the model can see the language/style it was
+        # asked in. Passing the normalized English question here was why Hindi
+        # questions came back in English: the model saw an English question
+        # plus English evidence and followed that, outweighing the response-
+        # language hint appended to the system prompt.
+        generation_query = qplan.original_query or retrieval_query
         want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
         want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
         is_graph = route == ROUTE_GRAPH
@@ -1604,6 +1726,7 @@ def chat_stream(request: ChatStreamRequest):
                             "message": PHASE_LABELS["retrieving_graph"], "done": True})
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
+                _log_retrieval_timings(None, label="graph", total_ms=ret_latency)
             elif want_graph and want_hybrid:
                 # ── HYBRID + GRAPH: independent branches, run concurrently ──
                 # Neither branch consumes the other's output; both receive the
@@ -1639,8 +1762,6 @@ def chat_stream(request: ChatStreamRequest):
                         hybrid_results = []
                     graph_results = graph_future.result()
 
-                print(f"[retrieval] hybrid completed results={len(results)} "
-                      f"latency_ms={(time.perf_counter() - _t_hy) * 1000:.0f}")
                 yield _sse({"type": "status", "stage": "retrieving_documents",
                             "message": PHASE_LABELS["retrieving_documents"], "done": True})
                 yield _sse({"type": "status", "stage": "retrieving_graph",
@@ -1656,6 +1777,10 @@ def chat_stream(request: ChatStreamRequest):
                             "message": PHASE_LABELS["combining_evidence"], "done": True})
                 sources = _to_sources(results)
                 ret_latency = (time.perf_counter() - t_ret_start) * 1000
+                # hybrid stage breakdown + the combined wall time; graph work is
+                # timed separately by _retrieve_graph_results.
+                _log_retrieval_timings(
+                    timings, label="hybrid+graph", total_ms=ret_latency)
             else:
                 # ── HYBRID RAG path with live stage callbacks ──
                 stage_events: list[tuple[str, dict]] = []
@@ -1676,6 +1801,13 @@ def chat_stream(request: ChatStreamRequest):
                 )
                 # Task 3 (Deep): re-bond heading-like neighbor chunks
                 _maybe_enrich_deep_neighbors(plan, results)
+                # hybrid-ONLY stage breakdown. This branch defines both
+                # `timings` and `_t_hy`; the merged branch logs its own totals.
+                print(f"[retrieval] hybrid completed results={len(results)} "
+                      f"latency_ms={(time.perf_counter() - _t_hy) * 1000:.0f}")
+                _log_retrieval_timings(
+                    timings, label="hybrid",
+                    total_ms=(time.perf_counter() - _t_hy) * 1000)
                 for name, info in stage_events:
                     label = {
                         "embed": "Embed query", "dense": "Semantic search (dense)",
@@ -1701,7 +1833,7 @@ def chat_stream(request: ChatStreamRequest):
             # Only the hybrid-ONLY branch populates stage_events, which the
             # trace below reads; graph and merged routes skip it.
             if route == ROUTE_HYBRID:
-                admitted, adiag = _admission_diag(retrieval_query, results)
+                admitted, adiag = _admission_diag(generation_query, results)
                 # Runtime evidence trace (Bug-2 diagnostics). Reads:
                 #   CASE A  retrieved > admitted (budget) → correct Task-3
                 #           behavior; skipped/evidence_used tell you why.
@@ -1743,7 +1875,9 @@ def chat_stream(request: ChatStreamRequest):
             yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
 
             trace_payload = None
-            if not is_graph and timings is not None:
+            # Data-driven: any route that actually ran the Hybrid pipeline has
+            # stage timings; graph-only routes have none.
+            if timings is not None:
                 trace_payload = {
                     "embed_query_ms": round(timings.embed_query_ms, 2),
                     "dense_search_ms": round(timings.dense_search_ms, 2),
@@ -1803,7 +1937,7 @@ def chat_stream(request: ChatStreamRequest):
             ]
             # accumulate streamed text for the server-side grounding pass
             streamed_parts: list[str] = []
-            for ev in generator.generate_stream(retrieval_query, context):
+            for ev in generator.generate_stream(generation_query, context):
                 if ev["type"] == "tokens":
                     if not _streaming_logged:
                         print("[generation] streaming_started")
@@ -2014,11 +2148,18 @@ def health_ready():
         ok_llm = llm_client.check_health(api_key=_active_api_key())
     except Exception:  # noqa: BLE001
         ok_llm = False
+    # Readiness contract is UNCHANGED: index_loaded AND llm_healthy. Note
+    # ok_index is computed from pipeline._get() above, so it is already False
+    # until the pipeline finishes loading — a probe cannot report ready before
+    # initialisation completes. Warm-up state is exposed as an additive
+    # observability field, not a new gate.
     ready = ok_index and ok_llm
     return {
         "status": "ready" if ready else "not_ready",
         "index_loaded": ok_index,
         "llm_healthy": ok_llm,
+        "hybrid_warmup": _WARMUP_STATE["status"],
+        "hybrid_warmup_seconds": _WARMUP_STATE["seconds"],
         "provider": ACTIVE_CONFIG.get("provider"),
         "model": ACTIVE_CONFIG.get("model"),
         "app_mode": os.environ.get("APP_MODE", "serve"),

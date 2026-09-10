@@ -16,7 +16,7 @@ validated catalog in ``src.graphrag.schema`` (never from data).
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Optional, Sequence
 
 from src.graphrag.config import GraphConfig
 from src.graphrag.models import (
@@ -152,12 +152,88 @@ class Neo4jGraphStore(GraphStore):
               + " RETURN n ORDER BY toLower(n.name), n.key LIMIT $limit")
         return [self._node_view(r["n"]) for r in self._run_read(cy, **params)]
 
-    def _facts_where(self, key: str, rel: Optional[str], direction: str) -> list[FactView]:
-        pat = ("(a)-[r]->(b {key: $k})" if direction == "in"
-               else "(a {key: $k})-[r]->(b)")
-        relwhere = "WHERE type(r) = $rel" if rel else ""
+    #: Label disjunction that lets the planner use the per-label
+    #: ``<label>_key_unique`` constraints. An unlabelled ``(a {key: $k})``
+    #: pattern cannot use ANY of them, which is why PROFILE showed
+    #: ``AllNodesScan`` over 69,878 nodes for facts_out/facts_in/neighbors.
+    #: Built from NODE_LABELS so new labels are covered automatically; no new
+    #: (redundant) global index is introduced.
+    _KEYED_LABELS = " OR ".join(f"{{v}}:`{_ident(l)}`" for l in NODE_LABELS)
+
+    @classmethod
+    def _keyed(cls, var: str) -> str:
+        """`WHERE` fragment pinning ``var`` to an indexed label + key lookup."""
+        return "(" + cls._KEYED_LABELS.format(v=var) + ")"
+
+    def _facts_batch(
+        self, keys: Sequence[str], rel: Optional[str], direction: str
+    ) -> dict[str, list[FactView]]:
+        """Fetch facts for MANY keys in ONE round trip.
+
+        Replaces the N+1 pattern where GraphCapability issued a separate
+        facts_out/facts_in query per document (profiled: 1,761 calls / 65.4 s).
+        ``UNWIND`` keeps it a single query while the label disjunction keeps
+        each lookup an index seek.
+
+        Returns ``{queried_key: [FactView, ...]}`` — every requested key is
+        present (empty list when it has no matching edges), and each list keeps
+        the same ``fact_key`` ordering as the single-key path.
+        """
+        unique = sorted({k for k in keys if k})
+        if not unique:
+            return {}
+        if direction == "in":
+            pat = "(a)-[r]->(b)"
+            keyed, other = "b", "a"
+        else:
+            pat = "(a)-[r]->(b)"
+            keyed, other = "a", "b"
+        relwhere = " AND type(r) = $rel" if rel else ""
         rows = self._run_read(
-            f"MATCH {pat} {relwhere} "
+            "UNWIND $keys AS k "
+            f"MATCH {pat} "
+            f"WHERE {self._keyed(keyed)} AND {keyed}.key = k{relwhere} "
+            "RETURN k AS qk, r AS r, a.key AS src, b.key AS dst",
+            keys=unique, rel=rel,
+        )
+        grouped: dict[str, list[FactView]] = {k: [] for k in unique}
+        for row in rows:
+            grouped.setdefault(row["qk"], []).append(self._fact_view_row(row))
+        for k in grouped:
+            grouped[k] = sorted(grouped[k], key=lambda v: v.fact_key)
+        # `other` is unused beyond documenting the pattern's orientation.
+        del other
+        return grouped
+
+    @staticmethod
+    def _fact_view_row(row) -> FactView:
+        """Map one driver row to a FactView (shared by single + batch paths)."""
+        r = row["r"]
+        props = dict(r)
+        return FactView(
+            fact_key=props["fact_key"], rel=r.type,
+            src_key=row["src"], dst_key=row["dst"],
+            origin=props.get("origin", "deterministic"),
+            doc_count=int(props.get("doc_count", 0)),
+            sample_evidence=props.get("sample_evidence"),
+            first_seen_at=str(props.get("first_seen_at", "")),
+            updated_at=str(props.get("updated_at", "")),
+            source_field=props.get("source_field"),
+        )
+
+    def facts_for_keys(
+        self, keys: Sequence[str], *, direction: str = "out",
+        rel: Optional[str] = None,
+    ) -> dict[str, list[FactView]]:
+        """Batched facts lookup — see :meth:`_facts_batch`."""
+        return self._facts_batch(keys, rel, direction)
+
+    def _facts_where(self, key: str, rel: Optional[str], direction: str) -> list[FactView]:
+        keyed = "b" if direction == "in" else "a"
+        relwhere = " AND type(r) = $rel" if rel else ""
+        rows = self._run_read(
+            "MATCH (a)-[r]->(b) "
+            f"WHERE {self._keyed(keyed)} AND {keyed}.key = $k{relwhere} "
             "RETURN r AS r, a.key AS src, b.key AS dst",
             k=key, rel=rel,
         )
@@ -213,7 +289,9 @@ class Neo4jGraphStore(GraphStore):
         label_filter = ""
         params: dict = {"k": key, "depth": depth, "limit": limit}
         if rel:
-            label_filter += " AND ALL(r IN relationships(path) WHERE type(r) = $rel)"
+            # `r` is already the relationship LIST of the variable-length
+            # match; `relationships(path)` needed the dropped `path` binding.
+            label_filter += " AND ALL(x IN r WHERE type(x) = $rel)"
             params["rel"] = rel
         if labels:
             allowed = [l for l in labels if l in NODE_LABELS]
@@ -227,9 +305,13 @@ class Neo4jGraphStore(GraphStore):
         # Every data value (key, rel, labels) remains a bound parameter.
         params.pop("depth", None)
         rows = self._run_read(
-            f"MATCH path = (n {{key: $k}})-[r *1..{depth}]-(m) "
-            "WHERE m.key <> $k" + label_filter + " "
-            "WITH m, min(length(path)) AS d "
+            f"MATCH (n)-[r *1..{depth}]-(m) "
+            f"WHERE {self._keyed('n')} AND n.key = $k "
+            "AND m.key <> $k" + label_filter + " "
+            # `size(r)` is the hop count of the variable-length match — the
+            # same value the removed `length(path)` produced. The `path =`
+            # binding was dropped so the keyed endpoint can be an index seek.
+            "WITH m, min(size(r)) AS d "
             "RETURN m, d ORDER BY d, m.key LIMIT $limit",
             **params,
         )
@@ -249,9 +331,13 @@ class Neo4jGraphStore(GraphStore):
         if ls_term is not None:
             where.append("d.ls_term = $ls_term")
             params["ls_term"] = ls_term
+        # Seek the KEYED endpoint first (indexed), then expand to Documents.
+        # Previously `(n {key: $k})` was unlabelled, so the planner fell back to
+        # NodeByLabelScan over every :Document (PROFILE: 2,649 scanned).
         rows = self._run_read(
-            "MATCH (d:Document)-[r]->(n {key: $k}) "
-            "WHERE " + " AND ".join(where) + " "
+            "MATCH (d:Document)-[r]->(n) "
+            f"WHERE {self._keyed('n')} AND n.key = $k AND "
+            + " AND ".join(where) + " "
             "RETURN d ORDER BY d.key LIMIT $limit",
             **params,
         )

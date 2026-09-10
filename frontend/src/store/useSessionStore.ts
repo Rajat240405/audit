@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { ChatMessage, Session } from "@/types";
 
 interface SessionState {
@@ -26,6 +26,84 @@ function sessionTitle(firstMessage?: string): string {
   if (!firstMessage) return "New session";
   const t = firstMessage.replace(/\s+/g, " ").trim();
   return t.length > 48 ? `${t.slice(0, 48)}…` : t;
+}
+
+/**
+ * localStorage wrapper that survives QuotaExceededError.
+ *
+ * On overflow it retries with progressively fewer (oldest-first) sessions
+ * instead of throwing. The newest sessions — including the one in progress —
+ * are kept. Errors are never swallowed silently: each shed is reported once.
+ */
+const quotaSafeStorage: Storage = {
+  get length() {
+    return window.localStorage.length;
+  },
+  clear: () => window.localStorage.clear(),
+  key: (i: number) => window.localStorage.key(i),
+  removeItem: (k: string) => window.localStorage.removeItem(k),
+  getItem: (k: string) => window.localStorage.getItem(k),
+  setItem: (k: string, value: string) => {
+    try {
+      window.localStorage.setItem(k, value);
+      return;
+    } catch {
+      /* fall through to shedding */
+    }
+    let parsed: { state?: { sessions?: unknown[] } };
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return; // not our shape — give up rather than corrupt storage
+    }
+    const sessions = parsed?.state?.sessions;
+    if (!Array.isArray(sessions)) return;
+    // shed oldest-first (the array is newest-first)
+    for (let keep = Math.floor(sessions.length / 2); keep >= 1; keep = Math.floor(keep / 2)) {
+      parsed.state!.sessions = sessions.slice(0, keep);
+      try {
+        window.localStorage.setItem(k, JSON.stringify(parsed));
+        console.warn(
+          `[sessions] storage quota reached — kept the ${keep} most recent session(s).`
+        );
+        return;
+      } catch {
+        /* keep shedding */
+      }
+    }
+    console.warn("[sessions] storage quota reached — session history not persisted.");
+  },
+};
+
+/** Sessions kept in localStorage. Older ones drop out of History. */
+export const MAX_PERSISTED_SESSIONS = 30;
+
+/**
+ * Strip transient/reconstructible payloads before persisting.
+ *
+ * `incois-sessions` previously persisted the WHOLE store, including every
+ * message's `sources` — and each SourceItem carries the full `question` and
+ * `answer` text of a parliamentary document (thousands of characters, up to
+ * ~430 KB for the largest in this corpus) plus per-source graph provenance.
+ * A handful of turns therefore blew the ~5 MB origin quota:
+ *
+ *   Failed to execute 'setItem' … 'incois-sessions' exceeded the quota.
+ *
+ * What is preserved: the conversation itself (role/content/timestamps), titles,
+ * pinning and ordering — i.e. everything History needs to restore a session.
+ *
+ * What is dropped: `sources`, `trace` and `meta`. These are per-request
+ * artefacts of a live answer; the evidence panel, RAG-pipeline trace and
+ * grounding are all rebuilt from the next request. Dropping them cannot lose
+ * user-authored content.
+ */
+function persistableMessage(m: ChatMessage): ChatMessage {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    createdAt: m.createdAt,
+  };
 }
 
 export const useSessionStore = create<SessionState>()(
@@ -98,6 +176,20 @@ export const useSessionStore = create<SessionState>()(
     }),
     {
       name: "incois-sessions",
+      // Graceful recovery for state written BEFORE partialize existed (and
+      // for any future quota pressure): drop the oldest sessions and retry
+      // rather than throwing, so a full quota can never break the app or
+      // silently lose the current conversation.
+      storage: createJSONStorage(() => quotaSafeStorage),
+      // Persist only what History needs — see persistableMessage(). Also cap
+      // the number of sessions so storage cannot grow without bound.
+      partialize: (state) => ({
+        sessions: state.sessions.slice(0, MAX_PERSISTED_SESSIONS).map((s) => ({
+          ...s,
+          messages: s.messages.map(persistableMessage),
+        })),
+        activeSessionId: state.activeSessionId,
+      }),
       // App startup: DO NOT resume the previous chat. Create a fresh empty
       // session and make it active (old sessions stay in History). Previous
       // sessions are never auto-loaded.

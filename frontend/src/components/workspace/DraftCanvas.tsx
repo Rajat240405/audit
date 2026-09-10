@@ -2,6 +2,7 @@ import { useRef, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useDraftStore } from "@/store/useDraftStore";
+import { FactVerificationPanel } from "./FactVerificationPanel";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
@@ -47,14 +48,17 @@ export function DraftCanvas() {
     const report = buildGroundingReport(c, sources);
     useDraftStore.setState({ grounding: report });
 
+    // The claim list is shown in the persistent panel below; the toast is
+    // supplementary feedback and intentionally carries only the summary.
+    setFactsOpen(true);
+
     const unverified = report.filter((r) => !r.found);
     if (unverified.length === 0) {
       pushToast("success", "Cross-verification complete — all claims grounded in sources.");
     } else {
-      const claims = unverified.map((r) => `• ${r.text}`).join("\n");
       pushToast(
         "error",
-        `Cross-verification: ${unverified.length} claim(s) not found in sources:\n${claims}`
+        `Cross-verification: ${unverified.length} claim(s) not found in sources.`
       );
     }
   };
@@ -62,6 +66,9 @@ export function DraftCanvas() {
   // Direct manual editing of the canvas (no AI). On save the content is set
   // in-place and the active session's last assistant message is updated so
   // the sidebar transcript matches.
+  // Cross-Verify Facts panel visibility. Persists until the user closes it —
+  // the toast is supplementary feedback only.
+  const [factsOpen, setFactsOpen] = useState(false);
   const [editingText, setEditingText] = useState<string | null>(null);
   const startEdit = () => setEditingText(content);
   const cancelEdit = () => setEditingText(null);
@@ -232,6 +239,10 @@ export function DraftCanvas() {
       )}
 
       {/* Docked editing tools */}
+      {factsOpen && (
+        <FactVerificationPanel onClose={() => setFactsOpen(false)} />
+      )}
+
       <div className="space-y-3 rounded-b-lg border border-t-0 border-border bg-surface p-3 shadow-sm">
         <Toolbar editing={editing} />
         <div className="flex gap-3">

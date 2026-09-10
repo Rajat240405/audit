@@ -114,6 +114,19 @@ class GraphStore(ABC):
     def facts_in(self, key: str, rel: Optional[str] = None) -> list[FactView]:
         """Relationships TO the node (optionally filtered by type)."""
 
+    def facts_for_keys(
+        self, keys: "Iterable[str]", *, direction: str = "out",
+        rel: Optional[str] = None,
+    ) -> dict[str, list[FactView]]:
+        """Batched :meth:`facts_out` / :meth:`facts_in` for MANY keys.
+
+        Returns ``{key: [FactView, ...]}`` with every requested key present.
+        Backends may override with a single round trip; this default preserves
+        behaviour for any store that does not.
+        """
+        fetch = self.facts_in if direction == "in" else self.facts_out
+        return {k: fetch(k, rel) for k in dict.fromkeys(k for k in keys if k)}
+
     @abstractmethod
     def neighbors(self, key: str, *, depth: int = 1, rel: Optional[str] = None,
                   labels: Optional[Iterable[str]] = None,

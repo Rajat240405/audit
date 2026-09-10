@@ -833,16 +833,45 @@ _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 
 
-def _drain_inline_thinking(buf: str) -> tuple[List[Dict[str, str]], str]:
+def _drain_inline_thinking(
+    buf: str, *, in_thinking: bool = False
+) -> tuple[List[Dict[str, str]], str, bool]:
     """Split buffered content into reasoning/tokens events.
 
-    Returns ``(events, remainder)`` where ``remainder`` holds an unterminated
-    think-block or a partial ``<think>`` tag tail (deferred until more deltas
-    arrive). Closed ``<think>…</think>`` blocks become ``reasoning`` events;
-    everything else becomes ``tokens`` events in original order.
+    Returns ``(events, remainder, in_thinking)``. ``remainder`` holds an
+    unterminated think-block or a partial ``<think>`` tag tail (deferred until
+    more deltas arrive). Closed ``<think>…</think>`` blocks become ``reasoning``
+    events; everything else becomes ``tokens`` events in original order.
+
+    ``in_thinking`` carries the parser across deltas AND across the
+    reasoning-channel boundary. When a server with a reasoning parser exhausts
+    ``thinking_token_budget`` mid-thought it stops populating
+    ``reasoning_content`` and flushes the CONTINUATION into ``content`` with NO
+    opening ``<think>`` tag. Without this flag that continuation looks like
+    answer text and lands in the drafting canvas (observed: "Need answer in
+    Hindi. Need keep organization names exact."). Starting the scan already
+    inside a think block keeps it classified as reasoning until a
+    ``</think>`` (or the end of the stream) is seen.
     """
     events: List[Dict[str, str]] = []
     out = buf
+    if in_thinking:
+        # Already inside reasoning: everything up to a close tag is reasoning.
+        close_i = out.find(_THINK_CLOSE)
+        if close_i < 0:
+            # Hold back a possible partial "</think>" tail split across deltas.
+            hold = 0
+            for n in range(min(len(out), len(_THINK_CLOSE) - 1), 0, -1):
+                if _THINK_CLOSE.startswith(out[-n:]):
+                    hold = n
+                    break
+            emit = out[:-hold] if hold else out
+            if emit:
+                events.append({"type": "reasoning", "text": emit})
+            return events, (out[-hold:] if hold else ""), True
+        if close_i:
+            events.append({"type": "reasoning", "text": out[:close_i]})
+        out = out[close_i + len(_THINK_CLOSE):]
     while True:
         open_i = out.find(_THINK_OPEN)
         if open_i < 0:
@@ -856,14 +885,14 @@ def _drain_inline_thinking(buf: str) -> tuple[List[Dict[str, str]], str]:
             emit = out[:-hold] if hold else out
             if emit:
                 events.append({"type": "tokens", "text": emit})
-            return events, (out[-hold:] if hold else "")
+            return events, (out[-hold:] if hold else ""), False
         close_i = out.find(_THINK_CLOSE, open_i + len(_THINK_OPEN))
         if close_i < 0:
             # Think block still open — emit the answer text before it, defer
             # the in-progress thinking until its close tag arrives.
             if open_i:
                 events.append({"type": "tokens", "text": out[:open_i]})
-            return events, out[open_i:]
+            return events, out[open_i:], False
         if open_i:
             events.append({"type": "tokens", "text": out[:open_i]})
         events.append({"type": "reasoning", "text": out[open_i + len(_THINK_OPEN):close_i]})
@@ -1044,6 +1073,12 @@ class OpenAICompatibleProvider(BaseProvider):
         body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=True, think=think, think_mode=think_mode)
         buf = ""  # content-side buffer for inline <think> extraction (shape 4)
+        # True while the model is mid-thought. Set when the server streams on
+        # the reasoning channel, so that if `thinking_token_budget` truncates
+        # and the continuation switches to `content` WITHOUT a <think> tag, it
+        # is still classified as reasoning and never reaches the canvas.
+        in_thinking = False
+        saw_reasoning_channel = False
         with httpx.Client(timeout=timeout_seconds) as client:
             with client.stream("POST", self._completions_url(base_url), json=body) as resp:
                 resp.raise_for_status()
@@ -1066,11 +1101,18 @@ class OpenAICompatibleProvider(BaseProvider):
                         or ""
                     )
                     if reasoning:
+                        saw_reasoning_channel = True
                         yield {"type": "reasoning", "text": reasoning}
                     content = delta.get("content") or ""
                     if content:
+                        # in_thinking carries an UNTERMINATED <think> block
+                        # across deltas. It is tag-driven only: a server that
+                        # finished reasoning normally starts `content` with the
+                        # real answer, which must stay answer text.
                         buf += content
-                        events, buf = _drain_inline_thinking(buf)
+                        events, buf, in_thinking = _drain_inline_thinking(
+                            buf, in_thinking=in_thinking
+                        )
                         for ev in events:
                             if ev["type"] == "tokens":
                                 if not answered:
