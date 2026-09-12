@@ -54,6 +54,32 @@ _FIGURE_RE = re.compile(
 _NUM_WORD_RE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s+[A-Z][A-Za-z-]+(?:\s+[A-Z][A-Za-z-]+){0,3}\b"
 )
+# Bare numerics inside a MARKDOWN TABLE CELL, e.g. "| Andhra Pradesh | 9 |".
+# Deliberately scoped to table cells: `_FIGURE_RE` requires a unit suffix, so
+# plain counts in tabular answers were never extracted and therefore never
+# verified. Restricting to cells avoids the false-positive flood that a global
+# bare-integer pattern would cause in ordinary prose (dates, list markers,
+# section numbers, "one of 3 centres", …).
+_TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$", re.MULTILINE)
+# a delimiter row is only dashes/colons/pipes/spaces — never a data row
+_TABLE_DELIM_RE = re.compile(r"^\s*\|[\s:\-|]+\|\s*$")
+_BARE_NUM_RE = re.compile(r"^\d{1,7}(?:[.,]\d+)?$")
+
+
+def _table_cell_numbers(answer: str) -> list[str]:
+    """Bare numeric values appearing in markdown table DATA cells."""
+    out: list[str] = []
+    for m in _TABLE_ROW_RE.finditer(answer):
+        row = m.group(0)
+        if _TABLE_DELIM_RE.match(row):
+            continue  # delimiter row: |---|---:|
+        for cell in row.strip().strip("|").split("|"):
+            tok = cell.strip()
+            if tok and _BARE_NUM_RE.match(tok):
+                out.append(tok)
+    return out
+
+
 _QUOTE_RE = re.compile(r'"([^"\\]{6,80})"')
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,8}\b")
 _ACRONYM_PLURAL_RE = re.compile(r"\b[A-Z]{2,7}[a-z]{1,2}\b")
@@ -67,6 +93,8 @@ def extract_claims(answer: str, max_claims: int = 12) -> list[str]:
         claims.append(m.group(0).strip())
     for m in _NUM_WORD_RE.finditer(answer):
         claims.append(m.group(0).strip())
+    # bare counts in table cells (units absent) — see _table_cell_numbers
+    claims.extend(_table_cell_numbers(answer))
     for m in _QUOTE_RE.finditer(answer):
         claims.append(m.group(1).strip())
     for m in _NAMED_ABBR_RE.finditer(answer):

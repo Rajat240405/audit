@@ -1,4 +1,4 @@
-export type { ExecutionMode, RetrievalMode, DraftStyle } from "./api";
+export type { ExecutionMode, ThinkingEffort, RetrievalMode, DraftStyle } from "./api";
 export type {
   SourceItem,
   GraphAnchor,
@@ -9,6 +9,7 @@ export type {
   Session,
   ChatMessage,
   GroundingClaim,
+  InvestigationResult,
   ServerStatus,
   GraphBuildStatus,
   GraphBuildState,

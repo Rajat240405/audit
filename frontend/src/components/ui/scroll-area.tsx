@@ -14,7 +14,9 @@ export function ScrollArea({
       </ScrollAreaPrimitive.Viewport>
       <ScrollAreaPrimitive.Scrollbar
         orientation="vertical"
-        className="flex touch-none select-none p-0.5 transition-colors"
+        // w-2 is required: without an explicit width the scrollbar renders
+        // zero-width and the user gets no visible affordance.
+        className="flex w-2 touch-none select-none p-0.5 transition-colors hover:bg-surface-2"
       >
         <ScrollAreaPrimitive.Thumb className="relative flex-1 rounded-full bg-border" />
       </ScrollAreaPrimitive.Scrollbar>

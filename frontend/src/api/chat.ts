@@ -6,11 +6,14 @@ import type {
   RetrievalMode,
   RetrievalTrace,
   SourceItem,
+  ThinkingEffort,
+  InvestigationResult,
 } from "@/types";
 
 export interface ChatStreamOptions {
   message: string;
   mode: ExecutionMode;
+  thinkingEffort: ThinkingEffort;
   retrievalMode: RetrievalMode;
   draftStyle?: DraftStyle | string;
   docTypes?: string[];
@@ -28,6 +31,7 @@ export function streamChat(opts: ChatStreamOptions): void {
     {
       message: opts.message,
       mode: opts.mode,
+      reasoning_effort: opts.thinkingEffort,
       retrieval_mode: opts.retrievalMode,
       draft_style: opts.draftStyle && opts.draftStyle !== "default" ? opts.draftStyle : undefined,
       doc_types: opts.docTypes && opts.docTypes.length ? opts.docTypes : undefined,
@@ -102,4 +106,22 @@ export function sourcesOf(msg: ChatMessage): SourceItem[] {
 
 export function traceOf(msg: ChatMessage): RetrievalTrace | undefined {
   return msg.trace;
+}
+
+/** Targeted investigation of ONE suspicious fact. Report-only. */
+export async function investigateClaim(opts: {
+  claim: string;
+  claimId: string;
+  messageId: string;
+  sources: SourceItem[];
+}): Promise<InvestigationResult> {
+  return apiFetch("/api/investigate", {
+    method: "POST",
+    body: JSON.stringify({
+      claim: opts.claim,
+      claim_id: opts.claimId,
+      message_id: opts.messageId,
+      sources: opts.sources,
+    }),
+  });
 }

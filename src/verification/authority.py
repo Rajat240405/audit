@@ -29,6 +29,11 @@ import re
 from typing import Optional
 
 from src.verification import text_support as ts
+from src.verification.markdown_structure import (
+    remove_list_and_heading_for_claims,
+    remove_table_rows_for_claims,
+    validate_rewrite,
+)
 from src.verification.contract import (
     MODE_GRAPH,
     MODE_HYBRID,
@@ -94,7 +99,7 @@ class VerificationAuthority:
 
         # 3) LLM judge — full depth only, only claims the regex missed
         if depth == "full" and any(not g.get("found") for g in grounding):
-            grounding = self._judge_claims(grounding, sources, client)
+            grounding = self.judge_claims(grounding, sources, client)
             report.claims = self._claims_from_grounding(grounding)
 
         # 4) rewrite (full depth) — remove judge-rejected claims
@@ -104,7 +109,7 @@ class VerificationAuthority:
             and str(c.note).startswith("rejected by LLM judge")
         ]
         if depth == "full" and rejected:
-            rewrite = self._rewrite_answer(answer, rejected, sources, client)
+            rewrite = self.rewrite_answer(answer, rejected, sources, client)
             if rewrite and rewrite.strip():
                 report.final_text = rewrite
                 report.judge_rewritten = True
@@ -154,7 +159,7 @@ class VerificationAuthority:
             grounding = ts.grounding_report(answer, sources)
             _filtered, citation_dropped = ts.apply_citation_filter(answer, sources)
             if depth == "full" and grounding and any(not c.get("found") for c in grounding):
-                grounding = self._judge_claims(grounding, sources, client)
+                grounding = self.judge_claims(grounding, sources, client)
             rejected_claims = [
                 c["text"] for c in grounding
                 if (not c.get("found"))
@@ -163,7 +168,7 @@ class VerificationAuthority:
             final_text = answer
             judge_rewritten = False
             if depth == "full" and rejected_claims and answer.strip():
-                rewrite = self._rewrite_answer(answer, rejected_claims, sources, client)
+                rewrite = self.rewrite_answer(answer, rejected_claims, sources, client)
                 if rewrite and rewrite.strip():
                     final_text = rewrite
                     judge_rewritten = True
@@ -204,13 +209,18 @@ class VerificationAuthority:
                 method=method, note=g.get("note", "")))
         return out
 
-    def _judge_claims(self, claims: list[dict], sources: list[dict],
-                      client) -> list[dict]:
+    def judge_claims(self, claims: list[dict], sources: list[dict],
+                     client=None) -> list[dict]:
         """Verify flagged claims with the LLM judge against the sources.
 
         Returns the claims list with updated ``found`` / ``source`` / ``note``.
         On any failure (LLM offline, parse error) returns the original claims
-        unchanged — the regex verdicts remain authoritative."""
+        unchanged — the regex verdicts remain authoritative.
+
+        Public API (WS3): the server's ``_llm_judge_claims`` and both engine
+        entry points route here, so there is exactly ONE judge implementation.
+        ``client`` defaults to the injected constructor client."""
+        client = client or self._llm
         if client is None:
             return claims  # no LLM available: regex verdicts stand
         if not claims or not sources:
@@ -314,13 +324,55 @@ class VerificationAuthority:
             print(traceback.format_exc(limit=3))
             return claims
 
-    def _rewrite_answer(self, answer: str, rejected_claims: list[str],
-                        sources: list[dict], client) -> str:
+    # Backward-compatibility alias for the pre-WS3 private name. Thin
+    # delegation — NOT a second implementation.
+    def _judge_claims(self, claims: list[dict], sources: list[dict],
+                      client=None) -> list[dict]:
+        return self.judge_claims(claims, sources, client)
+
+    def rewrite_answer(self, answer: str, rejected_claims: list[str],
+                       sources: list[dict], client=None) -> str:
         """LLM rewrite of the answer WITHOUT the judge-rejected claims.
 
-        Raises on failure — the caller falls back to the original."""
+        Public API (WS3): the server's ``_llm_rewrite_answer`` delegates here.
+        ``client`` defaults to the injected constructor client. Raises on
+        failure — the caller falls back to the original."""
+        client = client or self._llm
         if client is None:
             raise RuntimeError("no LLM client for rewrite")
+
+        # STEP 1 — deterministic, structure-aware removal FIRST. Claims that
+        # map unambiguously to a single markdown table row are dropped without
+        # involving the LLM at all, so a table can never be regenerated (and
+        # corrupted) just to delete one row. Header/delimiter rows are never
+        # candidates; ambiguous claims fall through to the LLM step.
+        working, applied, remaining = remove_table_rows_for_claims(
+            answer, rejected_claims)
+        # Claims the table pass could not place are offered to the list /
+        # heading pass, which applies the same one-unit-only rule. Its
+        # `allowed` signatures are what let validate_rewrite accept a
+        # DELIBERATE heading removal while still rejecting an LLM that
+        # silently flattens one.
+        allowed_removals: set[tuple] = set()
+        if remaining:
+            lr = remove_list_and_heading_for_claims(working, remaining)
+            if lr.applied:
+                working = lr.text
+                applied = list(applied) + list(lr.applied)
+                allowed_removals |= set(lr.allowed)
+            remaining = list(lr.unmapped)
+        if applied and not remaining:
+            ok, why = validate_rewrite(answer, working,
+                                       allowed_removals=allowed_removals)
+            if ok:
+                return working.strip()
+            # deterministic edit somehow broke structure — signal "no safe
+            # rewrite" ("" ) so the caller keeps the original verbatim and
+            # does NOT report judge_rewritten.
+            print(f"[verify] deterministic removal rejected: {why}")
+            return ""
+        rejected_claims = remaining or rejected_claims
+
         src_blocks = []
         for i, s in enumerate(sources[:6], start=1):
             ans = (s.get("answer") or "")[:1500]
@@ -333,7 +385,7 @@ class VerificationAuthority:
             "claims that were REJECTED because they are NOT supported by the source "
             "documents.\n\n"
             f"REJECTED CLAIMS:\n{rejected_lines}\n\n"
-            f"DRAFT ANSWER:\n{answer}\n\n"
+            f"DRAFT ANSWER:\n{working}\n\n"
             f"SOURCES:\n{src_text}\n\n"
             "Rewrite the draft answer so that it:\n"
             "1. Removes every statement based on a rejected claim.\n"
@@ -352,7 +404,26 @@ class VerificationAuthority:
                 "remove unsupported claims. Never invent facts."
             ),
         )
-        return (resp.text or "").strip()
+        candidate = (resp.text or "").strip()
+
+        # STEP 3 — post-condition. A prompt asking the model to "preserve
+        # markdown" is not a guarantee; this is. If the rewrite reshaped a
+        # table, touched fenced code, or otherwise changed block structure
+        # beyond dropping whole blocks, DISCARD it and keep the original —
+        # a slightly over-inclusive answer beats a corrupted one.
+        ok, why = validate_rewrite(working, candidate)
+        if not ok:
+            print(f"[verify] rewrite discarded (structure): {why}")
+            # "" = no safe rewrite. Returning `working` here would look like a
+            # successful rewrite to the caller and flip judge_rewritten, even
+            # though the text is unchanged.
+            return "" if working.strip() == answer.strip() else working.strip()
+        return candidate
+
+    # Backward-compatibility alias for the pre-WS3 private name.
+    def _rewrite_answer(self, answer: str, rejected_claims: list[str],
+                        sources: list[dict], client=None) -> str:
+        return self.rewrite_answer(answer, rejected_claims, sources, client)
 
     # ── graph integrity (WS2 provenance re-verified here) ─────────────────
 
@@ -373,6 +444,13 @@ class VerificationAuthority:
         for item in evidence.items:
             if item.mode != MODE_GRAPH or item.graph is None:
                 continue
+            # A cited fact whose provenance could NOT be resolved through the
+            # store is missing — never silently ignored, never trusted.
+            resolved = {f.get("fact_key") for f in item.graph.facts}
+            for fk in item.graph.fact_keys:
+                if fk not in resolved:
+                    problems.append({"item": item.doc_id, "fact_key": fk,
+                                     "issue": "fact_missing"})
             for fact in item.graph.facts:
                 fk = fact.get("fact_key")
                 if not fk:

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { streamChat, verifyAnswer } from "@/api/chat";
 import { useAppStore } from "@/store/useAppStore";
 import { showsHybridStages } from "@/lib/retrievalMode";
-import { useDraftStore } from "@/store/useDraftStore";
+import { useDraftStore, deepVerifyBlocksNewQuery } from "@/store/useDraftStore";
+import type { DeepVerifyStatus } from "@/store/useDraftStore";
+import { clearAnswerScopedPanels } from "@/lib/sessionTransitions";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useToastStore } from "@/store/useToastStore";
@@ -58,6 +60,20 @@ export function useChatStream() {
     (question: string) => {
       const app = useAppStore.getState();
       const sessions = useSessionStore.getState();
+
+      // Deep-mode verification gate: the user explicitly asked to WAIT for the
+      // previous answer's verification, so a new query would supersede (and
+      // silently discard) a result they asked to see. Only an explicit "Wait"
+      // blocks — light verification never sets this state, and Deep with no
+      // choice made stays non-blocking.
+      if (deepVerifyBlocksNewQuery(useDraftStore.getState().deepVerify)) {
+        useToastStore.getState().pushSticky(
+          "info",
+          "Deep verification is still running. Wait for it to finish, or choose “Start anyway” to continue now."
+        );
+        return;
+      }
+
       let sessionId = sessions.activeSessionId;
       if (!sessionId) {
         sessionId = sessions.createSession();
@@ -87,6 +103,9 @@ export function useChatStream() {
 
       const draft = useDraftStore.getState();
       draft.startStream();
+      // A genuinely new query: drop the previous answer's transient panels
+      // (Cross-Verified Facts + its investigations, Edit-with-AI comparison).
+      clearAnswerScopedPanels();
 
       // Model Activity: reset + record the question so the panel shows live
       // retrieval → thinking → answer data. The panel is NOT auto-opened on
@@ -103,6 +122,7 @@ export function useChatStream() {
       streamChat({
         message: question,
         mode: app.mode,
+        thinkingEffort: app.thinkingEffort,
         retrievalMode: app.retrievalMode,
         draftStyle: app.draftStyle,
         // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)
@@ -237,12 +257,49 @@ export function useChatStream() {
               // and stage instead.
               const baselineContent = finalContent;
               const baselineSources = finalSources;
+              // IDENTITY of the message this verification belongs to. verify is
+              // deliberately NOT cancelled when a new query starts (it has no
+              // AbortSignal), so a late completion from Query N can otherwise
+              // land on Query N+1. Content equality cannot distinguish the two
+              // cases: startStream() clears content/sources, so a new query
+              // ALWAYS looks like "the user edited the draft". The identity is
+              // the only reliable discriminator.
+              const verifySessionId = sessionId;
+              const verifyMessageId = assistantId;
+              const isStillLive = () => {
+                const d = useDraftStore.getState();
+                return (
+                  d.activeSessionId === verifySessionId &&
+                  d.activeMessageId === verifyMessageId
+                );
+              };
+              const isDeep = useAppStore.getState().mode === "deep";
+              // Deep answers surface a "Verifying answer…" state with a
+              // Wait / Start-anyway choice, because a full-depth judge pass can
+              // still rewrite the answer. Light verification stays silent and
+              // non-blocking — it never enters this state.
+              if (isDeep) {
+                useDraftStore
+                  .getState()
+                  .beginDeepVerify(verifySessionId, verifyMessageId);
+              }
+              let verifyStatus: DeepVerifyStatus = "done";
               verifyAnswer(
                 baselineContent,
                 baselineSources,
-                useAppStore.getState().mode === "deep" ? "full" : "light"
+                isDeep ? "full" : "light"
               )
                 .then((res) => {
+                  // STALE GUARD: a newer query owns the draft/canvas now, so
+                  // discard this result ENTIRELY — no grounding, no canvas, no
+                  // session write, no toast.
+                  if (!isStillLive()) {
+                    console.info(
+                      "[verify] discarded stale result for message",
+                      verifyMessageId
+                    );
+                    return;
+                  }
                   if (res.error) {
                     useToastStore.getState().pushSticky("error", `Verification failed: ${res.error}`);
                     return;
@@ -282,13 +339,27 @@ export function useChatStream() {
                       })),
                     });
                   }
-                  sessions.updateMessage(sessionId, assistantId, {
+                  sessions.updateMessage(verifySessionId, verifyMessageId, {
                     content: useDraftStore.getState().content,
                   });
                 })
                 .catch((err) => {
                   console.warn("[verify] error:", err);
+                  verifyStatus = "error";
+                  // Same identity gate: a failure from a superseded query must
+                  // not surface a toast over the new one.
+                  if (!isStillLive()) return;
                   useToastStore.getState().pushSticky("error", "Verification failed unexpectedly");
+                })
+                .finally(() => {
+                  // Identity-gated: if a newer query already superseded this
+                  // answer, settleDeepVerify is a no-op and the new banner is
+                  // left alone.
+                  if (isDeep) {
+                    useDraftStore
+                      .getState()
+                      .settleDeepVerify(verifySessionId, verifyMessageId, verifyStatus);
+                  }
                 });
             }
           },

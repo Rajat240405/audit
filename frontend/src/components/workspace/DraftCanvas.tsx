@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useDraftStore } from "@/store/useDraftStore";
 import { FactVerificationPanel } from "./FactVerificationPanel";
+import { DeepVerifyBanner } from "./DeepVerifyBanner";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
@@ -26,6 +27,9 @@ export function DraftCanvas() {
   const streamingText = useDraftStore((s) => s.streamingText);
   const isStreaming = useDraftStore((s) => s.isStreaming);
   const grounding = useDraftStore((s) => s.grounding);
+  // Lifted into the store so a NEW QUERY can close it (answer-scoped state).
+  const factsOpen = useDraftStore((s) => s.factsOpen);
+  const setFactsOpen = useDraftStore((s) => s.setFactsOpen);
   const { edit, pendingEdit, accept, reject } = useEditDraft();
   const editing = useEditStore((s) => s.editing);
   const pushToast = useToastStore((s) => s.push);
@@ -66,9 +70,6 @@ export function DraftCanvas() {
   // Direct manual editing of the canvas (no AI). On save the content is set
   // in-place and the active session's last assistant message is updated so
   // the sidebar transcript matches.
-  // Cross-Verify Facts panel visibility. Persists until the user closes it —
-  // the toast is supplementary feedback only.
-  const [factsOpen, setFactsOpen] = useState(false);
   const [editingText, setEditingText] = useState<string | null>(null);
   const startEdit = () => setEditingText(content);
   const cancelEdit = () => setEditingText(null);
@@ -237,6 +238,9 @@ export function DraftCanvas() {
           </div>
         </div>
       )}
+
+      {/* Deep-mode verification progress — Wait / Start anyway */}
+      <DeepVerifyBanner />
 
       {/* Docked editing tools */}
       {factsOpen && (

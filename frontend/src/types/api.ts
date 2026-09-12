@@ -1,6 +1,8 @@
 // Shared domain types for the INCOIS Audit Pro workstation.
 
 export type ExecutionMode = "fast" | "deep";
+/** Qwen reasoning depth — Deep mode only. `high` is out of scope. */
+export type ThinkingEffort = "low" | "medium" | "xhigh";
 export type RetrievalMode = "auto" | "hybrid" | "graph" | "hybrid_and_graph";
 export type DraftStyle =
   | "formal"
@@ -97,6 +99,19 @@ export interface GroundingClaim {
   text: string;
   found: boolean;
   source?: string;
+  /** Stable identity (see lib/claimIdentity). Absent on legacy payloads. */
+  claim_id?: string;
+}
+
+/** Result of a targeted single-fact investigation. REPORT-ONLY. */
+export interface InvestigationResult {
+  claim_id: string;
+  message_id: string;
+  claim: string;
+  status: "supported" | "unsupported" | "error";
+  rationale?: string;
+  sources?: string[];
+  error?: string;
 }
 
 export interface ServerStatus {

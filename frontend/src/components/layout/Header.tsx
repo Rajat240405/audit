@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Moon, Sun, Brain, Settings as SettingsIcon } from "lucide-react";
 import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
-import type { RetrievalMode } from "@/types";
+import type { RetrievalMode, ThinkingEffort } from "@/types";
 import { SourceFilter } from "./SourceFilter";
 import { useThemeStore } from "@/store/useThemeStore";
 import { useActivityStore } from "@/store/useActivityStore";
@@ -33,6 +33,13 @@ const DRAFT_STYLES = [
 ];
 
 /** Retrieval modes offered in the header pill (Auto is the default). */
+/** Qwen reasoning depth — Deep only. `high` is intentionally not offered. */
+const THINKING_EFFORTS: ReadonlyArray<{ value: ThinkingEffort; label: string }> = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "xhigh", label: "XHigh" },
+];
+
 const RETRIEVAL_MODES: ReadonlyArray<{
   value: RetrievalMode;
   label: string;
@@ -177,6 +184,31 @@ export function Header() {
             ))}
           </SelectContent>
         </Select>
+
+        {/* Thinking effort — Deep only. Fast disables thinking entirely, so
+            there is nothing to steer and the selector is hidden. */}
+        {app.mode === "deep" && (
+          <div
+            data-testid="thinking-effort"
+            className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold"
+          >
+            {THINKING_EFFORTS.map((t) => (
+              <button
+                key={t.value}
+                onClick={() => app.setThinkingEffort(t.value)}
+                className={cn(
+                  "rounded-full px-2.5 py-1 transition-colors",
+                  app.thinkingEffort === t.value
+                    ? "bg-foreground text-background"
+                    : "text-muted hover:text-foreground"
+                )}
+                title={`Thinking: ${t.label}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Retrieval mode — Auto routes via the query agent; the other three
             are manual selections that skip routing entirely. */}

@@ -164,6 +164,23 @@ def _current_serving_limit(prov: str) -> int | None:
     return _LAST_SERVING_LIMIT
 
 
+#: Reasoning-effort values the deployed chat template accepts. Sourced from
+#: the model's documented efforts; `high` is deliberately NOT offered.
+REASONING_EFFORTS = ("low", "medium", "xhigh")
+DEFAULT_REASONING_EFFORT = "medium"
+#: Internal (non-user-facing) LLM calls always use the cheapest effort: they
+#: are structured/mechanical and extra reasoning only adds latency.
+INTERNAL_REASONING_EFFORT = "low"
+
+
+def normalize_reasoning_effort(value: object) -> str:
+    """Coerce a request value to a supported effort (default medium)."""
+    if not isinstance(value, str):
+        return DEFAULT_REASONING_EFFORT
+    token = value.strip().lower()
+    return token if token in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
+
+
 def _apply_execution_plan(family, prov: str, exec_mode: str):
     """Resolve the execution policy for (family, mode, provider) ONCE and bind
     the plan to the shared client/generator/config state. This is the ONLY
@@ -194,6 +211,9 @@ def _apply_execution_plan(family, prov: str, exec_mode: str):
     # default and never receive an invented control. plan.thinking stays the
     # mode request for reasoning-display gating.
     llm_client.think = plan.wire_think
+    # Reasoning depth is bound per request by the caller (Deep only); cleared
+    # here so a Fast request can never inherit a previous Deep effort.
+    llm_client.reasoning_effort = None
     ACTIVE_CONFIG["verify_depth"] = plan.verify_depth
     ACTIVE_CONFIG["model"] = resolved_model
     # Task 3: attach the resolved plan — the generator switches from legacy
@@ -650,6 +670,8 @@ class ProviderSwitchRequest(BaseModel):
 class ChatStreamRequest(BaseModel):
     message: str
     mode: str = "fast"            # Execution Mode: "fast" or "deep"
+    # Qwen reasoning depth, Deep mode ONLY (low|medium|xhigh). Ignored in Fast.
+    reasoning_effort: str = "medium"
     retrieval_mode: str = "auto"  # auto | hybrid | graph | hybrid_and_graph
     top_k: int = 5
     draft_style: str | None = None  # e.g. formal / concise / executive
@@ -1044,6 +1066,13 @@ def _chat_endpoint_body(request: ChatRequest):
 
     # Resolve execution parameters through the execution policy (single source)
     plan, resolved_model = _apply_execution_plan(family, ACTIVE_CONFIG["provider"], exec_mode)
+    # Deep-only: the user's Thinking selection. Fast leaves it None so no
+    # reasoning_effort is sent. Read straight from the request — the router
+    # never influences it, so retrieval mode stays fully independent.
+    llm_client.reasoning_effort = (
+        normalize_reasoning_effort(getattr(request, "reasoning_effort", None))
+        if plan.wire_think else None
+    )
     llm_client.api_key = _active_api_key()  # Propagate cached API key dynamically!
 
     # Task 3: the reported prompt budget is now the REAL, reserve-based
@@ -1369,7 +1398,16 @@ def resolve_query_plan(query: str, retrieval_mode: str) -> tuple[QueryPlan, str]
     else:
         print(f"[request] retrieval_mode=MANUAL selected={mode.upper()}")
 
-    plan = run_query_agent(query, llm_client, auto=auto)
+    # Internal call: fixed low effort regardless of the user's Thinking
+    # selection. Routing is a structured classification — extra reasoning adds
+    # latency to EVERY request without improving the decision. Restored after
+    # so the answer generation still gets the user's setting.
+    _user_effort = getattr(llm_client, "reasoning_effort", None)
+    llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
+    try:
+        plan = run_query_agent(query, llm_client, auto=auto)
+    finally:
+        llm_client.reasoning_effort = _user_effort
     route = plan.route if auto else _MANUAL_ROUTES.get(mode, ROUTE_HYBRID)
 
     translated = plan.retrieval_query.strip() != (query or "").strip()
@@ -1553,6 +1591,13 @@ def _resolve_exec(request: ChatStreamRequest):
     family_id = ACTIVE_CONFIG["model_family"]
     family = model_registry.get(family_id) or model_registry.get("qwen2.5")
     plan, resolved_model = _apply_execution_plan(family, ACTIVE_CONFIG["provider"], exec_mode)
+    # Deep-only: the user's Thinking selection. Fast leaves it None so no
+    # reasoning_effort is sent. Read straight from the request — the router
+    # never influences it, so retrieval mode stays fully independent.
+    llm_client.reasoning_effort = (
+        normalize_reasoning_effort(getattr(request, "reasoning_effort", None))
+        if plan.wire_think else None
+    )
     llm_client.api_key = _active_api_key()
     print(f"[exec] mode={exec_mode} think={'ON' if llm_client.think else 'OFF'} "
           f"model={resolved_model} verify={ACTIVE_CONFIG['verify_depth']}")
@@ -2028,6 +2073,61 @@ def chat_stream(request: ChatStreamRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.post("/api/investigate")
+def investigate_claim(payload: dict):
+    """Targeted investigation of ONE suspicious claim.
+
+    Deliberately NOT a second verification implementation: it delegates to the
+    same ``VerificationAuthority.judge_claims`` the automatic pass uses, with a
+    single-element claim list, so one judge remains the source of truth.
+
+    REPORT-ONLY. The caller's `found` verdict is echoed back untouched — the
+    user is investigating BECAUSE they doubt it, so silently flipping it would
+    destroy the signal they are inspecting.
+
+    ``claim_id`` and ``message_id`` are echoed verbatim so the frontend can
+    discard a result whose message is no longer live (a Query-1 investigation
+    finishing after Query 2 started).
+    """
+    claim_text = (payload.get("claim") or "").strip()
+    claim_id = payload.get("claim_id") or ""
+    message_id = payload.get("message_id") or ""
+    sources = payload.get("sources") or []
+
+    base = {"claim_id": claim_id, "message_id": message_id, "claim": claim_text}
+    if not claim_text:
+        return {**base, "status": "error", "error": "empty claim"}
+    if not sources:
+        return {**base, "status": "unsupported",
+                "rationale": "No sources were available to check this claim against.",
+                "sources": []}
+
+    prev_effort = getattr(llm_client, "reasoning_effort", None)
+    llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
+    try:
+        judged = _verification_authority.judge_claims(
+            [{"text": claim_text, "found": False}], sources, client=llm_client)
+    except Exception as e:  # noqa: BLE001 — report, never 500 the panel
+        print(f"[investigate] failed: {type(e).__name__}: {e}")
+        return {**base, "status": "error", "error": f"{type(e).__name__}"}
+    finally:
+        llm_client.reasoning_effort = prev_effort
+
+    verdict = (judged or [{}])[0]
+    supported = bool(verdict.get("found"))
+    cited = verdict.get("source")
+    return {
+        **base,
+        "status": "supported" if supported else "unsupported",
+        "rationale": verdict.get("note") or (
+            "The judge found this claim in the cited source."
+            if supported else
+            "The judge could not find this claim in the provided sources."
+        ),
+        "sources": [cited] if cited else [],
+    }
+
+
 @app.post("/api/verify")
 def verify_answer(payload: dict):
     """Non-blocking post-generation verification.
@@ -2045,8 +2145,15 @@ def verify_answer(payload: dict):
     # WS3: the engine lives in the central Verification Authority (identical
     # behavior and identical response contract — Phase 1 frozen). The ACTIVE
     # llm_client is injected per call so runtime provider switches are honored.
-    return _verification_authority.verify_answer(
-        answer=answer, sources=sources, depth=depth, llm_client=llm_client)
+    # Internal call: fixed low effort (see the query-agent note). Verification
+    # is mechanical claim-checking against supplied evidence.
+    _prev_effort = getattr(llm_client, "reasoning_effort", None)
+    llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
+    try:
+        return _verification_authority.verify_answer(
+            answer=answer, sources=sources, depth=depth, llm_client=llm_client)
+    finally:
+        llm_client.reasoning_effort = _prev_effort
 
 
 @app.post("/api/edit")

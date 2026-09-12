@@ -88,6 +88,10 @@ class LLMClient:
     num_ctx = scoped_attr()
     timeout_seconds = scoped_attr()
     think = scoped_attr()
+    # Reasoning depth for THIS request (low|medium|xhigh), Deep mode only.
+    # scoped_attr => thread-local inside request_scope(), so two concurrent
+    # Deep requests at different efforts cannot contaminate each other.
+    reasoning_effort = scoped_attr()
     api_key = scoped_attr()
     """
     Provider-agnostic LLM client for parliamentary grounded generation.
@@ -249,6 +253,7 @@ class LLMClient:
                 timeout_seconds=self.timeout_seconds,
                 think=getattr(self, "think", None),
                 think_mode=self._family_think_mode(),
+                reasoning_effort=getattr(self, "reasoning_effort", None),
                 base_url=self.base_url,
                 **kwargs
             )
@@ -296,6 +301,7 @@ class LLMClient:
                     num_ctx=self.num_ctx, think=getattr(self, "think", None),
                     base_url=self.base_url,
                     think_mode=self._family_think_mode(),
+                    reasoning_effort=getattr(self, "reasoning_effort", None),
                     **kwargs
                 )
             else:

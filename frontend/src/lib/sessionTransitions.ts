@@ -22,8 +22,21 @@
  */
 import { useActivityStore } from "@/store/useActivityStore";
 import { useDraftStore } from "@/store/useDraftStore";
+import { useEditStore } from "@/store/useEditStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
+
+/**
+ * Close every ANSWER-specific transient panel.
+ *
+ * Shared by the new-query path and the session transitions so Query-N UI can
+ * never attach to Query-N+1 (e.g. clicking Investigate on a Query-1 fact while
+ * Query 2's answer is on screen).
+ */
+export function clearAnswerScopedPanels(): void {
+  useDraftStore.getState().clearAnswerScopedUi();
+  useEditStore.setState({ pendingEdit: null, editing: false, editingLabel: null });
+}
 
 /** Clear every per-session store. Does NOT touch app/provider settings. */
 export function clearSessionScopedState(): void {
@@ -46,6 +59,11 @@ export function clearSessionScopedState(): void {
   });
 
   usePipelineStore.getState().reset();
+
+  // Answer-specific transient panels: Cross-Verified Facts, its inline
+  // investigations, and the Edit-with-AI Original-vs-Edited comparison.
+  // These belong to ONE answer and must never survive into another.
+  clearAnswerScopedPanels();
 }
 
 /**

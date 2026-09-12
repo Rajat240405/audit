@@ -105,7 +105,7 @@ class ServingSpec:
     never read by execution policy, never sent in a request).
 
     `reasoning_parser` is also read by _payload() to decide whether to send
-    `thinking_token_budget` — models served with a reasoning parser have
+    `reasoning_effort` — chat-template reasoning depth for template-based
     thinking ON by default and need a budget cap to avoid token loops."""
     reasoning_parser: Optional[str] = None
     max_model_len: Optional[int] = None
@@ -113,7 +113,6 @@ class ServingSpec:
     # Per-request thinking token cap (sent when reasoning_parser is set).
     # Prevents thinking loops on models whose reasoning is always-ON
     # (e.g. gpt-oss with openai_gptoss parser). 0 = no cap (server default).
-    default_thinking_budget: int = 0
 
 
 @dataclass
@@ -231,7 +230,6 @@ class ModelFamily:
                     else None
                 ),
                 notes=serving.get("notes"),
-                default_thinking_budget=int(serving.get("default_thinking_budget") or 0),
             ),
             defaults=GenerationDefaults(
                 temperature=defaults.get("temperature"),
@@ -425,26 +423,6 @@ def _resolve_family_for_model(model: str) -> "Optional[ModelFamily]":
             return f
     return None
 
-
-def _configured_thinking_budget(family, default: int = 0) -> int:
-    """Deep-mode thinking cap for ``family``, or ``default``.
-
-    Single source of truth for the thinking-token cap:
-    ``serving.default_thinking_budget`` in ``config/models.yaml``. A missing,
-    non-numeric or non-positive value means "no configured cap" and yields the
-    caller's ``default`` (4096 = legacy Qwen3 Deep fallback, 0 = send nothing
-    for always-thinking reasoning-parser models).
-
-    Exists so the catalog knob is reachable in Deep mode: the cap is resolved
-    BEFORE the Deep-mode branch writes the key, so the
-    ``"thinking_token_budget" not in body`` guard below can never shadow it.
-    """
-    raw = getattr(getattr(family, "serving", None), "default_thinking_budget", 0) or 0
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return int(default)
-    return value if value > 0 else int(default)
 
 
 def resolve_think_mode(provider: str, model: str) -> str:
@@ -955,6 +933,7 @@ class OpenAICompatibleProvider(BaseProvider):
     def _payload(
         self, model: str, messages: list, temperature: float, max_tokens: int,
         num_ctx: int, stream: bool, think: bool | None, think_mode: str = "none",
+        reasoning_effort: str | None = None,
     ) -> dict:
         body: dict = {
             "model": model,  # sent verbatim — never mangled with /think|/nothink
@@ -968,39 +947,16 @@ class OpenAICompatibleProvider(BaseProvider):
         # Send it ONLY for "template" families — for "none" the server decides
         # (Ollama /v1, llama.cpp, etc. would just ignore the extra kwarg, but
         # not sending keeps the contract explicit).
-        _fam = _resolve_family_for_model(model)
         if think is not None and think_mode == "template":
-            body["chat_template_kwargs"] = {"enable_thinking": bool(think)}
-            # Cap reasoning tokens to prevent thinking loops on large contexts.
-            # Without this, Qwen3 defaults to xhigh effort and exhausts its
-            # entire token budget in <think> before writing any answer.
-            # Only applied in thinking-ON (Deep) mode — Fast mode skips this.
-            #
-            # Budget source of truth is the catalog ServingSpec
-            # (``serving.default_thinking_budget``); 4096 is only the fallback
-            # when the family ships no positive value. Previously the 4096 was
-            # unconditional, which made the catalog knob dead code for Deep
-            # mode (the block below skips when the key already exists).
-            if bool(think):
-                body["thinking_token_budget"] = _configured_thinking_budget(
-                    _fam, default=4096
-                )
-
-        # Models served with a reasoning_parser (e.g. openai_gptoss) have
-        # thinking always-ON regardless of think_mode/enable_thinking.
-        # Send thinking_token_budget unconditionally so they never loop.
-        # Resolved from the catalog ServingSpec; 0 means no cap (server default).
-        #
-        # Scoped to ALWAYS-THINKING families (think_mode != "template", i.e.
-        # reasoning-parser models whose thinking cannot be switched off). A
-        # template-controlled family (Qwen3) turns thinking off in Fast mode,
-        # and there is nothing to cap there — the key must stay absent exactly
-        # as it was before the catalog knob became reachable.
-        if _fam is not None:
-            budget = _configured_thinking_budget(_fam, default=0)
-            always_thinking = getattr(_fam, "think_mode", "none") != "template"
-            if budget > 0 and always_thinking and "thinking_token_budget" not in body:
-                body["thinking_token_budget"] = budget
+            kwargs: dict = {"enable_thinking": bool(think)}
+            # Reasoning DEPTH is effort-based, not token-based: the chat
+            # template accepts `reasoning_effort` (low|medium|xhigh). It is sent
+            # ONLY with thinking ON — Fast mode has nothing to steer. The
+            # previous `thinking_token_budget` mechanism is gone entirely; no
+            # replacement token budget is sent.
+            if bool(think) and reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+            body["chat_template_kwargs"] = kwargs
 
         return body
 
@@ -1008,14 +964,16 @@ class OpenAICompatibleProvider(BaseProvider):
     def generate(self, model, prompt, system=None, temperature=0.1,
                  max_tokens=512, num_ctx=16384, api_key=None,
                  timeout_seconds=300, think=None, base_url=None,
-                 think_mode: str = "none", **kwargs) -> LLMResponse:
+                 think_mode: str = "none", reasoning_effort: str | None = None,
+                 **kwargs) -> LLMResponse:
         messages: list = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
         body = self._payload(model, messages, temperature, max_tokens,
-                             num_ctx, stream=False, think=think, think_mode=think_mode)
+                             num_ctx, stream=False, think=think, think_mode=think_mode,
+                             reasoning_effort=reasoning_effort)
         start = time.monotonic()
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
@@ -1047,7 +1005,8 @@ class OpenAICompatibleProvider(BaseProvider):
     def generate_stream(self, model, prompt, system=None, temperature=0.1,
                         max_tokens=512, num_ctx=16384, api_key=None,
                         timeout_seconds=300, think=None, base_url=None,
-                        think_mode: str = "none", **kwargs):
+                        think_mode: str = "none",
+                        reasoning_effort: str | None = None, **kwargs):
         """Yields {type: reasoning|tokens|answer_start|done} — same contract
         as the Ollama/HF streams, so the frontend reasoning panel is shared.
 
@@ -1071,7 +1030,8 @@ class OpenAICompatibleProvider(BaseProvider):
         messages.append({"role": "user", "content": prompt})
 
         body = self._payload(model, messages, temperature, max_tokens,
-                             num_ctx, stream=True, think=think, think_mode=think_mode)
+                             num_ctx, stream=True, think=think, think_mode=think_mode,
+                             reasoning_effort=reasoning_effort)
         buf = ""  # content-side buffer for inline <think> extraction (shape 4)
         # True while the model is mid-thought. Set when the server streams on
         # the reasoning channel, so that if `thinking_token_budget` truncates

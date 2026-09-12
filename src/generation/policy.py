@@ -139,7 +139,11 @@ _PROFILES: dict = {
     "fast": {
         "temperature": 0.0,
         "output_budget": 4096,     # visible answer budget
-        "reasoning_budget": 0,     # thinking OFF → no reasoning reserve
+        # OVERALL generation limit (answer + any reasoning). This is NOT a
+        # thinking budget: reasoning depth is controlled by the Qwen
+        # `reasoning_effort` chat-template kwarg, not by token accounting.
+        # Value preserved exactly from the previous output+reasoning sum.
+        "max_tokens": 4096,
         "thinking": False,
         "retrieval_top_k": 5,      # INITIAL candidate pool (Task 3) — NOT a
                                    # final document quota; budget decides
@@ -150,7 +154,9 @@ _PROFILES: dict = {
     "deep": {
         "temperature": 0.2,
         "output_budget": 4096,     # answer still gets a full 4k
-        "reasoning_budget": 8192,  # thinking spends max_tokens BEFORE answering
+        # Overall generation limit (was output 4096 + reasoning 8192).
+        # Unchanged on the wire; no longer expressed as a thinking budget.
+        "max_tokens": 12288,
         "thinking": True,
         "retrieval_top_k": 10,     # INITIAL candidate pool (Task 3)
         "max_context_docs": 5,     # LEGACY fallback only
@@ -182,7 +188,7 @@ class ExecutionPlan:
     model: str
     # generation parameters
     temperature: float
-    max_tokens: int               # output_budget + reasoning_budget (clamped)
+    max_tokens: int               # OVERALL generation limit (answer + reasoning)
     top_p: Optional[float]        # model default, if declared (unsent today)
     # thinking
     thinking: bool                # what the mode requests (OFF/ON)
@@ -191,6 +197,10 @@ class ExecutionPlan:
     num_ctx: int
     prompt_budget_tokens: int     # int(num_ctx × PROMPT_BUDGET_RATIO) — legacy report
     output_budget_tokens: int
+    # DERIVED, informational only: max_tokens - output_budget_tokens. Retained
+    # so existing diagnostics/tests keep a stable field, but it is NO LONGER a
+    # thinking control — nothing is sent on the wire from it. Reasoning depth
+    # is set by the Qwen `reasoning_effort` chat-template kwarg.
     reasoning_budget_tokens: int
     # Task-3 dynamic evidence budgeting (reserve-based, capability-derived —
     # never model-named):
@@ -311,22 +321,19 @@ def resolve_execution(
     # first so the visible answer keeps its budget. No current catalog family
     # declares max_output_tokens → legacy 4096 / 12288 values are preserved.
     output_budget = int(prof["output_budget"])
-    reasoning_budget = int(prof["reasoning_budget"])
+    max_tokens = int(prof["max_tokens"])
     max_out = getattr(fam, "max_output_tokens", None)
     if isinstance(max_out, (int, float)) and max_out:
-        room = max(0, int(max_out) - output_budget)
-        if reasoning_budget > room:
-            reasoning_budget = room
+        # Clamp the OVERALL generation limit to a declared model ceiling. No
+        # current catalog family declares max_output_tokens, so the literal
+        # 4096 / 12288 values are preserved unchanged.
+        if max_tokens > int(max_out):
             warnings.append(
-                f"reasoning budget clamped to {room} by model "
-                f"max_output_tokens={int(max_out)}"
+                f"generation limit clamped to model max_output_tokens={int(max_out)}"
             )
-        if output_budget > int(max_out):
-            warnings.append(
-                f"output budget clamped to model max_output_tokens={int(max_out)}"
-            )
-            output_budget = int(max_out)
-    max_tokens = output_budget + reasoning_budget
+            max_tokens = int(max_out)
+        if output_budget > max_tokens:
+            output_budget = max_tokens
 
     # Task-3 reserve-based evidence budget: context minus generation reserve
     # (max_tokens already = output + reasoning), fixed furniture and safety
@@ -370,7 +377,7 @@ def resolve_execution(
         num_ctx=num_ctx,
         prompt_budget_tokens=int(num_ctx * PROMPT_BUDGET_RATIO),
         output_budget_tokens=output_budget,
-        reasoning_budget_tokens=reasoning_budget,
+        reasoning_budget_tokens=max(0, max_tokens - output_budget),
         retrieval_top_k=int(prof["retrieval_top_k"]),
         prompt_scaffold_tokens=scaffold_tokens,
         safety_margin_tokens=margin_tokens,

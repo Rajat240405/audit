@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import type { DraftStyle, ExecutionMode, RetrievalMode } from "@/types";
+import type { DraftStyle, ExecutionMode, RetrievalMode, ThinkingEffort } from "@/types";
 
 interface AppState {
   provider: string;
   modelFamily: string;
   model: string;
   mode: ExecutionMode;
+  thinkingEffort: ThinkingEffort;
   retrievalMode: RetrievalMode;
   draftStyle: DraftStyle;
   /** Source filter (ministry-tree + doc categories) for retrieval.
@@ -24,6 +25,7 @@ interface AppState {
   setModelFamily: (f: string) => void;
   setModel: (m: string) => void;
   setMode: (m: ExecutionMode) => void;
+  setThinkingEffort: (e: ThinkingEffort) => void;
   setRetrievalMode: (m: RetrievalMode) => void;
   setDraftStyle: (s: DraftStyle) => void;
   setSourceFilter: (f: SourceFilterState) => void;
@@ -45,6 +47,7 @@ export const useAppStore = create<AppState>((set) => ({
   modelFamily: "qwen2.5",
   model: "qwen2.5:7b",
   mode: "fast",
+  thinkingEffort: "medium",
   retrievalMode: "auto",
   draftStyle: "default",
   sourceFilter: { ministry: "all", orgs: [], docCategories: [] },
@@ -57,6 +60,7 @@ export const useAppStore = create<AppState>((set) => ({
   setModelFamily: (f) => set({ modelFamily: f }),
   setModel: (m) => set({ model: m }),
   setMode: (m) => set({ mode: m }),
+  setThinkingEffort: (e) => set({ thinkingEffort: e }),
   setRetrievalMode: (m) => set({ retrievalMode: m }),
   setDraftStyle: (s) => set({ draftStyle: s }),
   setSourceFilter: (f) => set({ sourceFilter: f }),
