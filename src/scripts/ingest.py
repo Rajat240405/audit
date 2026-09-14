@@ -148,6 +148,7 @@ class LeafJob:
 # the shipped config/sources.yaml (asserted by tests).
 _BUILTIN_CATEGORY_MAP: dict[str, str] = {
     "annual_reports": "annual_report",
+    "demands_for_grants": "demands_for_grants",
     "audit_reports": "audit_report",
     "research_papers": "research_publication",
     "press_release": "press_release",

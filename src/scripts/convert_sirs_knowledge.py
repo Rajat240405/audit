@@ -26,6 +26,7 @@ Flags are optional — point it at whichever folders exist.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import re
@@ -141,6 +142,9 @@ def _make_record(
     source: str | None = None,
     title_source: str | None = None,
     date_source: str | None = None,
+    answer_source: str | None = None,
+    answer_text_source: str | None = None,
+    pre_cleaned: bool = False,
 ) -> QARecord | None:
     """Build a record. Additive context kwargs (org/source/default_ministry)
     extend the legacy behavior without changing it: callers that pass nothing
@@ -152,7 +156,12 @@ def _make_record(
     new sources).
     """
     q = _clean(question_text)
-    a = _clean(answer_text)
+    # ``pre_cleaned`` is the DfG escape hatch (spec req. H). ``_clean`` collapses
+    # every newline and run of whitespace, which is exactly what destroys the
+    # reconstructed row/column structure of a Demand-for-Grants table. Callers
+    # that already hold folded, page-tagged text must bypass it. Nothing else
+    # in this module sets it, so all other records are byte-identical.
+    a = (answer_text or "").strip() if pre_cleaned else _clean(answer_text)
     if len(q) < 5 or len(a) < 5:
         return None
     meta = QARecordMetadata(
@@ -167,6 +176,8 @@ def _make_record(
         source=source,
         title_source=title_source,
         date_source=date_source,
+        answer_source=answer_source,
+        answer_text_source=answer_text_source,
     )
     try:
         return QARecord(
@@ -360,9 +371,106 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
     return 0
 
 
+_DFG_PROFILE = "demands-for-grants"
+_DFG_STEM_RE = re.compile(r"^(\d+)-(\d+)-(eng|hin|both)$")
+
+
+def _dfg_doc_identity(path: Path) -> str:
+    """Stable document identity for a staged DfG file (spec req. K).
+
+    Staged names are ``NN-<attachment_wp_id>-<slot>.pdf``. The attachment id is
+    immutable upstream, so keying on ``<wp_id>-<slot>`` makes re-ingestion of
+    the same source REPLACE its record instead of adding a second content-hash
+    row every time the extracted text improves.
+    """
+    m = _DFG_STEM_RE.match(path.stem)
+    return f"{m.group(2)}-{m.group(3)}" if m else path.stem
+
+
+def _convert_dfg_pdf(path: Path, out: list[QARecord], seen: set[str], *,
+                     srec: dict, org=None, source=None, ministry=None,
+                     default_ministry=_DEFAULT_MINISTRY) -> int:
+    """Route one Demand-for-Grants PDF through the dedicated extractor.
+
+    The generic path below is wrong for this family on 4 of the 5 live
+    documents (scans, vector outlines, poisoned ToUnicode), and ``_clean``
+    flattens whatever survives — hence the dedicated route and the
+    ``pre_cleaned`` bypass. See src/data/extract_dfg.py.
+    """
+    from src.data.extract_dfg import extract_dfg, render_folded
+
+    try:
+        doc = extract_dfg(path, source_url=str(path))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [skip dfg] {path.name}: {e}")
+        return 0
+    folded = render_folded(doc)
+    if len(folded.strip()) < 50:
+        print(f"  [skip dfg] {path.name}: extractor produced no rows")
+        return 0
+
+    prov = doc.provenance
+    identity = _dfg_doc_identity(path)
+    _title, _title_source = _resolve_doc_title(path, srec)
+    _date, _date_source = _resolve_doc_date(path, "", srec)
+    label = _title or path.stem
+    # Verdict is deliberately in the SUBJECT: QARecordMetadata takes no extra
+    # keys, and a FAIL must be visible without opening a sidecar (spec req. J).
+    subject = (f"Demand for Grants FY {prov.fiscal_year or '?'}"
+               + (f" Demand No. {prov.demand_no}" if prov.demand_no else "")
+               + f" — {prov.quality_verdict}")
+    rec = _make_record(
+        f"Document: {label}",
+        folded,
+        subject=subject,
+        source_url=prov.source_url or str(path),
+        date=_date,
+        document_type="demands_for_grants",
+        qa_id=_hash_id(identity, "dfg"),
+        title_source=_title_source,
+        date_source=_date_source,
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
+        answer_source="dfg-extract",
+        answer_text_source="dfg-folded-structured",
+        pre_cleaned=True,
+    )
+    # Sidecar: full auditable detail (per-page route, gates, OCR notes).
+    with contextlib.suppress(Exception):  # provenance sidecar is best-effort
+        path.with_suffix(path.suffix + ".dfg.json").write_text(json.dumps({
+            "doc_identity": identity,
+            "verdict": doc.verdict,
+            "provenance": prov.as_dict(),
+            "pages": [{
+                "page": p.page, "route": p.route, "verdict": p.verdict,
+                "rows": len(p.rows),
+                "grid_shape": list(p.grid_shape) if p.grid_shape else None,
+                "code_validity": p.code_validity,
+                "checks": [{"components": c.components, "computed": c.computed,
+                            "reported": c.reported, "ok": c.ok,
+                            "spans_pages": c.spans_pages} for c in p.checks],
+                "notes": p.notes,
+            } for p in doc.pages],
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+    if rec and rec.question_id not in seen:
+        seen.add(rec.question_id)
+        out.append(rec)
+        return 1
+    return 0
+
+
 def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
                       doc_type: str = "document", *, org=None, source=None,
                       ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
+    # Demand-for-Grants is its own document family with its own extractor.
+    # The signal rides on the staged record.json written by the MoES scraper
+    # (normalize.normalize_post sets extraction_profile), so no caller has to
+    # know about it and no other family's path changes at all.
+    _srec0 = _sibling_record_json(path)
+    if _srec0.get("extraction_profile") == _DFG_PROFILE:
+        return _convert_dfg_pdf(path, out, seen, srec=_srec0, org=org,
+                                source=source, ministry=ministry,
+                                default_ministry=default_ministry)
+
     # THE canonical PDF→text for folder ingestion (audit IW-7): table-aware
     # PyMuPDF first (borderless-table reconstruction), legacy pypdf as the
     # built-in fallback — one shared stack, not a second implementation.
@@ -594,7 +702,8 @@ def _ocr_page(args) -> tuple[int, str]:
 
     Returns (page_index, text); a failed render returns '' for that page.
     """
-    path, page_index = args
+    path, page_index, *rest = args
+    lang = rest[0] if rest else None
     try:
         import pytesseract
         from PIL import Image
@@ -609,7 +718,13 @@ def _ocr_page(args) -> tuple[int, str]:
     width, height, samples = render
     try:
         img = Image.frombytes("RGB", (width, height), samples)
-        t = pytesseract.image_to_string(img)
+        # ``lang`` is threaded rather than defaulted: tesseract's own default is
+        # eng, which silently erases Devanagari. Measured on DfG 04 p11: eng
+        # yields 0 Devanagari chars ("Fit PeN 24 - wed fags Hares"), hin+eng
+        # yields 431. Callers that pass nothing keep the historical behavior
+        # byte-for-byte, so non-DfG families are unaffected.
+        t = (pytesseract.image_to_string(img, lang=lang) if lang
+             else pytesseract.image_to_string(img))
         return page_index, t or ""
     except Exception:  # noqa: BLE001
         return page_index, ""
@@ -628,7 +743,8 @@ def _ocr_workers() -> int:
     return max(1, n)
 
 
-def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
+def _ocr_pdf_text(path: Path, max_pages: int | None = None,
+                  lang: str | None = None) -> str:
     """OCR a scanned PDF via subprocess PyMuPDF render + pytesseract.
 
     Both the page-count query and every page render run in isolated child
@@ -656,7 +772,7 @@ def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
 
     if n_pages == 1 or workers == 1:
         for i in range(n_pages):
-            _, t = _ocr_page((str(path), i))
+            _, t = _ocr_page((str(path), i, lang))
             if t.strip():
                 pages_text.append(f"--- Page {i+1} (OCR) ---\n{t.strip()}")
         return "\n\n".join(pages_text)
@@ -665,9 +781,9 @@ def _ocr_pdf_text(path: Path, max_pages: int | None = None) -> str:
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=min(workers, n_pages)) as pool:
-            results = list(pool.map(_ocr_page, [(str(path), i) for i in range(n_pages)]))
+            results = list(pool.map(_ocr_page, [(str(path), i, lang) for i in range(n_pages)]))
     except Exception:  # noqa: BLE001 — never fail a conversion over pooling
-        results = [_ocr_page((str(path), i)) for i in range(n_pages)]
+        results = [_ocr_page((str(path), i, lang)) for i in range(n_pages)]
 
     # pool.map preserves input order; sort anyway so output can never depend
     # on completion order.

@@ -75,4 +75,14 @@ categories:
         match: ["monthly-report"]
       demands-for-grants:
         match: ["demand"]         # demand-for-grants / demands-for-grants variants
+        # DfG document-family policy. Enforced by src/scraping/moes/normalize.py
+        # (is_dfg_post / DFG_PROFILE / DFG_SKIP_SLOTS) and documents.py
+        # (slot selection); test_dfg_extraction asserts this block and those
+        # constants agree, so declared and enforced policy cannot drift.
+        # skip_slots drops the redundant pdf_hindi slot BEFORE download — DfG
+        # PDFs carry English AND Devanagari inside one file (5/5 live docs,
+        # including the one published on the -eng slot). pdf_both and pdf/eng
+        # are never skipped: bilingual documents are not purged.
+        extraction_profile: demands-for-grants   # → src/data/extract_dfg.py
+        skip_slots: ["hin"]
   press-release: {}               # whole category, no family subdivision

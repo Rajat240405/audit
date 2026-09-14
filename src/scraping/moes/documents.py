@@ -205,6 +205,15 @@ def process_record_documents(
     """
     wanted = {_LANG_GATES[l] for l in languages if l in _LANG_GATES}
     wanted.add("both")  # single bilingual files are never language-gated
+    # Document-family slot policy, applied BEFORE any download. DfG sets
+    # skip_slots=["hin"] because its PDFs are bilingual inside a single file,
+    # making the pdf_hindi slot redundant. This only ever removes a language
+    # gate — "both" is re-added above and is never skippable, so a bilingual
+    # document is never dropped for having Hindi.
+    skip_slots = {str(x) for x in (record.get("skip_slots") or [])}
+    if skip_slots:
+        wanted -= skip_slots
+        wanted.add("both")
     outcome = DocsOutcome()
     for frow in record.get("files") or []:
         row = int(frow["row"])
