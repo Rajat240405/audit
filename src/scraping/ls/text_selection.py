@@ -50,6 +50,10 @@ __all__ = [
     "TextMetrics",
     "Selection",
     "measure",
+    "bleed_through_offset",
+    "in_scope_text",
+    "structural_signals",
+    "text_equivalent",
     "split_was_boundary_based",
     "select_answer",
     "select_question",
@@ -75,6 +79,10 @@ TRUNCATION_TAIL_CHARS = 60
 _NUMERIC = re.compile(r"\d+(?:[.,]\d+)*")
 _ANNEXURE = re.compile(r"(?i)\bannex(?:ure|ures)?\b|\bappendix\b")
 _SUBPART = re.compile(r"\(\s*([a-zA-Z])\s*\)")
+# A line restarting the document furniture marks the next record's content.
+_SECOND_RECORD_HEAD = re.compile(
+    r"(?m)^(?:GOVERNMENT OF INDIA|LOK SABHA|(?:UN)?STARRED QUESTION\s*(?:No\.?|NO:?)\s*\d+)"
+)
 _BOUNDARY_HEAD = re.compile(r"(?is)^(?:ANSWER|REPLY|A\s*N\s*S\s*W\s*E\s*R)\b")
 # A candidate counts as complete when it ends in terminal punctuation OR in a
 # digit — annexure tables legitimately end on a data row ("2022-03-18"), and
@@ -125,22 +133,87 @@ class Selection:
         return ALWAYS_RECORD_PROVENANCE or self.had_choice
 
 
+def _collapse(text: str) -> str:
+    """Single-space form. Keeps word boundaries intact for the ``\\b`` regexes."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _densify(text: str) -> str:
+    """Whitespace-free form.
+
+    PDF text extraction is not whitespace-stable: the same glyph run can come
+    back as ``26.20 0 C`` or ``26.200C``, ``18 th JULY`` or ``18thJULY``.
+    Comparing length or numeric-token counts on the raw text therefore reports
+    a formatting-only difference as a content difference — which is exactly
+    what a re-extraction looks like. Length and numeric counts are taken on
+    this form so they are formatting-invariant.
+    """
+    return re.sub(r"\s+", "", text)
+
+
+def text_equivalent(a: str | None, b: str | None) -> bool:
+    """True when two texts differ only by whitespace/case — i.e. formatting.
+
+    Used by tests and diagnostics so a normalization-only re-extraction is not
+    mistaken for data loss.
+    """
+    return _densify(a or "").casefold() == _densify(b or "").casefold()
+
+
 def measure(text: str | None) -> TextMetrics:
-    """Fingerprint a candidate. Empty/None degrades to an all-zero metric."""
+    """Fingerprint a candidate. Empty/None degrades to an all-zero metric.
+
+    ``chars`` is a NON-WHITESPACE character count and ``numeric_tokens`` is
+    counted on the whitespace-free form, so both are invariant under the
+    spacing artifacts PDF extraction introduces. ``annexure_markers`` and
+    ``subpart_labels`` run on the single-space form because their patterns
+    rely on word boundaries. Trade-off, accepted deliberately: densifying
+    merges adjacent numbers ("16.53 80.80" counts as one token), so numeric
+    counts are coarser but still directionally correct — losing an annexure
+    row always removes digits.
+    """
     s = (text or "").strip()
     if not s:
         return TextMetrics()
+    collapsed = _collapse(s)
+    dense = _densify(s)
     # _SENTENCE_END is $-anchored, so scanning only the tail is equivalent to
     # scanning the whole text and bounds the work on large annexures.
-    tail = s[-TRUNCATION_TAIL_CHARS:]
+    tail = collapsed[-TRUNCATION_TAIL_CHARS:]
     return TextMetrics(
-        chars=len(s),
-        numeric_tokens=len(_NUMERIC.findall(s)),
-        annexure_markers=len(_ANNEXURE.findall(s)),
+        chars=len(dense),
+        numeric_tokens=len(_NUMERIC.findall(dense)),
+        annexure_markers=len(_ANNEXURE.findall(collapsed)),
         # distinct labels, so "(a) … (b) … (a)" counts 2 not 3
-        subpart_labels=len({m.lower() for m in _SUBPART.findall(s)}),
+        subpart_labels=len({m.lower() for m in _SUBPART.findall(collapsed)}),
         truncated=not bool(_SENTENCE_END.search(tail)),
     )
+
+
+def bleed_through_offset(text: str | None) -> int | None:
+    """Offset where a SECOND record's content begins inside one answer.
+
+    ``_split_question_answer`` splits at the FIRST ANSWER/REPLY match, so when
+    an official PDF carries several questions, the tail of the NEXT question —
+    its furniture, question body and its own ANSWER block — is swept into this
+    record's ``answer_text``. Measured on 4 / 1,377 LS records; e.g.
+    ``ls-16-14-4262``, where question 4247's entire Q&A is appended at offset
+    1866 of a 2,902-char answer.
+
+    Returns None when the text is single-record. Used so the staged-row guard
+    never mistakes that out-of-scope tail for information the fresh extraction
+    lost.
+    """
+    if not text:
+        return None
+    m = _SECOND_RECORD_HEAD.search(text, 1)   # 1: never match the opening line
+    return m.start() if m else None
+
+
+def in_scope_text(text: str | None) -> str:
+    """The portion of an extracted answer that actually belongs to this record."""
+    off = bleed_through_offset(text)
+    return (text or "")[:off] if off is not None else (text or "")
 
 
 def split_was_boundary_based(answer_text: str | None) -> bool:
@@ -155,8 +228,14 @@ def split_was_boundary_based(answer_text: str | None) -> bool:
     return bool(_BOUNDARY_HEAD.match((answer_text or "").strip()))
 
 
-def _richness_signals(doc: TextMetrics, inl: TextMetrics) -> list[str]:
-    """Structural reasons the document candidate carries more information."""
+def structural_signals(doc: TextMetrics, inl: TextMetrics) -> list[str]:
+    """Information-density reasons ``doc`` carries more than ``inl``.
+
+    Numeric tokens, annexure markers and sub-part labels only. Deliberately
+    EXCLUDES length and truncation: those shift with re-pagination and
+    extraction spacing, so they must not on their own justify discarding a
+    freshly extracted document in favour of an older staged copy.
+    """
     out: list[str] = []
     if doc.numeric_tokens > inl.numeric_tokens:
         out.append(f"numeric+{doc.numeric_tokens - inl.numeric_tokens}")
@@ -164,6 +243,12 @@ def _richness_signals(doc: TextMetrics, inl: TextMetrics) -> list[str]:
         out.append(f"annexure+{doc.annexure_markers - inl.annexure_markers}")
     if doc.subpart_labels > inl.subpart_labels:
         out.append(f"subparts+{doc.subpart_labels - inl.subpart_labels}")
+    return out
+
+
+def _richness_signals(doc: TextMetrics, inl: TextMetrics) -> list[str]:
+    """All reasons the document candidate carries more information."""
+    out = structural_signals(doc, inl)
     if inl.truncated and not doc.truncated:
         out.append("inline-truncated")
     if doc.chars >= inl.chars * MATERIAL_LENGTH_RATIO:

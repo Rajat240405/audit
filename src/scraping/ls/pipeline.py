@@ -69,16 +69,24 @@ from src.scraping.ls.documents import UrlCache, plan_slots, process_slot
 from src.scraping.ls.extract import extract_qa
 from src.scraping.ls.normalize import build_record, sort_key, utcnow_iso
 from src.scraping.ls.text_selection import (
+    in_scope_text,
     is_richer,
+    measure,
     select_answer,
     select_question,
     split_was_boundary_based,
+    structural_signals,
 )
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
 from src.utils.atomic_io import write_bytes_atomic
 
 CRAWLER_VERSION = "ls-1.0"
 QA_JSONL = "qa.jsonl"
+
+#: Retain an already-staged document answer when a fresh extraction of the same
+#: document comes back structurally poorer (lost annexure rows / sub-parts).
+#: Turn off to always trust the newest extraction.
+GUARD_EXTRACTION_REGRESSIONS = True
 
 #: manifest entries carried from the documents stage
 _DOC_EXTRA_KEYS = ("suffix_retried", "retry_url", "dspace_resolution", "resolved_url")
@@ -304,14 +312,34 @@ def guard_staged_answer(new_row: dict[str, Any],
     if old_meta.get("answer_source") != "document-extract":
         return new_row
     new_meta = new_row.setdefault("metadata", {})
+
     if new_meta.get("answer_source") == "document-extract":
+        # Both document-derived. A fresh extraction normally wins — but it must
+        # not be allowed to silently drop an annexure, which is what a partial
+        # parse or a re-paginated PDF looks like. Retain the staged copy ONLY
+        # on a structural regression (numeric / annexure / sub-part loss);
+        # never on length or spacing, which shift with re-pagination and with
+        # PDF text-extraction whitespace artifacts.
+        if not GUARD_EXTRACTION_REGRESSIONS:
+            return new_row
+        # Compare only the in-scope prefix: _split_question_answer sweeps the
+        # NEXT question of a multi-question PDF into this record's answer, and
+        # that out-of-scope tail must not count as information the fresh
+        # extraction lost (ls-16-14-4262 carries question 4247's whole Q&A).
+        lost = structural_signals(measure(in_scope_text(old_row.get("answer_text"))),
+                                  measure(in_scope_text(new_row.get("answer_text"))))
+        if not lost:
+            return new_row
+        reason = "staged-document-retained:extraction-regression:" + ",".join(lost)
+    elif is_richer(old_row.get("answer_text"), new_row.get("answer_text")):
+        reason = "staged-document-retained"
+    else:
         return new_row
-    if not is_richer(old_row.get("answer_text"), new_row.get("answer_text")):
-        return new_row
+
     new_row["answer_text"] = old_row["answer_text"]
     new_meta["answer_source"] = "document-extract"
     new_meta["answer_text_source"] = "document-extract"
-    new_meta["text_selection_reason"] = "staged-document-retained"
+    new_meta["text_selection_reason"] = reason
     new_meta.pop("answer_unavailable_cause", None)
     return new_row
 
