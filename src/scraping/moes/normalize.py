@@ -27,6 +27,55 @@ PQ_TITLE_RE = re.compile(r"^\s*parliament\s+questions?\b", re.IGNORECASE)
 
 REPORTS_PARENT_SLUG = "reports"
 
+# ── Demand for Grants document family ────────────────────────────────────────
+# DfG is a distinct MoES document family with its own extraction pipeline
+# (src/data/extract_dfg.py). Two things are decided HERE, before any bytes are
+# downloaded, so the policy is cheap and auditable:
+#
+#   * ``extraction_profile`` routes the document to the DfG extractor at
+#     ingest time instead of the generic pdf_table_extract path.
+#   * ``skip_slots`` drops the ``pdf_hindi`` slot before download. DfG PDFs are
+#     bilingual *inside one file* (all 5 live docs carry English AND Devanagari
+#     in the same PDF, including the one published on the ``-eng`` slot), so the
+#     Hindi-only slot is redundant. ``pdf_both`` and ``pdf``/eng are NEVER
+#     skipped — a bilingual document is not purged just because Hindi exists.
+#
+# Mirrored in config/crawlers/moes_website.yaml under
+# categories.reports.families.demands-for-grants; a test asserts the two agree
+# so the declared and enforced policy cannot drift.
+DFG_PROFILE = "demands-for-grants"
+DFG_SKIP_SLOTS: tuple[str, ...] = ("hin",)
+#: live taxonomy term for "Demand for Grants" (child of reports/107)
+DFG_TERM_ID = 385
+
+DFG_TITLE_RE = re.compile(r"^\s*(?:detailed\s+)?demands?\s+for\s+grants?\b",
+                          re.IGNORECASE)
+DFG_SLUG_RE = re.compile(r"(?:^|[-_])demands?[-_]for[-_]grants?(?:[-_]|$)",
+                         re.IGNORECASE)
+
+
+def is_dfg_post(
+    title: str | None = None,
+    slug: str | None = None,
+    category_slugs: list[str] | None = None,
+    category_term_ids: list[int] | None = None,
+) -> bool:
+    """True when a post belongs to the Demand for Grants family.
+
+    Three independent signals, any one sufficient — the live post 24108 is
+    titled "Demands for Grants", slugged ``demands-for-grants``, and carries
+    taxonomy term 385. Content-based on purpose: it must work before the
+    attachment (and therefore the document) is fetched.
+    """
+    if title and DFG_TITLE_RE.match(title):
+        return True
+    if slug and DFG_SLUG_RE.search(slug):
+        return True
+    for s in category_slugs or []:
+        if DFG_SLUG_RE.search(str(s) or ""):
+            return True
+    return DFG_TERM_ID in {int(t) for t in (category_term_ids or []) if t}
+
 
 def is_parliament_question(title: str | None) -> bool:
     return bool(PQ_TITLE_RE.match(title or ""))
@@ -154,12 +203,19 @@ def normalize_post(
             description = val
             break
     category_path = [category] + ([family] if family else [])
-    return {
+    slug = str(post.get("post_name") or f"post-{int(post['ID'])}")
+    dfg = is_dfg_post(
+        title,
+        slug,
+        category_slugs=[str(t.get("slug") or "") for t in child_terms],
+        category_term_ids=[int(t.get("term_id") or 0) for t in child_terms],
+    )
+    record = {
         "id": f"moes-web-{int(post['ID'])}",
         "source": "moes-website",
         "site": "www.moes.gov.in",
         "wp_id": int(post["ID"]),
-        "slug": str(post.get("post_name") or f"post-{int(post['ID'])}"),
+        "slug": slug,
         "title": title,
         "category": category,
         "family": family,
@@ -184,6 +240,12 @@ def normalize_post(
         "files": normalize_file_rows(post),
         "scraped_at": scraped_at,                              # volatile (hash-excluded)
     }
+    # DfG-only keys. Added conditionally so every other family's record stays
+    # byte-identical (and its records.row_sha256 unchanged).
+    if dfg:
+        record["extraction_profile"] = DFG_PROFILE
+        record["skip_slots"] = list(DFG_SKIP_SLOTS)
+    return record
 
 
 _SLUG_SAFE = re.compile(r"[^a-z0-9]+")

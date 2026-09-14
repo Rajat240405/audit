@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -586,7 +587,110 @@ def _seed_seen_hashes_by_url() -> dict[str, str]:
     return hashes
 
 
-def _replace_corpus_rows(replacements: dict[str, QARecord]) -> int:
+_DFG_IDENTITY_RE = re.compile(r"(\d+)-(eng|hin|both)$")
+
+
+def _dfg_identity_from_url(url: str | None) -> str | None:
+    """DfG document identity from a staged ``source_url``, or None.
+
+    Staged DfG files are ``NN-<attachment_wp_id>-<slot>.pdf`` and the attachment
+    id is immutable upstream, so ``<wp_id>-<slot>`` identifies the document
+    independently of which extraction produced the row. Keying on that (rather
+    than on a content hash) is what lets a re-extraction be recognised as the
+    same document.
+    """
+    if not url:
+        return None
+    m = _DFG_IDENTITY_RE.search(Path(str(url)).stem)
+    return f"{m.group(1)}-{m.group(2)}" if m else None
+
+
+def _dfg_superseded_for(incoming: dict[str, str]) -> set[str]:
+    """question_ids of legacy rows superseded by the given ``dfg-`` rows.
+
+    ``incoming`` maps document identity → new ``dfg-`` question_id. Matching is
+    on identity derived from ``metadata.source_url``, so it survives the id
+    scheme changing. Rows already carrying a ``dfg-`` id are never dropped:
+    those are the replacements, not the legacy rows.
+
+    Pure read, no side effects — which is what makes the migration idempotent:
+    once the legacy rows are gone there is nothing left to match and this
+    returns the empty set.
+    """
+    if not incoming:
+        return set()
+    new_ids = set(incoming.values())
+    drop: set[str] = set()
+    corpus = corpus_path()
+    if not corpus.exists():
+        return drop
+    for line in corpus.open(encoding="utf-8"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            row = json.loads(s)
+        except Exception:  # noqa: BLE001 — unparseable rows are left alone
+            continue
+        rid = str(row.get("question_id") or "")
+        if not rid or rid.startswith("dfg-") or rid in new_ids:
+            continue
+        ident = _dfg_identity_from_url((row.get("metadata") or {}).get("source_url"))
+        if ident and ident in incoming:
+            drop.add(rid)
+    return drop
+
+
+def _seed_dfg_superseded(new_records: list[QARecord]) -> set[str]:
+    """Legacy rows superseded by an incoming batch of ``dfg-`` records."""
+    incoming: dict[str, str] = {}
+    for rec in new_records:
+        if not str(rec.question_id or "").startswith("dfg-"):
+            continue
+        ident = _dfg_identity_from_url(getattr(rec.metadata, "source_url", None))
+        if ident:
+            incoming[ident] = rec.question_id
+    return _dfg_superseded_for(incoming)
+
+
+def migrate_dfg_corpus() -> int:
+    """Retire legacy content-hash rows superseded by ``dfg-`` rows in the corpus.
+
+    The pre-DfG pipeline ingested these documents through the generic PDF path
+    and stamped them with content-hash ``incdoc-…`` ids. The DfG path mints a
+    stable ``dfg-…`` id instead, so without this the same document sits in the
+    corpus twice — the duplication spec req. K / acceptance criterion 6 forbids.
+
+    Self-contained and safe to call on every run: it derives the replacement set
+    from the ``dfg-`` rows already in the corpus, so it needs no new records
+    threading through the engine, and it is a no-op once migration has happened.
+    Returns the number of rows retired.
+    """
+    incoming: dict[str, str] = {}
+    corpus = corpus_path()
+    if not corpus.exists():
+        return 0
+    for line in corpus.open(encoding="utf-8"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            row = json.loads(s)
+        except Exception:  # noqa: BLE001
+            continue
+        rid = str(row.get("question_id") or "")
+        if not rid.startswith("dfg-"):
+            continue
+        ident = _dfg_identity_from_url((row.get("metadata") or {}).get("source_url"))
+        if ident:
+            incoming[ident] = rid
+    if not incoming:
+        return 0
+    return _replace_corpus_rows({}, drop=_dfg_superseded_for(incoming))
+
+
+def _replace_corpus_rows(replacements: dict[str, QARecord],
+                         drop: set[str] | None = None) -> int:
     """Atomically rewrite corpus rows whose question_id is in `replacements`.
 
     Changed-record write-back: the row keeps its id and position in the
@@ -597,10 +701,11 @@ def _replace_corpus_rows(replacements: dict[str, QARecord]) -> int:
     """
     from src.utils.atomic_io import write_text_atomic
     corpus = corpus_path()
-    if not corpus.exists() or not replacements:
+    if not corpus.exists() or (not replacements and not drop):
         return 0
     out_lines: list[str] = []
     replaced: set[str] = set()
+    dropped: set[str] = set()
     for line in corpus.open(encoding="utf-8"):
         s = line.strip()
         if not s:
@@ -609,6 +714,12 @@ def _replace_corpus_rows(replacements: dict[str, QARecord]) -> int:
             rid = json.loads(s).get("question_id")
         except Exception:  # noqa: BLE001
             out_lines.append(line.rstrip("\n"))
+            continue
+        if rid in (drop or ()):
+            # Retired by a stable-id replacement for the same document. Dropping
+            # is the migration half of req. K; without it the superseded row
+            # would sit beside its replacement forever.
+            dropped.add(rid)
             continue
         if rid in replacements:
             out_lines.append(replacements[rid].model_dump_json())
@@ -619,7 +730,10 @@ def _replace_corpus_rows(replacements: dict[str, QARecord]) -> int:
         out_lines.append(replacements[rid].model_dump_json())
         replaced.add(rid)
     write_text_atomic(corpus, "\n".join(out_lines) + "\n")
-    return len(replaced)
+    if dropped:
+        print(f"  [dfg] retired {len(dropped)} superseded row(s): "
+              f"{', '.join(sorted(dropped))}")
+    return len(replaced) + len(dropped)
 
 
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
@@ -885,6 +999,14 @@ def run_sources(
         per_source[name] = res
         total_added += res.get("added", 0)
         total_changed += res.get("changed", 0)
+    # DfG migration (spec req. K / acceptance 6): now that every source has been
+    # ingested, retire any legacy content-hash row that a stable dfg- row in the
+    # corpus supersedes. Runs once per ingest, is a pure no-op when there is
+    # nothing to migrate, and never touches a row that is not a DfG document.
+    n_migrated = migrate_dfg_corpus()
+    if n_migrated:
+        _engine.log(f"[ingest] DfG migration: retired {n_migrated} superseded "
+                    f"row(s) -> {corpus_path()}")
     action = choose_embed_action(total_added, no_rebuild, full_rebuild,
                                  total_changed=total_changed)
     run_embed_phase(action)
