@@ -219,6 +219,40 @@ class QARecordMetadata(BaseModel):
         examples=["record.json", "pib-dateline", "filename-year"],
     )
 
+    # ── Per-field text provenance (LS inline-vs-document arbitration) ───────
+    # ``answer_source`` alone cannot describe a record whose question came
+    # from the API and whose answer came from the official PDF — which is the
+    # normal, intended LS outcome. These three are additive and default to
+    # None; they are written only when a real choice was made between two
+    # non-empty candidates (see src/scraping/ls/text_selection.py), so
+    # single-source records stay byte-stable.
+    question_text_source: str | None = Field(
+        default=None,
+        description="Where question_text came from when both an inline API "
+                    "candidate and a document-extracted candidate existed: "
+                    "'inline' or 'document-extract'. None when there was no "
+                    "choice to make (single candidate) or for non-LS records.",
+        examples=["inline", "document-extract"],
+    )
+    answer_text_source: str | None = Field(
+        default=None,
+        description="Where answer_text came from when both an inline API "
+                    "candidate and a document-extracted candidate existed: "
+                    "'inline' or 'document-extract'. None when there was no "
+                    "choice to make. Complements (does not replace) "
+                    "'answer_source', which also carries 'unavailable'.",
+        examples=["inline", "document-extract"],
+    )
+    text_selection_reason: str | None = Field(
+        default=None,
+        description="Machine-readable arbitration code explaining the "
+                    "per-field choice, e.g. 'document-richer', "
+                    "'inline-preferred:document-ratio-split', "
+                    "'inline-preferred:document-furniture', "
+                    "'document-primary'.",
+        examples=["document-richer", "inline-preferred:document-ratio-split"],
+    )
+
 
 class QARecord(BaseModel):
     """

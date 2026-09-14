@@ -1,9 +1,14 @@
 """Document bytes → (question_text, answer_text) extraction — LS primary text stage.
 
-Lok Sabha records have NO inline text (the frozen workbook's
-``questionText``/``answerText``/``answerTextHindi`` columns are entirely
-empty), so extraction from the official answer documents is the primary
-content source — not a fallback.
+Extraction from the official answer documents is the primary content source
+for ``answer_text`` — not a fallback. The original design assumed LS inline
+text was always empty (the frozen workbook's ``questionText``/``answerText``
+columns are), but upstream API coverage has since widened, so both candidates
+now routinely exist. Which one wins is decided PER FIELD by
+``src/scraping/ls/text_selection.py``: the document wins ``answer_text``
+(it is the only source carrying annexure tables), inline wins
+``question_text`` (the PDF-derived form carries document furniture and can be
+an arbitrary one-third ratio split).
 
 Reuses the canonical, production-proven stack from the legacy archive scraper
 (``src/data/scraper.py``, untouched):

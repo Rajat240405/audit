@@ -13,9 +13,11 @@ not imported across houses):
   ``dc.date.issued``) normalize to ``YYYY-MM-DD``.
 - ministry stamped PER RECORD from the configured ministry the row routed to
   (never a folder default — same decision as RS D5).
-- inline ``questionText``/``answerText`` pass through HTML-stripped (populated
-  only by legacy api_ls rows; modern rows are null — extraction fills from
-  the official documents, and never overwrites upstream inline text).
+- inline ``questionText``/``answerText`` pass through HTML-stripped. They were
+  originally expected to be null outside legacy api_ls rows, but upstream
+  coverage has widened, so both candidates usually exist. They are staged here
+  and arbitrated per field later by ``text_selection`` — normalization never
+  overwrites them and never decides precedence.
 - ``scraped_at`` NOT stamped here (merge-by-id keeps re-runs byte-stable).
 """
 
@@ -87,10 +89,11 @@ def utcnow_iso() -> str:
 def build_record(q: RawLsQuestion, ministry: dict[str, Any]) -> dict[str, Any]:
     """One RawLsQuestion → QARecord-shaped dict.
 
-    ``answer_source``/``documents`` are filled later by the pipeline (after
-    document download + extraction); ``question_text``/``answer_text`` may
-    still be empty here — that is the normal LS case (the frozen workbook's
-    text columns are entirely empty; content comes from the documents).
+    ``answer_source``/``documents`` and the per-field provenance
+    (``question_text_source``/``answer_text_source``/``text_selection_reason``)
+    are filled later by the pipeline, after document download + extraction +
+    arbitration. ``question_text``/``answer_text`` here hold the INLINE
+    candidates only and may be empty.
     """
     return {
         "question_id": record_id(q.loksabha, q.session, q.ques_no),

@@ -21,7 +21,9 @@ Flow per loksabha:
   3. normalize   RawLsQuestion → QARecord-shaped dicts (ids ls-<lok>-<ses>-*
   4. documents   eng/hin slots: blank-link parking (document-not-published),
                  annex suffix retry, DSpace resolution, magic sniff, stage
-  5. answers     inline-first → document-extract (THE primary LS text stage)
+  5. answers     per-field selection: question → inline primary,
+                 answer → document primary, deterministic arbitration
+                 (src/scraping/ls/text_selection.py)
   6. emit        qa.jsonl merged by id + manifest.json — written ONLY when
                  content changed (byte-stable no-change re-runs)
 
@@ -66,6 +68,12 @@ from src.scraping.ls.discovery import Inventory, dedupe_rows
 from src.scraping.ls.documents import UrlCache, plan_slots, process_slot
 from src.scraping.ls.extract import extract_qa
 from src.scraping.ls.normalize import build_record, sort_key, utcnow_iso
+from src.scraping.ls.text_selection import (
+    is_richer,
+    select_answer,
+    select_question,
+    split_was_boundary_based,
+)
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
 from src.utils.atomic_io import write_bytes_atomic
 
@@ -192,48 +200,120 @@ def _target_sessions(ctx: CrawlContext, lok: int, inv: Inventory | None) -> list
     )
 
 
-# ── answer extraction ladder (inline-first → document-extract) ───────────────
+# ── per-field text selection (inline question / document answer, arbitrated) ─
 
-def apply_extraction(
+def select_record_text(
     rec: dict[str, Any],
+    inline_q: str,
+    inline_a: str,
     eng_facts: DocFacts | None,
     eng_body: bytes | None,
     fallback_wanted: bool,
+    *,
+    documents_enabled: bool = True,
 ) -> str | None:
-    """Fill question/answer from the English document when upstream text is
-    absent. Returns the failure cause for the attention log, or None.
+    """Fill question/answer by PER-FIELD arbitration. Returns the failure
+    cause for the attention log, or None.
 
-    Cause vocabulary mirrors the RS ladder (extract-disabled /
-    legacy-format-not-extracted / extract-failed / english-document-
-    unavailable); extract-failed entries carry the finer legacy reason
-    (scanned / parser_failure / unsupported) after a colon.
+    Supersedes the old inline-first ladder (``apply_extraction``). The old
+    ladder only parsed the official English PDF when ``answer_text`` was
+    empty, so a non-empty inline ``answerText`` silently discarded the richer
+    PDF answer — including its annexure tables. Selection now always parses a
+    usable document and then decides per field (see ``text_selection``):
+
+      * ``question_text`` → inline primary, document fallback
+      * ``answer_text``   → document primary, inline fallback
+
+    The cause vocabulary is unchanged (``extract-disabled`` /
+    ``legacy-format-not-extracted`` / ``extract-failed`` /
+    ``english-document-unavailable``, plus ``documents-disabled``), so the
+    manifest and downstream consumers keep working.
     """
     meta = rec["metadata"]
-    if not fallback_wanted:
+
+    doc_q: str | None = None
+    doc_a: str | None = None
+    boundary_split = True          # only meaningful once extraction succeeds
+    meta_cause: str | None = None  # stored in answer_unavailable_cause
+    log_cause: str | None = None   # richer form for the attention log
+
+    if not documents_enabled:
+        meta_cause = log_cause = "documents-disabled"
+    elif not fallback_wanted:
+        meta_cause = log_cause = "extract-disabled"
+    elif eng_facts is None or eng_facts.doc_class not in ("good", "partial"):
+        meta_cause = log_cause = "english-document-unavailable"
+    elif eng_facts.format not in ("pdf", "docx"):
+        meta_cause = log_cause = "legacy-format-not-extracted"
+    else:
+        qa, reason = extract_qa(eng_body or b"", eng_facts.format)
+        if not qa:
+            meta_cause = "extract-failed"
+            log_cause = f"extract-failed: {reason}"
+        else:
+            doc_q, doc_a = qa
+            boundary_split = split_was_boundary_based(doc_a)
+
+    q_sel = select_question(inline_q, doc_q, boundary_split=boundary_split)
+    a_sel = select_answer(inline_a, doc_a, boundary_split=boundary_split,
+                          unavailable_cause=log_cause)
+
+    rec["question_text"] = q_sel.text
+    rec["answer_text"] = a_sel.text
+
+    # answer_source keeps its existing vocabulary (incl. 'unavailable')
+    if a_sel.text:
+        meta["answer_source"] = a_sel.source
+        meta.pop("answer_unavailable_cause", None)
+    else:
         meta["answer_source"] = "unavailable"
-        meta["answer_unavailable_cause"] = "extract-disabled"
-        return "extract-disabled"
-    if eng_facts is None or eng_facts.doc_class not in ("good", "partial"):
-        meta["answer_source"] = "unavailable"
-        meta["answer_unavailable_cause"] = "english-document-unavailable"
-        return "english-document-unavailable"
-    if eng_facts.format not in ("pdf", "docx"):
-        meta["answer_source"] = "unavailable"
-        meta["answer_unavailable_cause"] = "legacy-format-not-extracted"
-        return "legacy-format-not-extracted"
-    qa, reason = extract_qa(eng_body or b"", eng_facts.format)
-    if not qa:
-        meta["answer_source"] = "unavailable"
-        meta["answer_unavailable_cause"] = "extract-failed"
-        return f"extract-failed: {reason}"
-    q_text, a_text = qa
-    if not rec["question_text"] and q_text:
-        rec["question_text"] = q_text
-    if not rec["answer_text"] and a_text:
-        rec["answer_text"] = a_text
-    meta["answer_source"] = "document-extract"
-    meta.pop("answer_unavailable_cause", None)
-    return None
+        meta["answer_unavailable_cause"] = meta_cause or "no-usable-answer"
+
+    # Per-field provenance. Written ONLY when a real choice was made between
+    # two non-empty candidates, so single-source records stay byte-stable and
+    # do not churn qa_content_hash. See text_selection.ALWAYS_RECORD_PROVENANCE.
+    if q_sel.provenance:
+        meta["question_text_source"] = q_sel.source
+    if a_sel.provenance:
+        meta["answer_text_source"] = a_sel.source
+    if q_sel.had_choice or a_sel.had_choice:
+        meta["text_selection_reason"] = f"q={q_sel.reason}; a={a_sel.reason}"
+
+    return None if a_sel.text else (log_cause or "no-usable-answer")
+
+
+def guard_staged_answer(new_row: dict[str, Any],
+                        old_row: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep an already-staged richer document answer over a poorer inline one.
+
+    Covers the re-crawl-with-documents-disabled (or extract-failed) case: the
+    fresh row would otherwise carry only inline text and ``merge_by_id`` would
+    overwrite the richer staged answer on byte difference.
+
+    Fires only when the OLD staged row's answer is document-extracted and
+    materially richer than the new one. A fresh document-extracted answer
+    always wins over an old one (the normal update path). Only ``answer_text``
+    is guarded — ``question_text`` deliberately prefers the cleaner inline form.
+
+    ``merge_by_id`` is shared across houses and is intentionally left
+    untouched; this reconciliation is LS-local.
+    """
+    if not old_row:
+        return new_row
+    old_meta = old_row.get("metadata") or {}
+    if old_meta.get("answer_source") != "document-extract":
+        return new_row
+    new_meta = new_row.setdefault("metadata", {})
+    if new_meta.get("answer_source") == "document-extract":
+        return new_row
+    if not is_richer(old_row.get("answer_text"), new_row.get("answer_text")):
+        return new_row
+    new_row["answer_text"] = old_row["answer_text"]
+    new_meta["answer_source"] = "document-extract"
+    new_meta["answer_text_source"] = "document-extract"
+    new_meta["text_selection_reason"] = "staged-document-retained"
+    new_meta.pop("answer_unavailable_cause", None)
+    return new_row
 
 
 # ── failed-slot bookkeeping (mirror of the RS shape) ─────────────────────────
@@ -312,8 +392,12 @@ def crawl_session(
     for rec, q in pairs:
         meta = rec["metadata"]
         rid = rec["question_id"]
-        if rec["answer_text"]:
-            meta["answer_source"] = "inline"
+        # Capture the inline API candidates BEFORE any document extraction:
+        # selection is per field, so both candidates must stay visible. The
+        # old ladder stamped answer_source="inline" here and then only parsed
+        # the PDF when answer_text was empty, which is what let a shorter
+        # inline answer silently win.
+        inline_q, inline_a = rec["question_text"], rec["answer_text"]
 
         eng_facts: DocFacts | None = None
         eng_body: bytes | None = None
@@ -362,32 +446,28 @@ def crawl_session(
                 if slot.lang == "eng":
                     eng_facts, eng_body = facts, outcome.body
 
-            # inline-first → document-extract (primary LS text stage)
-            if not rec["answer_text"]:
-                cause = apply_extraction(rec, eng_facts, eng_body, fallback_wanted)
-                if cause is not None:
-                    report.attention.append(
-                        {"id": rid, "reason": f"no usable answer ({cause})"}
-                    )
-        elif not rec["answer_text"]:
-            meta["answer_source"] = "unavailable"
-            meta["answer_unavailable_cause"] = "documents-disabled"
+        # Per-field selection. Always runs; `documents_enabled` gates whether a
+        # document candidate exists at all. Returns the attention-log cause.
+        cause = select_record_text(
+            rec, inline_q, inline_a, eng_facts, eng_body, fallback_wanted,
+            documents_enabled=bool(ctx.opts.fetch_documents),
+        )
+        if cause is not None:
             report.attention.append(
-                {"id": rid, "reason": "no usable answer (documents-disabled)"}
-            )
-
-        if not rec["answer_text"] and meta["answer_source"] is None:
-            meta["answer_source"] = "unavailable"
-            meta["answer_unavailable_cause"] = "english-document-unavailable"
-            report.attention.append(
-                {"id": rid, "reason": "no usable answer (english-document-unavailable)"}
+                {"id": rid, "reason": f"no usable answer ({cause})"}
             )
 
     # emit qa.jsonl (merge by id; write only on byte difference)
     existing_rows = rec_utils.load_jsonl(session_dir / QA_JSONL)
+    staged_by_id = {r.get("question_id"): r for r in existing_rows}
+    # LS-local guard: a poorer re-crawl (documents disabled / extract failed)
+    # must not overwrite a richer already-staged document answer. merge_by_id
+    # is shared across houses and is deliberately left untouched.
+    new_rows = [guard_staged_answer(rec, staged_by_id.get(rec["question_id"]))
+                for rec, _ in pairs]
     merged, stats = rec_utils.merge_by_id(
         existing_rows,
-        [rec for rec, _ in pairs],
+        new_rows,
         key=lambda r: r["question_id"],
         sort_key=sort_key,
     )

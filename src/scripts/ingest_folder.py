@@ -204,6 +204,19 @@ def qa_content_hash(rec) -> str:
     """
     d = rec.model_dump(mode="json", exclude={"scraped_at"})
     d.pop("content_hash", None)
+    # Per-field text provenance (LS inline-vs-document arbitration) is
+    # HASH-INERT while unset. These keys were added after the corpus was
+    # built, so dumping them as ``null`` would re-hash every existing record
+    # and force a full GraphRAG re-extraction of 2,648 documents for a
+    # change that touched none of their text. When they ARE set, a real
+    # arbitration happened and the selected text changed anyway — so they
+    # legitimately belong in the hash then.
+    _meta = d.get("metadata")
+    if isinstance(_meta, dict):
+        for _k in ("question_text_source", "answer_text_source",
+                   "text_selection_reason"):
+            if _meta.get(_k) is None:
+                _meta.pop(_k, None)
     blob = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
