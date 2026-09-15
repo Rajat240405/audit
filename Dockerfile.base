@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
         tesseract-ocr \
         tesseract-ocr-eng \
+        tesseract-ocr-hin \
     && rm -rf /var/lib/apt/lists/*
 
 # GPU torch (CUDA 12.4 wheels) — pinned for reproducible SIF builds (#6).
@@ -56,6 +57,7 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
         "pypdf>=5.0.0" \
         "python-docx>=1.1.0" \
         "PyMuPDF>=1.24.0" \
-        "pytesseract>=0.3.10"
+        "pytesseract>=0.3.10" \
+        "opencv-python-headless"
 
 RUN mkdir -p /data /storage/hybrid_rag /storage/graphrag /models /models/hf-cache

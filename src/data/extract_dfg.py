@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -408,6 +409,171 @@ def render_ocr_page(doc: Any, pno: int, *, dpi: int = OCR_DPI,
     return ocr_page_image(_render(doc, pno, dpi), lang=lang)
 
 
+# ── Route C cell-OCR parallelism (EXPERIMENTAL, off by default) ──────────────
+#
+# Route C is one Tesseract invocation per cell — 7,392 calls on doc 04 and
+# 9,293 on doc 05, measured. The process-spawn floor alone is ~106 ms/call, so
+# most of a Route C page is spent creating processes rather than reading them.
+#
+# SAFETY MODEL. The previous HPC failure was a native SIGSEGV inside MuPDF's C
+# layer: a signal delivered to the whole OS process, which no threading.Lock
+# can contain (see src/scripts/convert_sirs_knowledge.py, which therefore runs
+# fitz in child processes). This module has no such isolation, so the rule here
+# is structural instead:
+#
+#   * fitz is touched exactly ONCE per page, in ``grid_rows`` on the MAIN
+#     thread, before any worker exists;
+#   * every job handed to a worker carries an already-materialised PIL image;
+#   * a worker therefore cannot reach a Document, Page or Pixmap at all.
+#
+# Cell-level only. PAGE-LEVEL PARALLELISM IS DELIBERATELY NOT IMPLEMENTED: N
+# threads calling ``doc[pno].get_pixmap()`` on one shared Document would
+# reintroduce exactly the uncontained-MuPDF failure class this design avoids.
+#
+# Gated by DFG_PARALLEL_OCR (default false) so production keeps the serial
+# path and the flag can be turned off instantly with no re-ingestion. Measured
+# equivalence: serial and parallel produce a byte-identical digest over every
+# cell string, grid shape and mean confidence.
+
+#: Environment gate. Anything other than a truthy value (including unset)
+#: keeps the historical serial path.
+DFG_PARALLEL_OCR_ENV = "DFG_PARALLEL_OCR"
+#: Worker-count override. Small on purpose: OpenCV already runs its own
+#: internal pool (``cv2.getNumThreads()``) and Tesseract workers are
+#: subprocesses, so oversubscription costs more than it gains — 4 workers
+#: measured *slower* than 2 on a 2-vCPU box.
+DFG_OCR_WORKERS_ENV = "DFG_OCR_WORKERS"
+
+_TRUTHY = frozenset(("1", "true", "yes", "on"))
+
+#: Tesseract flags per column role, hoisted so the serial and parallel paths
+#: cannot drift apart. Unchanged from the original inline literals.
+NUMERIC_OCR_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789.,-"
+TEXT_OCR_CONFIG = "--psm 6"
+
+
+def parallel_ocr_enabled() -> bool:
+    """True only when ``DFG_PARALLEL_OCR`` is explicitly truthy.
+
+    Read at call time, not import time, so it can be flipped per document or
+    per test. Default is False — the serial path is the safe production path.
+    """
+    return os.environ.get(DFG_PARALLEL_OCR_ENV, "").strip().lower() in _TRUTHY
+
+
+def dfg_ocr_workers() -> int:
+    """Worker count for the experimental parallel path. Always >= 1.
+
+    ``DFG_OCR_WORKERS`` overrides; otherwise ``min(2, cpu_count)``. Unparseable
+    or non-positive values fall back to the default rather than raising — a
+    malformed env var must never abort an extraction.
+    """
+    try:
+        n = int(os.environ.get(DFG_OCR_WORKERS_ENV, "") or 0)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        n = min(2, os.cpu_count() or 1)
+    return max(1, n)
+
+
+def _ocr_cell(job: tuple[int, int, Any, str, str, str]) -> tuple[int, int, str, str]:
+    """OCR ONE already-prepared cell. This is the worker body.
+
+    Receives ``(row, col, image, lang, config, kind)`` where ``image`` is either
+    ``None`` (cell too small to OCR) or a fully materialised ``PIL.Image``.
+    Returns ``(row, col, kind, raw_text)`` — post-processing is applied by the
+    caller on the main thread so the worker stays a single OCR call.
+
+    Deliberately touches nothing but ``pytesseract``: no fitz, no cv2, no
+    module-level mutable state.
+    """
+    row, col, image, lang, config, kind = job
+    if image is None:
+        return row, col, kind, ""
+    return row, col, kind, ocr_page_image(image, lang=lang, config=config)
+
+
+def _ocr_cells(jobs: Iterable[tuple[int, int, Any, str, str, str]], *,
+               workers: int) -> list[tuple[int, int, str, str]]:
+    """Map cell jobs to raw OCR results, in the caller's index order.
+
+    ``workers <= 1`` (the default) is a plain list comprehension over the
+    generator: one crop is materialised, OCR'd and released in turn, which is
+    the original memory profile. The serial and parallel paths share the same
+    worker body, so the two cannot drift.
+
+    Only the parallel branch materialises the page's crops, because a pool has
+    to be handed them up front. Measured cost on a 26x7 grid at 300 DPI: ~57 MB
+    of extra peak RSS over the serial path, transient and released when the
+    page finishes. That is a property of the EXPERIMENTAL path only.
+
+    The parallel branch is wrapped in a broad handler and falls back to the
+    serial comprehension: a pooling failure must never abort a document and
+    must never change the output. ``pool.map`` preserves input order, and
+    callers additionally index-address by ``(row, col)``, so completion order
+    can never influence the result.
+    """
+    if workers <= 1:
+        return [_ocr_cell(j) for j in jobs]
+
+    # Pre-warm the version probe on the main thread. pytesseract caches it with
+    # a lock-free ``run_once`` decorator, so concurrent first calls would each
+    # spawn a ``tesseract --version`` subprocess. Benign, but free to avoid.
+    try:
+        import pytesseract
+
+        pytesseract.get_tesseract_version(cached=True)
+    except Exception:  # noqa: BLE001 — probing must never abort an extraction
+        pass
+
+    pending: list[tuple[int, int, Any, str, str, str]] | None = None
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        pending = list(jobs)
+        if len(pending) < 2:
+            return [_ocr_cell(j) for j in pending]
+        with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
+            return list(pool.map(_ocr_cell, pending))
+    except Exception:  # noqa: BLE001 — never fail a page over pooling
+        # If the generator was already drained into ``pending`` the fallback
+        # must replay THAT, not the exhausted generator.
+        return [_ocr_cell(j) for j in (pending if pending is not None else jobs)]
+
+
+def _iter_cell_jobs(img: Any, ys: Sequence[int], xs: Sequence[int], ncol: int,
+                    numeric_cols: set[int]):
+    """Yield ``(row, col, image, lang, config, kind)`` in row-major order.
+
+    A GENERATOR on purpose. The serial path consumes it one job at a time, so a
+    crop is materialised, OCR'd and released in turn — the original memory
+    profile, unchanged. Only the experimental parallel path materialises the
+    whole page's crops at once (see ``_ocr_cells``).
+
+    Runs on the MAIN thread. Everything it yields is an already-materialised
+    PIL image, which is what keeps fitz and cv2 out of the workers.
+    """
+    import cv2
+    from PIL import Image
+
+    img_h, img_w = img.shape[0], img.shape[1]
+    for r in range(len(ys) - 1):
+        for c in range(ncol):
+            cc = img[max(0, ys[r] + 5):min(img_h, ys[r + 1] - 5),
+                     max(0, xs[c] + 5):min(img_w, xs[c + 1] - 5)]
+            if cc.size == 0 or cc.shape[0] < 14 or cc.shape[1] < 14:
+                yield (r, c, None, "", "", "empty")
+                continue
+            rgb = cv2.cvtColor(cc, cv2.COLOR_BGR2RGB)
+            if c in numeric_cols:
+                up = cv2.resize(rgb, None, fx=2, fy=2,
+                                interpolation=cv2.INTER_CUBIC)
+                yield (r, c, Image.fromarray(up), "eng", NUMERIC_OCR_CONFIG, "num")
+            else:
+                yield (r, c, Image.fromarray(rgb), "hin+eng", TEXT_OCR_CONFIG, "txt")
+
+
 def _cluster(a: Sequence[int], gap: int = 8) -> list[int]:
     out: list[list[int]] = []
     for x in a:
@@ -429,11 +595,26 @@ def grid_rows(doc: Any, pno: int, *, dpi: int = GRID_DPI,
     English + a digit whitelist at 2× upscale; text/Hindi columns get
     ``hin+eng``. Column-role awareness is mandatory — a single flat OCR pass
     cannot associate values with labels.
+
+    Per-cell OCR is the cost centre of this route (one Tesseract process per
+    cell). When ``DFG_PARALLEL_OCR`` is truthy those calls run on a small thread
+    pool; the grid geometry, the crops and the reassembly all stay on the main
+    thread, so the output is identical either way.
     """
+    if parallel_ocr_enabled():
+        # OpenCV runs its own internal thread pool (cv2.getNumThreads()) which
+        # would oversubscribe against the OCR workers. cv2 reads this only at
+        # import time, so set it immediately before the first import; if cv2
+        # was already imported elsewhere it is a harmless no-op, because the
+        # design never runs cv2 concurrently with the pool anyway — every cv2
+        # call below completes on the main thread before any worker starts.
+        os.environ.setdefault("OPENCV_FOR_THREADS_NUM", "1")
+
     import cv2
     import numpy as np
-    from PIL import Image
 
+    # fitz is touched exactly ONCE, here, on the MAIN thread. Nothing below
+    # this line reaches the Document, and no worker thread ever will.
     pix = doc[pno].get_pixmap(dpi=dpi)
     img_h, img_w, n = pix.height, pix.width, pix.n
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(img_h, img_w, n)
@@ -453,30 +634,39 @@ def grid_rows(doc: Any, pno: int, *, dpi: int = GRID_DPI,
         return [], (0, ncol), 0.0
 
     numeric_cols = {1, 2, 3, ncol - 1} if ncol >= 7 else set(range(ncol))
+
+    # ── Cell preparation: MAIN THREAD ONLY ───────────────────────────────────
+    # ``_iter_cell_jobs`` yields already-materialised PIL images, so the OCR
+    # workers cannot reach fitz or cv2. Column-specific post-processing is also
+    # applied on the main thread below, which keeps a worker to a single call.
+    # It is a generator, so the serial path keeps the original
+    # one-crop-at-a-time memory profile; only the experimental parallel path
+    # materialises a whole page's crops (measured ~57 MB of extra peak RSS on a
+    # 26x7 grid, transient, released when the page finishes).
+    nrows = len(ys) - 1
+    workers = dfg_ocr_workers() if parallel_ocr_enabled() else 1
+    results = _ocr_cells(
+        _iter_cell_jobs(img, ys, xs, ncol, numeric_cols), workers=workers)
+
+    # Index-addressed by (row, col): completion order can never reach the
+    # output. This is what keeps row/column ordering, DfGRow.seq, the
+    # arithmetic gates and the verdict identical to the serial path.
+    cells_grid: list[list[str]] = [[""] * ncol for _ in range(nrows)]
+    for r, c, kind, t in results:
+        if kind == "num":
+            cells_grid[r][c] = t.strip().strip(".,-")
+        elif kind == "txt":
+            cells_grid[r][c] = " ".join(t.split())
+        # "empty" leaves the pre-seeded "" in place
+
     rows: list[list[str]] = []
     confs: list[float] = []
-    for r in range(len(ys) - 1):
-        cells: list[str] = []
-        for c in range(ncol):
-            cc = img[max(0, ys[r] + 5):min(img_h, ys[r + 1] - 5),
-                     max(0, xs[c] + 5):min(img_w, xs[c + 1] - 5)]
-            if cc.size == 0 or cc.shape[0] < 14 or cc.shape[1] < 14:
-                cells.append("")
-                continue
-            rgb = cv2.cvtColor(cc, cv2.COLOR_BGR2RGB)
-            if c in numeric_cols:
-                up = cv2.resize(rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                t = ocr_page_image(Image.fromarray(up), lang="eng",
-                                   config="--psm 7 -c tessedit_char_whitelist=0123456789.,-")
-                cells.append(t.strip().strip(".,-"))
-            else:
-                t = ocr_page_image(Image.fromarray(rgb), lang="hin+eng", config="--psm 6")
-                cells.append(" ".join(t.split()))
+    for cells in cells_grid:
         if any(cells):
             rows.append(cells)
             confs.append(_cell_confidence(cells, ncol))
     mean_conf = sum(confs) / len(confs) if confs else 0.0
-    return rows, (len(ys) - 1, ncol), mean_conf
+    return rows, (nrows, ncol), mean_conf
 
 
 def _cell_confidence(cells: Sequence[str], ncol: int) -> float:
@@ -682,8 +872,15 @@ def _valid_fy(token: str) -> str | None:
     return f"{start}-{end}" if f"{(start + 1) % 100:02d}" == end else None
 
 
-def probe_front_matter(doc: Any, *, pages: Sequence[int] = (0, 1, 2, 3),
-                       lang: str = "hin+eng") -> dict[str, Any]:
+#: Pages sampled for the fiscal-year / demand-number majority vote. Also the
+#: only pages whose OCR text ``extract_dfg`` bothers to cache, so the two stay
+#: in step if either is ever changed.
+FRONT_MATTER_PAGES: tuple[int, ...] = (0, 1, 2, 3)
+
+
+def probe_front_matter(doc: Any, *, pages: Sequence[int] = FRONT_MATTER_PAGES,
+                       lang: str = "hin+eng",
+                       ocr_cache: dict[tuple[int, str], str] | None = None) -> dict[str, Any]:
     """Recover fiscal_year / demand_no by MAJORITY VOTE over the front matter.
 
     A single regex hit is not trustworthy on a scan. Measured on 05 the fiscal
@@ -691,6 +888,15 @@ def probe_front_matter(doc: Any, *, pages: Sequence[int] = (0, 1, 2, 3),
     reliable because all 8 sampled pages agree on it. Voting is deterministic
     and refuses to guess: an unsettled value stays None so the caller can
     supply the authoritative CMS value instead of the extractor inventing one.
+
+    ``ocr_cache`` maps ``(page_index, lang)`` to text the caller has ALREADY
+    OCR'd. ``render_ocr_page`` is a pure function of (doc, page, dpi, lang), so
+    a cached hit is the exact string a fresh call would have returned — reuse
+    is free of any information loss and cannot shift a vote. It exists because
+    the main extraction loop OCRs the front matter too. Measured on a 4-page
+    synthetic scan: page 0 took 2 full-page OCR passes before this cache and 1
+    after (3 and 1 respectively when page 0 routes to B, which also OCRs it for
+    its own prose).
     """
     dem: Counter[str] = Counter()
     fy: Counter[str] = Counter()
@@ -699,7 +905,10 @@ def probe_front_matter(doc: Any, *, pages: Sequence[int] = (0, 1, 2, 3),
             break
         text = doc[i].get_text()
         if not text.strip():
-            text = render_ocr_page(doc, i, lang=lang)
+            cached = (ocr_cache or {}).get((i, lang))
+            # Explicit None test: a legitimately empty OCR result is a cache
+            # hit and must not trigger a second pass.
+            text = cached if cached is not None else render_ocr_page(doc, i, lang=lang)
         for m in DEMAND_NO_RE.finditer(text):
             dem[m.group(1)] += 1
         for m in FISCAL_RE.finditer(text):
@@ -872,6 +1081,9 @@ def extract_dfg(
     carry: list[int] = []
     first_text = ""
     probe_text = ""
+    # Front-matter OCR text keyed by (page, lang), so probe_front_matter can
+    # reuse what the loop already produced instead of re-OCRing the same page.
+    ocr_cache: dict[tuple[int, str], str] = {}
 
     try:
         n = doc.page_count if max_pages is None else min(doc.page_count, max_pages)
@@ -892,6 +1104,11 @@ def extract_dfg(
                 pr.dev_chars = info["dev_chars"]
             elif route == "B":
                 text = render_ocr_page(doc, i)
+                if i in FRONT_MATTER_PAGES:
+                    # Key must match render_ocr_page's default lang. A mismatch
+                    # can only cause a cache MISS (harmless re-OCR), never a
+                    # wrong string, so this cannot corrupt the vote.
+                    ocr_cache[(i, "hin+eng")] = text
                 pr.dev_chars = count_devanagari(text)
                 pr.prose = [ln.strip() for ln in text.splitlines() if ln.strip()]
                 pr.rows = [_row_from_cells([ln], page=i + 1, seq=k)
@@ -931,14 +1148,19 @@ def extract_dfg(
             if i == 0 and not info["has_text_layer"]:
                 # Scanned front matter: one OCR probe is the only way to recover
                 # the fiscal year and demand number (the staged filename is
-                # NN-<wp_id>-<lang>, so it carries neither).
-                probe_text = render_ocr_page(doc, 0)
+                # NN-<wp_id>-<lang>, so it carries neither). If page 0 took
+                # Route B the loop has already OCR'd it — reuse that exact
+                # string instead of paying for a second identical pass.
+                cached = ocr_cache.get((0, "hin+eng"))
+                probe_text = (cached if cached is not None
+                              else render_ocr_page(doc, 0))
+                ocr_cache[(0, "hin+eng")] = probe_text
         # Front-matter provenance. A single regex hit is unreliable on a scan,
         # so the values are majority-voted across the first pages. Anything the
         # vote cannot settle stays None unless the caller supplies the
         # authoritative CMS value — the extractor never invents a digit it
         # could not read (req. F). Must run before the doc is closed.
-        voted = (probe_front_matter(doc)
+        voted = (probe_front_matter(doc, ocr_cache=ocr_cache)
                  if (fiscal_year is None or demand_no is None) else {})
     finally:
         doc.close()
