@@ -52,7 +52,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -587,22 +586,22 @@ def _seed_seen_hashes_by_url() -> dict[str, str]:
     return hashes
 
 
-_DFG_IDENTITY_RE = re.compile(r"(\d+)-(eng|hin|both)$")
-
-
 def _dfg_identity_from_url(url: str | None) -> str | None:
     """DfG document identity from a staged ``source_url``, or None.
 
-    Staged DfG files are ``NN-<attachment_wp_id>-<slot>.pdf`` and the attachment
-    id is immutable upstream, so ``<wp_id>-<slot>`` identifies the document
-    independently of which extraction produced the row. Keying on that (rather
-    than on a content hash) is what lets a re-extraction be recognised as the
-    same document.
+    Delegates to ``convert_sirs_knowledge._dfg_doc_identity`` — the single
+    definition of DfG document identity — so the migration and the id-minting
+    path can never drift apart. Returns ``None`` for any filename that is not a
+    staged DfG file, which is what keeps non-DfG rows out of scope entirely.
     """
     if not url:
         return None
-    m = _DFG_IDENTITY_RE.search(Path(str(url)).stem)
-    return f"{m.group(1)}-{m.group(2)}" if m else None
+    from src.scripts.convert_sirs_knowledge import _DFG_STEM_RE, _dfg_doc_identity
+
+    stem = Path(str(url)).stem
+    if not _DFG_STEM_RE.match(stem):
+        return None
+    return _dfg_doc_identity(Path(stem))
 
 
 def _dfg_superseded_for(incoming: dict[str, str]) -> set[str]:

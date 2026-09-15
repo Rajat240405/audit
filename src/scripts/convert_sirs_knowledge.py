@@ -378,13 +378,21 @@ _DFG_STEM_RE = re.compile(r"^(\d+)-(\d+)-(eng|hin|both)$")
 def _dfg_doc_identity(path: Path) -> str:
     """Stable document identity for a staged DfG file (spec req. K).
 
-    Staged names are ``NN-<attachment_wp_id>-<slot>.pdf``. The attachment id is
-    immutable upstream, so keying on ``<wp_id>-<slot>`` makes re-ingestion of
-    the same source REPLACE its record instead of adding a second content-hash
-    row every time the extracted text improves.
+    Staged names are built by ``documents.py`` as
+    ``f"{row + 1:02d}-{record['wp_id']}-{lang}.{ext}"`` — i.e.
+    ``<row>-<POST_wp_id>-<slot>.pdf``.
+
+    The identity MUST include the row. ``wp_id`` is the *post* id, so it is
+    24108 for every one of the five DfG attachments, and four of them use the
+    ``both`` slot. Keying on ``<wp_id>-<slot>`` alone therefore collapsed
+    02/03/04/05 onto a single ``question_id``; the ingest ``seen`` set then
+    discarded three of the four as duplicates, which is exactly the production
+    symptom ("no records extracted" after 16 minutes of OCR each). Including the
+    row keeps re-ingestion of the same source a REPLACE while keeping distinct
+    attachments distinct.
     """
     m = _DFG_STEM_RE.match(path.stem)
-    return f"{m.group(2)}-{m.group(3)}" if m else path.stem
+    return f"{m.group(2)}-{m.group(1)}-{m.group(3)}" if m else path.stem
 
 
 def _convert_dfg_pdf(path: Path, out: list[QARecord], seen: set[str], *,
