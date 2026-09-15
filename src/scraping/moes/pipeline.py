@@ -32,7 +32,7 @@ from typing import Any
 from src.scraping import records as recs
 from src.scraping.http import HttpApiError, HttpTransportError
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
-from src.scraping.moes import normalize
+from src.scraping.moes import normalize, pq_gate
 from src.scraping.moes.config import (
     download_languages,
     resolve_categories,
@@ -46,6 +46,21 @@ RECORD_NAME = "record.json"
 ATTACHMENT_MAP_NAME = "attachment-map.json"
 LAST_RUN_NAME = "last_run.json"
 TOMBSTONE_ATTENTION_AFTER = 3
+
+
+def pq_gate_enabled(cfg: dict[str, Any], category: str) -> bool:
+    """Is the discovery-time PQ gate switched on for this category?
+
+    Read from ``categories.<category>.exclude_parliament_questions``.
+    Fail-CLOSED: an absent key, a non-mapping category entry, or a
+    non-boolean value all disable the gate rather than guessing — a malformed
+    config must never silently start dropping posts.
+    """
+    try:
+        entry = (cfg.get("categories") or {}).get(category) or {}
+        return entry.get("exclude_parliament_questions") is True
+    except AttributeError:
+        return False
 
 
 @dataclass
@@ -201,7 +216,8 @@ def category_run(
         "scoped_out": [], "added": 0, "changed": 0, "unchanged": 0,
         "docs": {"good": 0, "partial": 0, "broken": 0},
         "failed": 0, "skipped_external": 0, "attention": 0, "tombstoned": 0,
-        "pq_titled": 0, "failures": [], "bytes_changed": False,
+        "pq_titled": 0, "pq_excluded": 0, "pq_audit": 0,
+        "failures": [], "bytes_changed": False,
     }
 
     # ── listing ───────────────────────────────────────────────────────────────
@@ -257,6 +273,44 @@ def category_run(
             fs["file_rows"] += len(r["files"])
         summary["families"] = fam_stats
 
+    # ── discovery-time parliamentary-question gate ────────────────────────────
+    # Runs AFTER normalisation (title/slug exist) and BEFORE attachment
+    # resolution, so a gated post costs neither the per-id resolve call nor any
+    # PDF byte. `needed_ids` below is derived from `download_scope`, so
+    # subtracting the gated records here is sufficient — there is no second id
+    # list that could drift out of step.
+    #
+    # Gated records are NOT dropped from `in_scope`: the per-record loop still
+    # writes their `record.json` and still tombstones them normally, so the
+    # manifest keeps its frozen semantics (no deletions, provenance survives,
+    # idempotent). Only the download is suppressed.
+    #
+    # Layer 2 (the post-download content-containment net in moes/dedup.py) is
+    # untouched and still owns the PQ-derived documents that carry no PQ title.
+    gate_on = pq_gate_enabled(ctx.cfg, category)
+    download_scope = in_scope
+    gated: list[dict[str, Any]] = []
+    pq_excluded_rows: list[dict[str, Any]] = []
+    gated_ids: set[str] = set()
+    if gate_on:
+        download_scope, gated = [], []
+        for r in in_scope:
+            verdict = pq_gate.pq_gate_verdict(r)
+            if verdict.exclude:
+                gated.append(r)
+                pq_excluded_rows.append(verdict.as_manifest_entry(r))
+            else:
+                download_scope.append(r)
+                if verdict.audit:
+                    pq_excluded_rows.append(verdict.as_manifest_entry(r))
+        gated_ids = {r["id"] for r in gated}
+        summary["pq_excluded"] = len(gated)
+        summary["pq_audit"] = sum(
+            1 for e in pq_excluded_rows if not e["excluded"])
+    else:
+        summary["pq_excluded"] = 0
+        summary["pq_audit"] = 0
+
     planned_downloads = sum(1 for r in in_scope for f in r["files"]
                             if f.get("attachment_id") is not None)
     summary["file_rows"] = {
@@ -266,12 +320,16 @@ def category_run(
         "empty": sum(1 for r in in_scope for f in r["files"]
                      if f.get("attachment_id") is None and not f.get("external_url")),
     }
+    # what the gate actually prevents, expressed in the same unit
+    summary["planned_downloads_after_pq_gate"] = sum(
+        1 for r in download_scope for f in r["files"]
+        if f.get("attachment_id") is not None)
 
     # ── dry-run stops here (no writes; optional read-only resolve probe) ─────
     if ctx.opts.dry_run:
         summary["status"] = "dry-run"
         if ctx.opts.resolve_attachments and planned_downloads:
-            needed = {int(f["attachment_id"]) for r in in_scope for f in r["files"]
+            needed = {int(f["attachment_id"]) for r in download_scope for f in r["files"]
                       if f.get("attachment_id") is not None}
             attach.ensure(ctx.api, needed)          # per-id failure isolation
             resolved = len(needed & set(attach.links))
@@ -285,7 +343,7 @@ def category_run(
 
     # ── attachment resolution for downloads (per-id failure isolation) ───────
     if ctx.opts.fetch_documents and planned_downloads:
-        needed_ids = {int(f["attachment_id"]) for r in in_scope for f in r["files"]
+        needed_ids = {int(f["attachment_id"]) for r in download_scope for f in r["files"]
                       if f.get("attachment_id") is not None}
         attach.ensure(ctx.api, needed_ids)
 
@@ -327,7 +385,7 @@ def category_run(
         unchanged = bool(prior_rec) and prior_rec.get("row_sha256") == row_hash
 
         rewrite_record = not unchanged or not (record_dir / RECORD_NAME).exists()
-        reprocess = ctx.opts.fetch_documents and (
+        reprocess = ctx.opts.fetch_documents and record["id"] not in gated_ids and (
             not unchanged
             or any(e.get("class") == "broken" for e in prior_entries)   # retry failed
             or not _verify_prior_entries(record_dir, prior_entries)
@@ -426,6 +484,12 @@ def category_run(
         "failed_slots": failed_slots,
         "skipped_external": skipped,
         "attention": attention,
+        # Audit bucket for the discovery-time PQ gate: what was skipped, why,
+        # and which attachment ids were therefore never resolved or fetched.
+        # Entries with excluded=false are audit-only alarms (tier-2 / slug-only)
+        # and are retained so upstream convention drift stays visible.
+        "pq_excluded": sorted(pq_excluded_rows,
+                              key=lambda e: str(e.get("record_id"))),
     }
     cat_dir.mkdir(parents=True, exist_ok=True)
     if prior is None or not manifests_equal(prior, manifest):
@@ -496,6 +560,17 @@ def run(ctx: CrawlContext) -> dict[str, Any]:
             pq_stats = {
                 "discovered": summary["discovered"],
                 "pq_titled": summary["pq_titled"],
+                # Gate outcome. `pq_titled` counts the legacy unanchored regex
+                # (tier-1 ∪ tier-2); `pq_excluded` counts only tier-1, the
+                # signal strong enough to act on. Their divergence is the drift
+                # alarm: a sudden gap means upstream titles are moving to a
+                # shape the tier-1 anchor no longer matches, and the
+                # ingestion-time content net is absorbing the difference.
+                "pq_excluded": summary["pq_excluded"],
+                "pq_audit": summary["pq_audit"],
+                "pq_gate_enabled": bool(summary.get("pq_excluded") or
+                                        summary.get("pq_audit") or
+                                        pq_gate_enabled(ctx.cfg, category)),
                 "pq_sha_exact_match_in_parliamentary_corpus": None,   # NOT COMPUTED
                 "pq_not_present_in_parliamentary_corpus": None,       # NOT COMPUTED
                 "uncomparable_missing_or_broken":

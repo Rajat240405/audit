@@ -85,4 +85,31 @@ categories:
         # are never skipped: bilingual documents are not purged.
         extraction_profile: demands-for-grants   # → src/data/extract_dfg.py
         skip_slots: ["hin"]
-  press-release: {}               # whole category, no family subdivision
+  press-release:                  # whole category, no family subdivision
+    # Discovery-time parliamentary-question exclusion (layer 1 of 2).
+    #
+    # Enforced by src/scraping/moes/pq_gate.py, evaluated in
+    # src/scraping/moes/pipeline.py::category_run AFTER normalisation and
+    # BEFORE AttachmentMap.ensure(), so an excluded post costs neither the
+    # per-attachment resolve call nor any PDF byte.
+    #
+    # TIER-1 ONLY: a separator-anchored title (``PARLIAMENT QUESTION: …``,
+    # ``PARLIAMENT QUESTIONS - …``, tolerating the live PARLIAMNENT/PARLIAMET
+    # typos). Unanchored PQ-looking titles and PQ-looking slugs are recorded as
+    # audit alarms and are NEVER excluded — that is what keeps genuine news
+    # headlines such as "Parliament Questions Ministry's climate claims" in
+    # scope. Measured on the live site: 209/209 PQ posts caught, 0 false
+    # positives.
+    #
+    # Exclusion is download-only. Gated posts still get a record.json, still
+    # appear in last_run.json (records[] and the pq_excluded audit bucket), and
+    # still tombstone normally — nothing is deleted.
+    #
+    # Layer 2 is the post-download content-containment net
+    # (src/scraping/moes/dedup.py + config/moes_pq_dedup.yaml), which is
+    # unaffected by this flag and still owns the PQ-derived documents that
+    # carry no PQ title (backfill batches, unprefixed summaries, news-styled
+    # same-day reports).
+    #
+    # `false` (or omitting the key) restores pre-gate behaviour exactly.
+    exclude_parliament_questions: true

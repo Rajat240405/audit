@@ -913,21 +913,82 @@ index_is_usable = _engine._index_exists
 _moes_dedup_cache: dict[str, object] = {}
 
 
+def _moes_pq_tier1_staged_excludes() -> set[str]:
+    """Basenames of already-staged MoES files whose post title is tier-1 PQ.
+
+    WHY THIS IS NEEDED
+    ------------------
+    The discovery-time gate (``moes/pq_gate.py``) only stops *future* crawls.
+    Bytes already sitting under ``data/.moes-website/`` are still converted on
+    the next ``ingest moes_website`` run, so a one-time corpus cleanup would be
+    silently undone — every removed row re-appears, and
+    ``sync_sources.merge_scratch_into_corpus`` is an explicit id-union that can
+    never shrink the corpus.
+
+    This closes that hole at the existing ``exclude_files`` seam: the engine
+    already skips these names before any conversion or OCR work.
+
+    Uses the SAME tier-1 detector as the crawler gate, so prevention and
+    cleanup can never disagree about what a PQ document is.
+
+    Safe by default: a missing staging root, an unreadable ``record.json``, or
+    any failure yields no exclusions — ingestion preserves everything rather
+    than risk dropping a genuine document.
+    """
+    out: set[str] = set()
+    try:
+        from src.scraping.moes.pq_gate import title_is_pq_tier1
+        from src.utils.app_paths import data_dir
+
+        root = data_dir() / ".moes-website"
+        if not root.is_dir():
+            return out
+        for record_json in root.glob("*/*/record.json"):
+            try:
+                rec = json.loads(record_json.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — unreadable sidecar: keep the file
+                continue
+            if not title_is_pq_tier1(str(rec.get("title") or "")):
+                continue
+            docs = record_json.parent / "documents"
+            if not docs.is_dir():
+                continue
+            out.update(f.name.lower() for f in docs.iterdir() if f.is_file())
+    except Exception:  # noqa: BLE001 — auxiliary: never fail ingestion
+        return out
+    return out
+
+
 def _moes_website_dedup_excludes() -> set[str]:
-    """Filenames of confirmed-duplicate MoES PQ documents to exclude at ingest.
+    """Filenames of MoES PQ documents to exclude at ingest.
+
+    Two independent, complementary sources:
+
+    1. the post-download content-containment net (``moes/dedup.py``) — confirmed
+       duplicates of the parliamentary corpus, by SHA-256 / 5-gram containment;
+    2. the tier-1 title gate applied to bytes already on disk, which is what
+       keeps a historical cleanup from being resurrected by the next run.
 
     Computed once per process (cached). Safe by default: missing corpora or any
     failure returns an empty set, so ingestion preserves everything rather than
     risk a false exclusion. Only applies to the `moes_website` source."""
     if "done" in _moes_dedup_cache:
         return _moes_dedup_cache["done"]  # type: ignore[return-value]
+    content_net: set[str] = set()
     try:
         from src.scraping.moes import dedup as _moes_dedup
 
         result = _moes_dedup.moes_website_dedup()
-        _moes_dedup_cache["done"] = result.excluded_filenames
+        content_net = set(result.excluded_filenames)
     except Exception:  # noqa: BLE001 — dedup is auxiliary; never fail ingestion
-        _moes_dedup_cache["done"] = set()
+        content_net = set()
+    staged_net = _moes_pq_tier1_staged_excludes()
+    _moes_dedup_cache["done"] = content_net | staged_net
+    if staged_net:
+        _engine.log(
+            f"[ingest:moes_website] tier-1 PQ gate: {len(staged_net)} staged file(s) "
+            f"excluded ({len(content_net)} from the content net)"
+        )
     return _moes_dedup_cache["done"]  # type: ignore[return-value]
 
 
