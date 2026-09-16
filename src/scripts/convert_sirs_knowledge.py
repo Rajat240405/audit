@@ -801,6 +801,94 @@ def _ocr_pdf_text(path: Path, max_pages: int | None = None,
     return "\n\n".join(pages_text)
 
 
+# ── INCOIS enhanced (V2) core extraction ─────────────────────────────────────
+#
+# Enhanced extraction is the normal path for INCOIS PDFs
+# (``INCOIS_ENHANCED_EXTRACTION``, default on). It recovers page-by-page text
+# including OCR, plus normal tables, and returns page-tagged text with tables as
+# markdown. Figure/crop artifacts are captured to sidecars in the same pass but
+# are deliberately NOT part of this text — see src/data/v2/core_text.py.
+#
+# Identity: ``question_id`` is a content hash, so better text would mint a new id
+# and orphan the existing record. Every INCOIS corpus row carries
+# ``metadata.source_url`` = its PDF path, so filename -> question_id is read from
+# the corpus and passed back through ``_make_record(qa_id=...)``. Identity is
+# therefore preserved exactly for already-ingested documents.
+#
+# With the flag off this helper returns ``(None, "disabled")`` and both callers
+# fall through to ``_extract_text_subprocess`` byte-for-byte as before.
+
+_ENHANCED_IDENTITY: dict[str, str] | None = None
+
+
+def _identity_map() -> dict[str, str]:
+    """Cached filename -> existing question_id map.
+
+    Returns ``{}`` when enhanced core extraction is off: identity mapping exists
+    only to preserve ids across a re-extraction, so with the core path disabled
+    there is nothing to preserve and the corpus is not read at all.
+    """
+    global _ENHANCED_IDENTITY  # noqa: PLW0603 - process-wide cache
+    from src.data.v2.config import load_v2_config
+
+    if not load_v2_config().core_extraction_active:
+        return {}
+    if _ENHANCED_IDENTITY is None:
+        try:
+            from src.data.v2.identity import build_identity_map
+
+            mapping, _problems = build_identity_map()
+            _ENHANCED_IDENTITY = mapping
+        except Exception:  # noqa: BLE001 - never break ingestion over identity
+            _ENHANCED_IDENTITY = {}
+    return _ENHANCED_IDENTITY
+
+
+def enhanced_core_text(path: Path) -> tuple[str | None, str]:
+    """Run enhanced extraction and build the production core text.
+
+    Returns ``(text, status)``. ``text is None`` means "fall back to legacy" and
+    ``status`` always says why, so a fallback is diagnosable rather than silent.
+    Never raises: an experimental extractor must not be able to break ingestion.
+    """
+    from src.data.v2.config import load_v2_config
+
+    try:
+        config = load_v2_config()
+    except Exception:  # noqa: BLE001 - a bad config must not break ingestion
+        return None, "config-error"
+
+    # The real gate. Reading the config is exempt (it imports nothing heavy);
+    # everything below it is only reached when the core path is on.
+    if not config.core_extraction_active:
+        return None, "disabled"
+
+    try:
+        from src.data.v2.core_text import core_text_from_result
+        from src.data.v2.pipeline import extract_document
+
+        record_id = _identity_map().get(path.name)
+        result = extract_document(path, config, write=True, record_id=record_id)
+        if not result.extracted:
+            return None, f"not-extracted({result.skipped_reason})"
+
+        text = core_text_from_result(result)
+        if len(text.strip()) < 50:
+            return None, "too-short"
+
+        summary = result.summary
+        if not summary.get("ocr_complete", True):
+            # Explicit, auditable incompleteness — never presented as complete.
+            print(
+                f"  [enhanced] {path.name}: INCOMPLETE OCR "
+                f"({summary.get('ocr_pages_skipped')} pages skipped, "
+                f"reason={summary.get('ocr_limit_reason')})"
+            )
+        return text, "ok"
+    except Exception as e:  # noqa: BLE001
+        return None, f"error:{type(e).__name__}: {str(e)[:80]}"
+
+
 def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     """Convert a public INCOIS annual report PDF into one document record.
 
@@ -814,11 +902,15 @@ def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     """
     m = re.search(r"(?:AR_|Report_|report_)?(\d{4}(?:-\d{2})?)", path.stem)
     year = m.group(1) if m else path.stem
-    try:
-        text = _extract_text_subprocess(path)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [skip annual] {path.name}: {e}")
-        return 0
+
+    text, status = enhanced_core_text(path)
+    enhanced = text is not None
+    if not enhanced:
+        try:
+            text = _extract_text_subprocess(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip annual] {path.name}: {e}")
+            return 0
     if len(text.strip()) < 50:
         print(f"  [skip annual] {path.name}: no extractable text (image-only?)")
         return 0
@@ -830,6 +922,12 @@ def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
         source_url=str(path),
         date=year,
         document_type="annual_report",
+        # Preserve the existing corpus identity when this document was already
+        # ingested; None for a genuinely new document (content hash applies).
+        qa_id=_identity_map().get(path.name) if enhanced else None,
+        pre_cleaned=enhanced,
+        answer_source="incois_v2_core" if enhanced else None,
+        answer_text_source=f"enhanced:{status}" if enhanced else None,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)
@@ -861,13 +959,16 @@ def convert_report_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
     else:
         title = f"INCOIS Document {cleaned}"
         doc_type = "document"
-    # Text extraction runs in a child subprocess so a SIGSEGV in the MuPDF
-    # C layer cannot kill the parent ingestion process.
-    try:
-        text = _extract_text_subprocess(path)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [skip report] {path.name}: {e}")
-        return 0
+    # Enhanced extraction first; legacy subprocess extraction is the fallback
+    # (also the SIGSEGV-isolated path when enhanced is disabled).
+    text, status = enhanced_core_text(path)
+    enhanced = text is not None
+    if not enhanced:
+        try:
+            text = _extract_text_subprocess(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip report] {path.name}: {e}")
+            return 0
     if len(text.strip()) < 50:
         print(f"  [skip report] {path.name}: no extractable text (image-only?)")
         return 0
@@ -879,6 +980,10 @@ def convert_report_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:
         source_url=str(path),
         date=m.group(1) if m else None,
         document_type=doc_type,
+        qa_id=_identity_map().get(path.name) if enhanced else None,
+        pre_cleaned=enhanced,
+        answer_source="incois_v2_core" if enhanced else None,
+        answer_text_source=f"enhanced:{status}" if enhanced else None,
     )
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)

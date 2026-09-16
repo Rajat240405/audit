@@ -80,6 +80,19 @@ class RetrievalTimings:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HybridRAGPipeline:
+    # INCOIS V2 child-unit state, declared at class level as well as in
+    # ``__init__``. This repository builds pipelines with
+    # ``HybridRAGPipeline.__new__(...)`` plus hand-attached collaborators to
+    # avoid loading BGE-M3 in tests (see test_ingest_cli.py), and such an
+    # instance never runs ``__init__``. Without these defaults any method that
+    # consults V2 state raises AttributeError on those instances — a regression
+    # in an existing, passing test. ``__init__`` and ``load()`` both assign real
+    # instance attributes, which shadow these; and ``_index_v2_children``
+    # rebinds rather than mutates, so the shared empty dicts are never written.
+    _v2_chunk_map: dict = {}
+    _v2_chunk_texts: dict = {}
+    _v2_chunk_meta: dict = {}
+
     """
     Hybrid RAG retrieval: dense + BM25 → RRF → cross-encoder rerank.
     Can be configured for either document-level or chunk-level retrieval.
@@ -97,6 +110,7 @@ class HybridRAGPipeline:
         rrf_k: int = 60,
         use_reranker: bool = True,
         use_chunking: bool = False,  # Default to Document-based for backwards compatibility
+        enable_v2_children: bool = False,
     ) -> None:
         """
         Parameters
@@ -153,6 +167,23 @@ class HybridRAGPipeline:
         self.long_chunk_overlap = 80
         self._long_chunk_map: dict[str, QAChunk] = {}
         self._long_chunk_texts: dict[str, str] = {}
+
+        # ── INCOIS V2 (experimental) child units ────────────────────────────
+        # Sibling of the long-doc chunk mechanism, NOT a parallel retrieval
+        # stack: the same Embedder, the same FAISS store, the same BM25 index,
+        # the same RRF fusion, parent collapse and reranker. Kept in its own
+        # map so V2 units can be dropped wholesale and so their presence is
+        # auditable from build_meta.json.
+        #
+        # Both gates must hold before any V2 unit is created: this
+        # constructor flag (opt-in per pipeline instance) AND the V2 config
+        # (master gate + V2_INDEX_CHILDREN). With either off the map stays
+        # empty, and every lookup below short-circuits on an empty dict — so
+        # V2-off retrieval is byte-for-byte the pre-V2 path.
+        self.enable_v2_children = enable_v2_children
+        self._v2_chunk_map: dict[str, QAChunk] = {}
+        self._v2_chunk_texts: dict[str, str] = {}
+        self._v2_chunk_meta: dict[str, dict] = {}
 
         # In-memory lookups
         self._doc_map: dict[str, QARecord] = {}
@@ -286,6 +317,9 @@ class HybridRAGPipeline:
                 self.bm25_index.build(combined_bm25)
                 print(f"  [long-doc chunks] indexed into FAISS + BM25 (rebuilt)")
 
+            # ── INCOIS V2: index table/figure child units ────────────────
+            self._index_v2_children(records)
+
         print(
             f"✓ Index built successfully: {len(self):,} units indexed, "
             f"use_chunking={self.use_chunking}"
@@ -342,6 +376,7 @@ class HybridRAGPipeline:
             for r in self._doc_map.values()
         ]
         bm25_docs += [(c.chunk_id, "", c.chunk_text) for c in self._long_chunk_map.values()]
+        bm25_docs += [(c.chunk_id, "", c.chunk_text) for c in self._v2_chunk_map.values()]
         self.bm25_index.build(bm25_docs)
 
         print(f"[add_records] done — {len(new_recs)} added, index now has {len(self._doc_map):,} docs")
@@ -377,6 +412,103 @@ class HybridRAGPipeline:
             for idx, piece in enumerate(pieces)
         ]
 
+    def _v2_child_units(self) -> list[dict]:
+        """V2 child units from sidecars, or [] when V2 is off or unavailable.
+
+        Both gates are conjunctive: the per-instance constructor flag AND the
+        V2 config. A missing/broken V2 layer degrades to "no child units" and
+        never aborts a build — a retrieval index must not depend on an
+        experimental extractor.
+        """
+        if not self.enable_v2_children:
+            return []
+        try:
+            from src.data.v2.child_units import build_child_units
+            from src.data.v2.config import load_v2_config
+
+            config = load_v2_config()
+            if not config.children_indexed:
+                return []
+            return build_child_units(config)
+        except Exception as exc:  # noqa: BLE001 - V2 must never break indexing
+            print(f"  [v2] child units unavailable ({exc}); continuing without them")
+            return []
+
+    def _v2_chunks_for(self, units: list[dict]) -> list[QAChunk]:
+        """Build real ``QAChunk`` objects for V2 child units.
+
+        Uses the production model as-is (``chunk_text``, ``metadata``); no V2
+        fields are added to ``QAChunk``. Extraction provenance travels in the
+        side table ``_v2_chunk_meta`` instead, so the model and every index
+        saved before V2 stay untouched.
+        """
+        chunks: list[QAChunk] = []
+        meta = dict(self._v2_chunk_meta)
+        for unit in units:
+            parent = str(unit.get("doc") or "")
+            text = str(unit.get("text") or "")
+            if not parent or not text.strip():
+                continue
+            kind = str(unit.get("kind") or "")
+            record = self._doc_map.get(parent)
+            chunk = QAChunk(
+                chunk_id=str(unit["id"]),
+                parent_doc_id=parent,
+                chunk_type=(
+                    ChunkType.V2_TABLE if kind.startswith("table") else ChunkType.V2_FIGURE
+                ),
+                chunk_text=text,
+                metadata=record.metadata if record is not None else QARecordMetadata(),
+            )
+            chunks.append(chunk)
+            meta[str(unit["id"])] = {
+                "kind": kind,
+                "page": unit.get("page"),
+                **(unit.get("meta") or {}),
+            }
+        self._v2_chunk_meta = meta
+        return chunks
+
+    def _index_v2_children(self, records: list) -> int:
+        """Embed and index V2 child units into the SAME stores.
+
+        Returns the number indexed. No-ops (returning 0) unless both gates
+        hold, so the production path never touches a sidecar directory.
+        """
+        units = self._v2_child_units()
+        if not units:
+            return 0
+        chunks = self._v2_chunks_for(units)
+        if not chunks:
+            return 0
+
+        # Rebind, do not .update(): on an instance built via __new__ the dict
+        # would otherwise be the shared class-level one.
+        self._v2_chunk_map = {
+            **self._v2_chunk_map, **{c.chunk_id: c for c in chunks}
+        }
+        self._v2_chunk_texts = {
+            **self._v2_chunk_texts, **{c.chunk_id: c.chunk_text for c in chunks}
+        }
+
+        embeddings = self.embedder.embed_batch(
+            [c.chunk_text for c in chunks], batch_size=1, show_progress=False
+        )
+        self.vector_store.add([c.chunk_id for c in chunks], embeddings)
+
+        # BM25 has no incremental add; rebuild over docs + long chunks + V2.
+        bm25_docs = [
+            (r.question_id, r.question_text, r.answer_text) for r in records
+        ]
+        bm25_docs += [
+            (c.chunk_id, "", c.chunk_text) for c in self._long_chunk_map.values()
+        ]
+        bm25_docs += [(c.chunk_id, "", c.chunk_text) for c in chunks]
+        self.bm25_index.build(bm25_docs)
+
+        print(f"  [v2] indexed {len(chunks)} child units into FAISS + BM25")
+        return len(chunks)
+
     def _rerank_text_for(self, cand_id: str, query: str) -> str:
         """The text a cross-encoder sees for one candidate (#4).
 
@@ -390,6 +522,8 @@ class HybridRAGPipeline:
         txt = self._chunk_texts.get(cand_id)
         if txt is None:
             txt = self._long_chunk_texts.get(cand_id)
+            if txt is None:
+                txt = self._v2_chunk_texts.get(cand_id)
         if txt is not None:
             return txt
         rec = self._doc_map.get(cand_id)
@@ -411,6 +545,8 @@ class HybridRAGPipeline:
         ch = self._chunk_map.get(unit_id)
         if ch is None:
             ch = self._long_chunk_map.get(unit_id)
+        if ch is None:
+            ch = self._v2_chunk_map.get(unit_id)
         return ch.parent_doc_id if ch is not None else unit_id
 
     def retrieve(
@@ -508,7 +644,12 @@ class HybridRAGPipeline:
             collapsed.append((rep_id, best_score))
             hits = [
                 u for u, _ in units
-                if u != pid and (u in self._chunk_map or u in self._long_chunk_map)
+                if u != pid
+                and (
+                    u in self._chunk_map
+                    or u in self._long_chunk_map
+                    or u in self._v2_chunk_map
+                )
             ]
             if hits:
                 collapse_hits[pid] = hits[:8]
@@ -532,6 +673,10 @@ class HybridRAGPipeline:
                     rec = self._doc_map.get(chunk.parent_doc_id)
             if rec is None and self._long_chunk_map:
                 chunk = self._long_chunk_map.get(doc_id)
+                if chunk is not None:
+                    rec = self._doc_map.get(chunk.parent_doc_id)
+            if rec is None and self._v2_chunk_map:
+                chunk = self._v2_chunk_map.get(doc_id)
                 if chunk is not None:
                     rec = self._doc_map.get(chunk.parent_doc_id)
             return rec
@@ -696,6 +841,8 @@ class HybridRAGPipeline:
             grouped: dict[str, dict] = {}
             for doc_id, score in final_results:
                 chunk = self._long_chunk_map.get(doc_id)
+                if chunk is None:
+                    chunk = self._v2_chunk_map.get(doc_id)
                 if chunk is not None:
                     pid = chunk.parent_doc_id
                     record = self._doc_map.get(pid)
@@ -822,6 +969,21 @@ class HybridRAGPipeline:
                 for chunk_id, chunk in self._long_chunk_map.items()
             }),
         )
+        # V2 child map. Written only when non-empty, so a V2-off index is
+        # byte-identical to a pre-V2 index and no V2 artifact is ever created
+        # on the production path. ``v2_chunk_map.json`` is NOT in
+        # INDEX_MARKER_FILES, so its absence never invalidates an index.
+        if self._v2_chunk_map:
+            write_bytes_atomic(
+                path / "v2_chunk_map.json",
+                orjson.dumps({
+                    chunk_id: {
+                        "chunk": chunk.model_dump(mode="json"),
+                        "v2": self._v2_chunk_meta.get(chunk_id, {}),
+                    }
+                    for chunk_id, chunk in self._v2_chunk_map.items()
+                }),
+            )
         self._write_build_meta(path)
 
         print(f"✓ Saved Hybrid RAG pipeline (use_chunking={self.use_chunking}) to {path}")
@@ -880,6 +1042,25 @@ class HybridRAGPipeline:
                 chunk_id: c.chunk_text for chunk_id, c in self._long_chunk_map.items()
             }
 
+        # INCOIS V2 — restore child units (missing file = pre-V2 or V2-off
+        # index, which loads as empty; never an error, never a rebuild).
+        self._v2_chunk_map = {}
+        self._v2_chunk_texts = {}
+        self._v2_chunk_meta = {}
+        if (path / "v2_chunk_map.json").exists():
+            with open(path / "v2_chunk_map.json", "rb") as f:
+                v2_data = orjson.loads(f.read())
+            for chunk_id, entry in v2_data.items():
+                payload = entry.get("chunk") if isinstance(entry, dict) else entry
+                if payload is None:
+                    continue
+                chunk = QAChunk.model_validate(payload)
+                self._v2_chunk_map[chunk_id] = chunk
+                self._v2_chunk_texts[chunk_id] = chunk.chunk_text
+                self._v2_chunk_meta[chunk_id] = (
+                    entry.get("v2", {}) if isinstance(entry, dict) else {}
+                )
+
         self._check_build_meta_compat(path)
 
         print(f"✓ Loaded Hybrid RAG pipeline (use_chunking={self.use_chunking}) from {path}")
@@ -905,6 +1086,7 @@ class HybridRAGPipeline:
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "row_count": len(self._doc_map),
             "long_chunk_count": len(self._long_chunk_map),
+            "v2_chunk_count": len(self._v2_chunk_map),
             "chunk_count": len(self._chunk_map),
             "use_chunking": self.use_chunking,
             "fusion_top_k": self.fusion_top_k,

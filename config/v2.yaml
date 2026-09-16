@@ -1,0 +1,73 @@
+# INCOIS V2 experimental layer — optional configuration defaults.
+#
+# Every key below is COMMENTED OUT on purpose, exactly like .env.example.
+# The effective defaults live in src/data/v2/config.py (V2Config) and are
+# identical to the values shown here; this file exists so an operator can
+# change a default without a code edit.
+#
+# Precedence:  environment variable  >  this file  >  V2Config defaults
+#
+# A test (tests/test_v2_disabled_is_inert.py::test_shipped_yaml_matches_defaults)
+# asserts that this file, as shipped, produces a configuration identical to the
+# built-in defaults — so uncommenting a line here is a real behaviour change,
+# never a silent drift.
+#
+# MASTER SWITCH. Unset/false = today's production behaviour: the V2 package is
+# not imported, no sidecar is written, no child unit is indexed, no OCR runs.
+#V2_ENABLED: false
+
+# ── page routing / OCR (spec §3.1, §3.7) ─────────────────────────────────────
+# Classification is cheap and implies no OCR. V2_OCR gates the expensive part
+# independently so a run can classify-and-report without paying for tesseract.
+#V2_PAGE_ROUTING: true
+#V2_OCR: true
+#V2_OCR_LANG: hin+eng
+#V2_OCR_DPI: 200
+# Max OCR pages per document. When the cap is reached the remaining pages are
+# marked "-skipped(cap)" in pages.jsonl — partial recovery is never presented
+# as complete.
+#V2_OCR_PAGE_CAP: 14
+# Invert the render when the page luminance mean is below this (dark-navy
+# scans yield 0 chars without inversion).
+#V2_OCR_INVERT_LUM: 127
+
+# ── tables (spec §3.3-§3.5) ──────────────────────────────────────────────────
+#V2_TABLES: true
+#V2_TABLE_ROTATION: true
+# Page gap allowed when merging a table continued onto a later page. A header
+# repeat extends this to 8. Spec §13.4: no natural gap>2 positive exists yet.
+#V2_TABLE_CONT_GAP: 2
+# EXPERIMENTAL. Spec §13.1: the corpus contains zero natural borderless tables
+# (14/14 real lookalikes correctly rejected). Keep false until >=3 real
+# positives are human-verified during migration.
+#V2_TABLE_BORDERLESS: false
+
+# ── figures (spec §3.6) ──────────────────────────────────────────────────────
+#V2_FIGURES: true
+#V2_MIN_FIG_PX: 200
+#V2_FIG_MERGE_GAP: 25.0
+#V2_FIG_CROP_DPI: 110
+#V2_FIG_MAX_CROPS: 60
+# Punctuation-anchored caption association. false restores the legacy
+# nearest-"Fig" heuristic, which produced 31/211 body-sentence false captures.
+#V2_CAPTION_STRICT: true
+
+# ── indexing / language gate (spec §3.8, §3.9) ───────────────────────────────
+#V2_HINDI_GATE_RATIO: 0.30
+#V2_INDEX_CHILDREN: true
+#V2_RERANK_WINDOW: 1600
+
+# ── generation (spec §12) ────────────────────────────────────────────────────
+# EXPERIMENTAL. Spec §13.7: no vision model exists; this is a contract only.
+# Generation must fall back to card text when vision is unavailable.
+#V2_VISION_AT_GENERATION: false
+
+# ── storage ──────────────────────────────────────────────────────────────────
+# Default is <data_dir()>/v2_sidecars, resolved via APP_DATA_DIR so it lands in
+# the container bind mount. Do NOT name this out/, build/, dist/ or target/ —
+# those are artifact-exclusion patterns and the sidecars would be dropped.
+#V2_SIDECAR_DIR:
+
+# ── classifier heuristics (spec §3.1; tunable per §3.3) ──────────────────────
+#V2_VECTOR_OP_THRESHOLD: 3000
+#V2_MOJIBAKE_RATIO_GATE: 0.05

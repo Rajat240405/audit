@@ -424,6 +424,12 @@ class ChunkType(str, Enum):
     ANSWER = "answer"
     ANNEXURE = "annexure"
     METADATA = "metadata"
+    # INCOIS V2 (experimental): child units built from extraction sidecars.
+    # Additive members only — no existing member is renamed or reordered, so
+    # indexes saved before V2 validate unchanged. No chunk of either type is
+    # created while V2_ENABLED is false.
+    V2_TABLE = "v2_table"
+    V2_FIGURE = "v2_figure"
 
 
 class QAChunk(BaseModel):
