@@ -66,6 +66,7 @@ ENV_MOJIBAKE_RATIO_GATE = "V2_MOJIBAKE_RATIO_GATE"
 ENV_ENHANCED_EXTRACTION = "INCOIS_ENHANCED_EXTRACTION"
 ENV_EXPERIMENTAL_INDEX = "V2_EXPERIMENTAL_INDEX"
 ENV_OCR_WALL_SECONDS = "V2_OCR_WALL_SECONDS"
+ENV_OCR_WORKERS = "V2_OCR_WORKERS"
 
 
 # ── scalar parsing (fallback, never raise) ────────────────────────────────────
@@ -199,6 +200,13 @@ class V2Config:
     #: Same honesty rule: hitting it records ``skipped(wall-clock)`` and marks
     #: the document incomplete rather than pretending otherwise.
     ocr_wall_seconds: float = 0.0
+    #: Page-level OCR worker threads. **0 = serial (the default, and the safe
+    #: fallback).** Any positive value opts in to the bounded pool; the count
+    #: actually used is further capped by CPU, RAM and the number of OCR pages.
+    #: Only Tesseract runs in the workers — PyMuPDF is never touched off the
+    #: main thread. Ignored when a page cap or wall-clock limit is set, because
+    #: those are inherently sequential.
+    ocr_workers: int = 0
     ocr_invert_lum: int = 127
 
     # ── tables (spec §6, §3.3-§3.5) ──────────────────────────────────────────
@@ -415,6 +423,9 @@ def load_v2_config() -> V2Config:
         ),
         ocr_wall_seconds=_parse_float(
             source(ENV_OCR_WALL_SECONDS), 0.0, problems, ENV_OCR_WALL_SECONDS
+        ),
+        ocr_workers=_parse_int(
+            source(ENV_OCR_WORKERS), 0, problems, ENV_OCR_WORKERS
         ),
     )
 

@@ -372,6 +372,8 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
 
 
 _DFG_PROFILE = "demands-for-grants"
+#: MoES (HQ website) org slug — kept in sync with src.data.v2.identity.MOES_ORG.
+_MOES_ORG = "moes_hq"
 _DFG_STEM_RE = re.compile(r"^(\d+)-(\d+)-(eng|hin|both)$")
 
 
@@ -478,6 +480,14 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         return _convert_dfg_pdf(path, out, seen, srec=_srec0, org=org,
                                 source=source, ministry=ministry,
                                 default_ministry=default_ministry)
+
+    # MoES (non-DfG) family: the validated V2 core extraction engine first,
+    # legacy extraction as the byte-identical fallback. Strictly after the DfG
+    # branch; every other family (org != _MOES_ORG) keeps the existing path below.
+    if org == _MOES_ORG:
+        return _convert_moes_pdf(path, out, seen, doc_type=doc_type, org=org,
+                                 source=source, ministry=ministry,
+                                 default_ministry=default_ministry)
 
     # THE canonical PDF→text for folder ingestion (audit IW-7): table-aware
     # PyMuPDF first (borderless-table reconstruction), legacy pypdf as the
@@ -835,46 +845,149 @@ def _identity_map() -> dict[str, str]:
         return {}
     if _ENHANCED_IDENTITY is None:
         try:
-            from src.data.v2.identity import build_identity_map
+            from src.data.v2.identity import (
+                INCOIS_ORG,
+                MOES_ORG,
+                build_identity_map,
+            )
 
-            mapping, _problems = build_identity_map()
+            # Merged over disjoint filename spaces (AR_*/RP_* vs NN-<wpid>-<slot>),
+            # so re-extracting an already-ingested INCOIS *or* MoES document
+            # replaces the same record instead of minting a new id.
+            mapping, _problems = build_identity_map(org=INCOIS_ORG)
+            moes_map, _moes_problems = build_identity_map(org=MOES_ORG)
+            mapping = {**mapping, **moes_map}
             _ENHANCED_IDENTITY = mapping
         except Exception:  # noqa: BLE001 - never break ingestion over identity
             _ENHANCED_IDENTITY = {}
     return _ENHANCED_IDENTITY
 
 
-def enhanced_core_text(path: Path) -> tuple[str | None, str]:
+def _moes_sidecar_dir() -> Path:
+    """Per-source sidecar root for MoES so its artifacts never mix with INCOIS."""
+    from src.utils.app_paths import data_dir
+
+    return data_dir() / "v2_sidecars_moes"
+
+
+def _convert_moes_pdf(path: Path, out: list, seen: set, doc_type: str = "document",
+                      *, org=None, source=None, ministry=None,
+                      default_ministry=_DEFAULT_MINISTRY) -> int:
+    """Convert a non-DfG MoES PDF with the validated V2 core extraction engine.
+
+    Fixes the two measured MoES defects: ``_clean()`` no longer flattens the
+    V2 core text (``pre_cleaned=True``), and image-only pages are recovered by
+    selective per-page OCR instead of being silently dropped. The legacy path
+    remains the fallback and stays byte-identical to pre-adapter production.
+    """
+    text, status, summary = enhanced_core_text(
+        path, return_summary=True, sidecar_dir=_moes_sidecar_dir()
+    )
+    enhanced = text is not None
+    if not enhanced:
+        # Legacy fallback — byte-identical to the pre-adapter path.
+        try:
+            text = _extract_text_subprocess(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip pdf] {path.name}: {e}")
+            return 0
+    if len(text.strip()) < 50:
+        print(f"  [pdf] {path.name}: no embedded text, trying OCR...")
+        text = _ocr_pdf_text(path)
+        if not text.strip():
+            print(f"  [skip pdf] {path.name}: no extractable text (scanned image?)")
+            return 0
+        enhanced = False  # legacy whole-doc OCR goes through _clean as today
+
+    _srec = _sibling_record_json(path)
+    _title, _title_source = _resolve_doc_title(path, _srec)
+    _date, _date_source = _resolve_doc_date(path, text, _srec)
+    _label = _title or path.stem
+
+    subject = _label
+    if enhanced and summary is not None and not summary.get("ocr_complete", True):
+        # Never present an incompletely-OCR'd document as complete.
+        subject = (
+            f"{_label} — INCOMPLETE-OCR({summary.get('ocr_pages_skipped', 0)}p)"
+        )
+
+    rec = _make_record(
+        f"Document: {_label}",
+        text,
+        subject=subject,
+        source_url=str(path),
+        date=_date,
+        document_type=doc_type,
+        title_source=_title_source,
+        date_source=_date_source,
+        qa_id=_identity_map().get(path.name) if enhanced else None,
+        pre_cleaned=enhanced,
+        answer_source="moes_v2_core" if enhanced else None,
+        answer_text_source=f"enhanced:{status}" if enhanced else None,
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
+    )
+    if rec and rec.question_id not in seen:
+        seen.add(rec.question_id)
+        out.append(rec)
+        return 1
+    return 0
+
+
+def enhanced_core_text(
+    path: Path,
+    *,
+    return_summary: bool = False,
+    sidecar_dir: Path | str | None = None,
+):
     """Run enhanced extraction and build the production core text.
 
-    Returns ``(text, status)``. ``text is None`` means "fall back to legacy" and
-    ``status`` always says why, so a fallback is diagnosable rather than silent.
-    Never raises: an experimental extractor must not be able to break ingestion.
+    Returns ``(text, status)`` by default so every existing caller (both INCOIS
+    converters) keeps working unchanged. With ``return_summary=True`` a third
+    element — the extraction ``summary`` dict (``ocr_complete``,
+    ``ocr_pages_skipped``, ``ocr_limit_reason``, ...) — is appended, which the
+    MoES adapter uses to surface incomplete OCR; it is ``None`` whenever
+    ``text is None``.
+
+    ``sidecar_dir`` routes this run's provenance artifacts to a per-source
+    directory (MoES uses ``v2_sidecars_moes``) so source-specific sidecars never
+    mix. ``None`` keeps the configured default.
+
+    ``text is None`` means "fall back to legacy" and ``status`` always says why,
+    so a fallback is diagnosable rather than silent. Never raises: an
+    experimental extractor must not be able to break ingestion.
     """
     from src.data.v2.config import load_v2_config
+
+    def _ret(text, status, summary=None):
+        return (text, status, summary) if return_summary else (text, status)
 
     try:
         config = load_v2_config()
     except Exception:  # noqa: BLE001 - a bad config must not break ingestion
-        return None, "config-error"
+        return _ret(None, "config-error")
 
     # The real gate. Reading the config is exempt (it imports nothing heavy);
     # everything below it is only reached when the core path is on.
     if not config.core_extraction_active:
-        return None, "disabled"
+        return _ret(None, "disabled")
 
     try:
         from src.data.v2.core_text import core_text_from_result
         from src.data.v2.pipeline import extract_document
 
+        if sidecar_dir is not None:
+            import dataclasses
+
+            config = dataclasses.replace(config, sidecar_dir=Path(sidecar_dir))
+
         record_id = _identity_map().get(path.name)
         result = extract_document(path, config, write=True, record_id=record_id)
         if not result.extracted:
-            return None, f"not-extracted({result.skipped_reason})"
+            return _ret(None, f"not-extracted({result.skipped_reason})")
 
         text = core_text_from_result(result)
         if len(text.strip()) < 50:
-            return None, "too-short"
+            return _ret(None, "too-short")
 
         summary = result.summary
         if not summary.get("ocr_complete", True):
@@ -884,9 +997,9 @@ def enhanced_core_text(path: Path) -> tuple[str | None, str]:
                 f"({summary.get('ocr_pages_skipped')} pages skipped, "
                 f"reason={summary.get('ocr_limit_reason')})"
             )
-        return text, "ok"
+        return _ret(text, "ok", summary)
     except Exception as e:  # noqa: BLE001
-        return None, f"error:{type(e).__name__}: {str(e)[:80]}"
+        return _ret(None, f"error:{type(e).__name__}: {str(e)[:80]}")
 
 
 def convert_annual_pdf(path: Path, out: list[QARecord], seen: set[str]) -> int:

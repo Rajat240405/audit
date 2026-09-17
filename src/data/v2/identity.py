@@ -33,6 +33,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: Metadata ``org`` value that marks INCOIS records.
 INCOIS_ORG = "incois"
 
+#: Metadata ``org`` value that marks MoES (HQ website) records.
+MOES_ORG = "moes_hq"
+
 
 def default_corpus_path() -> Path:
     """The corpus the running service reads."""
@@ -156,6 +159,7 @@ def stamp_record_id(store: Any, record_id: str, extra: dict | None = None) -> di
 
 __all__ = [
     "INCOIS_ORG",
+    "MOES_ORG",
     "build_identity_map",
     "default_corpus_path",
     "load_identity_map",

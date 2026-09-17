@@ -75,7 +75,19 @@ INGESTIBLE_EXTS = {".pdf", ".txt", ".md", ".json", ".jsonl"}
 # Directories that must never be swallowed by discovery (registry-claimed
 # roots are excluded separately, dynamically). Applies at the DATA ROOT only —
 # inside a hierarchical source, path segments are data.
-_ALWAYS_EXCLUDED_DIRS = {"raw", "finetune", "user-knowledge"}
+_ALWAYS_EXCLUDED_DIRS = {
+    "raw", "finetune", "user-knowledge",
+    # V2 extraction provenance roots (sidecars): docs/<record_id>.json,
+    # pages.jsonl, figures.jsonl, tables.jsonl, marked.txt plus figure crops.
+    # These are extraction *artifacts*, never corpus inputs — yet every
+    # extension they use (.json/.jsonl/.txt) is in INGESTIBLE_EXTS, so an
+    # unexcluded sidecar root is discovered as a hierarchical source and its
+    # sidecars get ingested as documents. Excluded here rather than only in
+    # config/sources.yaml discovery.exclude_dirs so the exclusion also holds
+    # on a bare checkout, where the YAML is absent and load_sources() falls
+    # back to _BUILTIN_SOURCES / _BUILTIN_DISCOVERY_EXCLUDES.
+    "v2_sidecars", "v2_sidecars_moes",
+}
 
 # Walker pruning (any depth): move-target convention + hidden/junk dirs.
 _WALK_SKIP_DIRS = {"processed", "__pycache__"}

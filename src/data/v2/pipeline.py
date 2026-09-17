@@ -114,6 +114,24 @@ def extract_document(
         funnels: list[dict] = []
         table_counter = 0
 
+        # ── Phase 1 — classify, and render the pages that need OCR ────────────
+        #
+        # EVERY PyMuPDF access in this pipeline happens here, serially, on this
+        # thread. When the OCR pool is engaged the rendered PIL images are handed
+        # to workers that never receive a Document/Page/Pixmap, so MuPDF is never
+        # entered concurrently and the uncontainable-SIGSEGV failure class cannot
+        # arise. This is the same structural rule src/data/extract_dfg.py uses.
+        #
+        # A page cap or wall-clock limit is inherently sequential (the budget
+        # check depends on how many pages have already succeeded), so the pool is
+        # bypassed in that case and the original interleaved path runs unchanged.
+        parallel = (
+            cfg.ocr_workers > 0
+            and budget.page_cap == 0
+            and budget.wall_seconds == 0.0
+        )
+        prepared: list[dict] = []
+        pending: list[tuple[int, Any]] = []
         for pno in range(document.page_count):
             page = document[pno]  # fetched per iteration — see module docstring
             vector_ops = page_router.vector_ops_of(page)
@@ -121,27 +139,71 @@ def extract_document(
             orientation = page_router.detect_orientation(page)
 
             text = ""
-            ocr_used = False
             ocr_status = ""
+            needs_ocr = page_class in OCR_CLASSES
             if page_class in NATIVE_CLASSES or page_class == "empty":
-                text = page.get_text("text") or ""
-            elif page_class in OCR_CLASSES:
-                limit = budget.check()
-                if not cfg.ocr_active:
-                    # Still an incompleteness: pages that need OCR did not get
-                    # it. Labelled and counted, never silently "complete".
-                    ocr_status = "disabled"
-                    budget.record_skipped("disabled")
-                elif limit is not None:
-                    # Explicit and auditable: the page is labelled with WHY it
-                    # was skipped and the document is flagged incomplete below.
-                    budget.record_skipped(limit)
-                    ocr_status = f"skipped({limit})"
+                text = page_router.page_text(page, "text") or ""
+                needs_ocr = False
+            elif needs_ocr and parallel:
+                image, prep_status = ocr.prepare_image(page, cfg)
+                if image is None:
+                    ocr_status = prep_status or "error:unknown"
+                    if ocr_status == "disabled":
+                        budget.record_skipped("disabled")
+                    needs_ocr = False
                 else:
-                    text, ocr_status = ocr.ocr_page(page, cfg)
-                    if ocr_status == "ok":
-                        ocr_used = True
-                        budget.record_used()
+                    pending.append((pno, image))
+            prepared.append(
+                {
+                    "vector_ops": vector_ops,
+                    "page_class": page_class,
+                    "meta": meta,
+                    "orientation": orientation,
+                    "text": text,
+                    "ocr_status": ocr_status,
+                    "needs_ocr": needs_ocr,
+                }
+            )
+
+        # ── Phase 2 — OCR. Workers see PIL images only, never PyMuPDF. ────────
+        # Results are keyed by page number, so Phase 3 restores the original
+        # page order regardless of the order in which workers finished.
+        ocr_texts = ocr.ocr_prepared(pending, cfg) if parallel else {}
+
+        # ── Phase 3 — tables, figures and records, strictly in page order ─────
+        for pno in range(document.page_count):
+            page = document[pno]  # fetched per iteration — see module docstring
+            info = prepared[pno]
+            vector_ops = info["vector_ops"]
+            page_class = info["page_class"]
+            meta = info["meta"]
+            orientation = info["orientation"]
+
+            text = info["text"]
+            ocr_used = False
+            ocr_status = info["ocr_status"]
+            if info["needs_ocr"]:
+                if parallel:
+                    text, ocr_status = ocr_texts[pno]
+                else:
+                    limit = budget.check()
+                    if not cfg.ocr_active:
+                        # Still an incompleteness: pages that need OCR did not
+                        # get it. Labelled and counted, never silently
+                        # "complete".
+                        ocr_status = "disabled"
+                        budget.record_skipped("disabled")
+                    elif limit is not None:
+                        # Explicit and auditable: the page is labelled with WHY
+                        # it was skipped and the document is flagged incomplete
+                        # below.
+                        budget.record_skipped(limit)
+                        ocr_status = f"skipped({limit})"
+                    else:
+                        text, ocr_status = ocr.ocr_page(page, cfg)
+                if ocr_status == "ok":
+                    ocr_used = True
+                    budget.record_used()
 
             route = page_class
             if page_class in OCR_CLASSES:
@@ -171,10 +233,13 @@ def extract_document(
                 if not page_router.geometry_is_safe(vector_ops):
                     guard_skips += 1
                 else:
-                    blocks, _guarded = table_extract.detect_tables(page, pno, text, cfg)
+                    blocks, _guarded = table_extract.detect_tables(
+                        page, pno, text, cfg, vector_ops=vector_ops
+                    )
                     if cfg.rotated_tables_active:
                         rotated, _label, _conf, _rot = table_extract.detect_tables_rotated(
-                            page, pno, text, cfg
+                            page, pno, text, cfg,
+                            vector_ops=vector_ops, orientation=orientation,
                         )
                         if rotated:
                             # a rotated block SUPERSEDES the portrait block

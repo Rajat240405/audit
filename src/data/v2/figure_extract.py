@@ -24,6 +24,7 @@ import hashlib
 import re
 from typing import TYPE_CHECKING, Any
 
+from src.data.v2 import page_router
 from src.data.v2.config import V2Config
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -156,7 +157,7 @@ def page_lines(page: Any) -> list[tuple[Any, str]]:
     import pymupdf
 
     out: list[tuple[Any, str]] = []
-    for block in page.get_text("dict")["blocks"]:
+    for block in page_router.page_text(page, "dict")["blocks"]:
         for line in block.get("lines", []):
             if tuple(line["dir"]) != (1.0, 0.0):
                 continue

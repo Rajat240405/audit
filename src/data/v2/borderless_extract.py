@@ -103,7 +103,7 @@ def guard_reasons(
     elif len(vcuts) >= R1_MIN_CUTS or len(hcuts) >= R1_MIN_CUTS:
         reasons.append(f"R1-ruled(v={len(vcuts)},h={len(hcuts)})")
 
-    text = page.get_text("text") or ""
+    text = page_router.page_text(page, "text") or ""
     if len(R2_RUN_RE.findall(text)) >= R2_MIN_RUNS:
         reasons.append("R2-form(dot/underline runs)")
     if R3_CONTENTS_RE.search(text):
@@ -122,7 +122,7 @@ def projection_columns(page: Any) -> tuple[list[float], list]:
     ``R4_MERGE_PT`` of an earlier one are dropped, so the result is a stable,
     order-independent list.
     """
-    words = [w for w in page.get_text("words") if w[4].strip()]
+    words = [w for w in page_router.page_text(page, "words") if w[4].strip()]
     if len(words) < MIN_WORDS:
         return [], words
 

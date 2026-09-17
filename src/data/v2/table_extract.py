@@ -157,13 +157,17 @@ def lattice_cuts(
     page: Any,
     config: V2Config | None = None,
     min_len: float = MIN_RULE_LEN,
+    vector_ops: int | None = None,
 ) -> tuple[list[float], list[float], bool]:
     """Grid cuts in PDF space, with the spec §3.3 DoS guard.
 
     Returns ``(vcuts, hcuts, guard_skipped)``. When the cheap op-count exceeds
     the guard the bulk ``get_drawings()`` is never attempted.
     """
-    ops = page_router.vector_ops_of(page)
+    # The pipeline already counted this page's drawing operators; accepting the
+    # value avoids a second content-stream read per page. Omitting it preserves
+    # the original standalone behaviour exactly.
+    ops = vector_ops if vector_ops is not None else page_router.vector_ops_of(page)
     if not page_router.geometry_is_safe(ops):
         return [], [], True
     lines: list[tuple] = []
@@ -245,7 +249,7 @@ def lattice_table_items(
 def page_words(page: Any) -> list[tuple]:
     """Words in PDF space as ``(center_x, center_y, text, bbox)``."""
     out: list[tuple] = []
-    for block in page.get_text("dict")["blocks"]:
+    for block in page_router.page_text(page, "dict")["blocks"]:
         for line in block.get("lines", []):
             for span in line["spans"]:
                 text = span["text"].strip()
@@ -336,6 +340,8 @@ def detect_tables(
     pno: int,
     page_text: str,
     config: V2Config | None = None,
+    *,
+    vector_ops: int | None = None,
 ) -> tuple[list[dict], bool]:
     """Detect portrait ruled tables on one page.
 
@@ -345,7 +351,7 @@ def detect_tables(
     if config is not None and not config.tables_active:
         return [], False
 
-    vcuts, hcuts, guarded = lattice_cuts(page, config)
+    vcuts, hcuts, guarded = lattice_cuts(page, config, vector_ops=vector_ops)
     if guarded or len(vcuts) < MIN_VCUTS:
         return [], guarded
 
@@ -378,6 +384,9 @@ def detect_tables_rotated(
     pno: int,
     page_text: str,
     config: V2Config | None = None,
+    *,
+    vector_ops: int | None = None,
+    orientation: Any | None = None,
 ) -> tuple[list[dict], str, float, int]:
     """Detect tables on content-rotated pages via the reading-frame transform.
 
@@ -388,13 +397,17 @@ def detect_tables_rotated(
     A rotated block **supersedes** the portrait block on the same page; the
     caller (Stage 5 pipeline) enforces that.
     """
-    orientation = page_router.detect_orientation(page)
+    # Both values are already known to the pipeline for this page; passing
+    # them in removes a duplicate orientation scan and op-count per page.
+    if orientation is None:
+        orientation = page_router.detect_orientation(page)
     if config is not None and not config.rotated_tables_active:
         return [], orientation.label, orientation.conf, 0
     if orientation.conf < page_router.ORIENTATION_CONF_GATE or orientation.rot == 0:
         return [], orientation.label, orientation.conf, orientation.rot
 
-    if not page_router.geometry_is_safe(page_router.vector_ops_of(page)):
+    _ops = vector_ops if vector_ops is not None else page_router.vector_ops_of(page)
+    if not page_router.geometry_is_safe(_ops):
         return [], orientation.label, orientation.conf, orientation.rot
 
     words, lines, rects, size = page_router.reading_frame_items(page, orientation.rot)
