@@ -1,7 +1,16 @@
-"""Controlled, auditable reprocessing of already-ingested INCOIS documents.
+"""Controlled, auditable reprocessing of already-ingested corpus documents.
 
 Replaces the partial legacy extraction in ``corpus_reports.jsonl`` with enhanced
 core text, **without changing record identity**.
+
+Scope is selected by ``--org`` (default ``incois``, the original behaviour):
+only corpus records whose ``metadata.org`` matches the selected organisation are
+considered, so an MoES run cannot touch INCOIS records and vice versa. DfG and
+parliamentary records carry different orgs and are never selected by any mode.
+Each org has a profile that decides how its text is produced and how the result
+is labelled; MoES is extracted through the *same* adapter the ingest path uses
+(``src.scripts.convert_sirs_knowledge.enhanced_core_text``), so reprocessing and
+ingestion cannot drift apart.
 
 Why this is a separate tool rather than a bulk re-ingest:
 
@@ -15,19 +24,31 @@ Why this is a separate tool rather than a bulk re-ingest:
 
 Usage::
 
-    python -m src.data.v2.reprocess --dry-run                # report only
-    python -m src.data.v2.reprocess --apply --pdf path.pdf   # one document
-    python -m src.data.v2.reprocess --rollback <run-id>      # restore backup
+    Dry-run is the DEFAULT: with no --apply nothing is written, no backup is
+    made, and every document is still reported. --dry-run may be passed to say
+    so explicitly.
+
+    # INCOIS (default; identical to the original tool)
+    python -m src.data.v2.reprocess --dry-run --json
+    python -m src.data.v2.reprocess --apply --pdf path.pdf
+
+    # MoES — dry-run first, always
+    python -m src.data.v2.reprocess --org moes_hq --dry-run --json
+    python -m src.data.v2.reprocess --org moes_hq --apply --pdf path.pdf
+
+    python -m src.data.v2.reprocess --rollback <backup>       # restore backup
 
 Safety rails: ``--apply`` is required to write; more than ``BULK_GUARD``
 documents additionally requires ``--confirm-bulk``; and a target corpus that
-does not exist is refused rather than created.
+does not exist is refused rather than created. Nothing here rebuilds an index —
+that stays a separate, explicit operator step.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
@@ -35,10 +56,91 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.data.v2.identity import INCOIS_ORG, MOES_ORG
 from src.utils.atomic_io import write_bytes_atomic
 
 #: Writing more than this many records at once needs an explicit override.
 BULK_GUARD = 5
+
+
+@dataclass(frozen=True)
+class OrgProfile:
+    """How one organisation's records are re-extracted and labelled.
+
+    Adding an organisation is a one-line registry entry plus (if it does not use
+    the plain V2 core path) an extraction branch — never a change to the safety
+    rails, which are org-independent by construction.
+    """
+
+    #: Value matched against ``metadata.org`` (compared lowercased).
+    slug: str
+    #: Written to ``metadata.answer_source`` on success.
+    answer_source: str
+    #: Extract through the MoES adapter in ``convert_sirs_knowledge.py`` rather
+    #: than calling the V2 pipeline directly. This is what keeps reprocessing
+    #: and ingestion on one code path, including the MoES sidecar directory.
+    via_adapter: bool = False
+    #: ``metadata.document_type`` values that carry this org but are produced by
+    #: a DIFFERENT dedicated pipeline, and so must never be reprocessed here.
+    #:
+    #: Demands-for-Grants is the live case: it is crawled under the MoES website
+    #: source, so its records carry ``org="moes_hq"``, but ingestion routes it by
+    #: ``extraction_profile`` to ``src/data/extract_dfg.py`` and stamps
+    #: ``document_type="demands_for_grants"``. Running the V2 core engine over
+    #: those records would silently replace dedicated structured output with
+    #: generic core text — so the org match alone is not sufficient, and this
+    #: exclusion is what makes it sufficient.
+    exclude_document_types: frozenset = frozenset()
+
+
+_ORG_PROFILES: dict[str, OrgProfile] = {
+    INCOIS_ORG: OrgProfile(
+        slug=INCOIS_ORG,
+        answer_source="incois_v2_core",
+        via_adapter=False,
+    ),
+    MOES_ORG: OrgProfile(
+        slug=MOES_ORG,
+        # Same value the ingest adapter stamps, so a reprocessed record is
+        # indistinguishable from a freshly ingested one.
+        answer_source="moes_v2_core",
+        via_adapter=True,
+        exclude_document_types=frozenset({"demands_for_grants"}),
+    ),
+}
+
+#: The organisation considered when ``--org`` is omitted — the original
+#: behaviour of this tool, preserved exactly.
+DEFAULT_ORG = INCOIS_ORG
+
+
+def org_profile(org: str) -> OrgProfile:
+    """The profile for ``org``. Raises ``KeyError`` for an unknown org.
+
+    Refusing an unknown org (rather than silently selecting zero records) turns
+    a typo into an immediate, legible failure instead of a run that reports
+    "nothing to do" and looks like success.
+    """
+    key = (org or "").strip().lower()
+    if key not in _ORG_PROFILES:
+        raise KeyError(
+            f"unknown org {org!r}; known orgs: {', '.join(sorted(_ORG_PROFILES))}"
+        )
+    return _ORG_PROFILES[key]
+
+
+def record_in_scope(record: dict, profile: OrgProfile) -> bool:
+    """Is this corpus record one that ``profile`` is allowed to reprocess?
+
+    Two conditions, both required: the record's org matches, and its
+    ``document_type`` is not one the profile excludes. Parliamentary records are
+    rejected by the first condition (their sources declare no org, so
+    ``metadata.org`` is absent); Demands-for-Grants is rejected by the second.
+    """
+    metadata = record.get("metadata") or {}
+    if (metadata.get("org") or "").lower() != profile.slug:
+        return False
+    return (metadata.get("document_type") or "") not in profile.exclude_document_types
 
 
 @dataclass
@@ -46,7 +148,9 @@ class ReprocessOutcome:
     """One document's outcome. Always produced, even for no-ops."""
 
     pdf: str
-    status: str  # ok | unchanged | not-in-corpus | extraction-failed | dry-run
+    #: ``ok`` | ``unchanged`` | ``not-in-corpus`` | ``out-of-scope``
+    #: | ``extraction-failed`` | ``dry-run`` | ``error``
+    status: str
     record_id: str | None = None
     old_chars: int = 0
     new_chars: int = 0
@@ -119,6 +223,68 @@ def _extract_core_text(
     return text, "ok", stats
 
 
+def _extract_via_adapter(pdf_path: Path) -> tuple[str | None, str, dict]:
+    """Extract through the MoES ingest adapter — one code path, not a second.
+
+    Deliberately calls ``convert_sirs_knowledge.enhanced_core_text`` — the exact
+    function the MoES ingest branch uses — instead of re-implementing extraction
+    here, so reprocessing and ingestion cannot drift apart: same engine, same
+    ``v2_sidecars_moes`` provenance root, same status strings.
+
+    Note on identity: ``enhanced_core_text`` resolves its own ``record_id`` from
+    the adapter's merged identity map (which reads the *default* corpus path),
+    so a ``--corpus`` override does not redirect that sidecar naming. It cannot
+    affect record identity here, because this tool writes the corpus's existing
+    ``question_id`` back verbatim regardless of what the sidecar is called.
+    """
+    # Lazy import: convert_sirs_knowledge pulls in the ingestion stack, and this
+    # module stays importable without it (mirrors the other lazy imports here).
+    from src.data.v2.core_text import core_text_stats
+    from src.scripts.convert_sirs_knowledge import (
+        _moes_sidecar_dir,
+        enhanced_core_text,
+    )
+
+    text, status, summary = enhanced_core_text(
+        pdf_path, return_summary=True, sidecar_dir=_moes_sidecar_dir()
+    )
+    if text is None:
+        # No legacy fallback here on purpose: reprocessing replaces text only
+        # when the enhanced path succeeds. Falling back would silently swap
+        # better text for worse and report it as an improvement.
+        return None, status, {}
+
+    stats = core_text_stats(text)
+    summary = summary or {}
+    stats["ocr_complete"] = bool(summary.get("ocr_complete", True))
+    stats["ocr_limit_reason"] = summary.get("ocr_limit_reason")
+    stats["ocr_pages_skipped"] = summary.get("ocr_pages_skipped")
+    stats["adapter_status"] = status
+    if stats["figure_lines"]:
+        # Defensive: core text must never carry figure content.
+        return None, "internal-error:figure-lines-in-core-text", stats
+    return text, "ok", stats
+
+
+#: Trailing marker added by the ingest adapter when OCR was capped. Matched so
+#: re-running never stacks a second marker onto the same subject.
+_INCOMPLETE_SUFFIX_RE = re.compile(r"\s+—\s+INCOMPLETE-OCR\(\d+p\)$")
+
+
+def _incomplete_subject(subject: str, pages_skipped: int | None) -> str:
+    """The subject, with exactly one ``INCOMPLETE-OCR`` marker as appropriate.
+
+    Normalises rather than appends: a document that was capped on an earlier run
+    and extracts completely now gets its marker cleared, and one that is still
+    capped keeps a single, current marker. An incompletely-extracted document is
+    never left labelled as though it were complete.
+    """
+    base = _INCOMPLETE_SUFFIX_RE.sub("", subject or "").rstrip()
+    if pages_skipped:
+        return f"{base} — INCOMPLETE-OCR({pages_skipped}p)"
+    return base
+
+
 def reprocess_pdf(
     pdf_path: Path | str,
     *,
@@ -128,10 +294,20 @@ def reprocess_pdf(
     record_id: str | None = None,
     min_gain: int = 0,
     config=None,
+    org: str = DEFAULT_ORG,
 ) -> ReprocessOutcome:
-    """Reprocess one document. ``dry_run=True`` (default) never writes."""
+    """Reprocess one document. ``dry_run=True`` (default) never writes.
+
+    ``org`` selects the extraction path and provenance labels. It does **not**
+    widen the search: the corpus record is still located by PDF filename, so
+    passing ``--pdf`` for a document belonging to another org is reported as
+    ``not-in-corpus`` rather than silently rewriting it under the wrong
+    organisation's labels.
+    """
     pdf = Path(pdf_path)
     corpus = Path(corpus_path)
+    # Validated up front so a bad --org fails before any file is touched.
+    profile = org_profile(org)
 
     if not corpus.is_file():
         outcome = ReprocessOutcome(pdf.name, "error", reason="corpus-missing")
@@ -145,7 +321,7 @@ def reprocess_pdf(
     if record_id is None:
         from src.data.v2.identity import build_identity_map
 
-        mapping, _ = build_identity_map(corpus)
+        mapping, _ = build_identity_map(corpus, org=profile.slug)
         record_id = mapping.get(pdf.name)
 
     records = load_corpus(corpus)
@@ -160,10 +336,33 @@ def reprocess_pdf(
         _log(log_path, outcome, dry_run)
         return outcome
 
+    if not record_in_scope(record, profile):
+        # Present in the corpus, but not this mode's business — a DfG record
+        # named under --org moes_hq, or any record whose org differs from the
+        # selected one. Refuse explicitly instead of rewriting it under the
+        # wrong profile's labels; the record is left byte-identical.
+        meta = record.get("metadata") or {}
+        outcome = ReprocessOutcome(
+            pdf.name, "out-of-scope", record_id=record_id,
+            old_chars=len(record.get("answer_text") or ""),
+            reason=(
+                f"org={meta.get('org')!r} "
+                f"document_type={meta.get('document_type')!r} is not "
+                f"reprocessable under --org {profile.slug}"
+            ),
+        )
+        _log(log_path, outcome, dry_run)
+        return outcome
+
     question_id = record.get("question_id")
     old_text = record.get("answer_text") or ""
     try:
-        new_text, reason, stats = _extract_core_text(pdf, record_id or question_id, config)
+        if profile.via_adapter:
+            new_text, reason, stats = _extract_via_adapter(pdf)
+        else:
+            new_text, reason, stats = _extract_core_text(
+                pdf, record_id or question_id, config
+            )
     except Exception as e:  # noqa: BLE001 - one bad PDF must not abort a run
         outcome = ReprocessOutcome(
             pdf.name, "extraction-failed", record_id=record_id,
@@ -186,9 +385,23 @@ def reprocess_pdf(
     record["answer_text"] = new_text
     metadata = record.setdefault("metadata", {})
     metadata["record_id"] = record_id or question_id
-    metadata["answer_source"] = "incois_v2_core"
-    metadata["answer_text_source"] = "enhanced:v2_core"
+    metadata["answer_source"] = profile.answer_source
+    metadata["answer_text_source"] = f"enhanced:{reason}"
     metadata["core_text_stats"] = stats
+
+    # Mirror the ingest adapter's honesty rule, and only for the orgs whose
+    # ingest path has it: a capped OCR run must not leave the record looking
+    # complete. INCOIS ingestion does not mark subjects, so neither does this —
+    # keeping INCOIS output byte-identical to the original tool.
+    if profile.via_adapter:
+        skipped = (
+            stats.get("ocr_pages_skipped")
+            if not stats.get("ocr_complete", True)
+            else None
+        )
+        existing = metadata.get("subject") or ""
+        if skipped or _INCOMPLETE_SUFFIX_RE.search(existing):
+            metadata["subject"] = _incomplete_subject(existing, skipped)
 
     outcome = ReprocessOutcome(
         pdf.name,
@@ -243,17 +456,30 @@ def rollback(corpus: Path | str, backup: Path | str) -> None:
     write_bytes_atomic(Path(corpus), backup.read_bytes())
 
 
-def discover_incois_pdfs(corpus: Path | str) -> list[Path]:
-    """Every PDF filename the corpus claims for INCOIS, in corpus order."""
+def discover_org_pdfs(corpus: Path | str, org: str = DEFAULT_ORG) -> list[Path]:
+    """Every PDF filename the corpus claims for ``org``, in corpus order.
+
+    Selection is ``record_in_scope``: an exact (case-insensitive) match on
+    ``metadata.org`` **and** not one of the profile's excluded document types.
+    Parliamentary records carry no ``metadata.org`` (their sources declare no
+    org) and so are never selected by any mode; Demands-for-Grants records do
+    carry ``org="moes_hq"`` — they are crawled by the MoES website source — and
+    are excluded by document type so the MoES mode cannot reach them.
+    """
+    profile = org_profile(org)
     out: list[Path] = []
     for record in load_corpus(corpus):
-        metadata = record.get("metadata") or {}
-        if (metadata.get("org") or "").lower() != "incois":
+        if not record_in_scope(record, profile):
             continue
-        source = metadata.get("source_url")
+        source = (record.get("metadata") or {}).get("source_url")
         if source:
             out.append(Path(str(source)))
     return out
+
+
+def discover_incois_pdfs(corpus: Path | str) -> list[Path]:
+    """INCOIS discovery — the original entry point, behaviour unchanged."""
+    return discover_org_pdfs(corpus, INCOIS_ORG)
 
 
 def _log(log_path: Path | str | None, outcome: ReprocessOutcome, dry_run: bool) -> None:
@@ -270,10 +496,26 @@ def _log(log_path: Path | str | None, outcome: ReprocessOutcome, dry_run: bool) 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", default=None, help="corpus_reports.jsonl path")
+    parser.add_argument(
+        "--org", default=DEFAULT_ORG,
+        choices=sorted(_ORG_PROFILES),
+        help=(
+            "organisation whose records are considered "
+            f"(default: {DEFAULT_ORG}, the original behaviour). Only corpus "
+            "records whose metadata.org matches are selected, so one "
+            "organisation's run can never rewrite another's records. "
+            f"{MOES_ORG} extracts through the MoES ingest adapter."
+        ),
+    )
     parser.add_argument("--pdf", action="append", default=None,
-                        help="PDF path (repeatable); omit to consider all INCOIS")
+                        help="PDF path (repeatable); omit to consider every "
+                             "record belonging to --org")
     parser.add_argument("--apply", action="store_true",
                         help="actually write (default is dry-run)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="explicit no-op: dry-run is already the default. "
+                             "Accepted so the intent is stated on the command "
+                             "line and in shell history; conflicts with --apply")
     parser.add_argument("--min-gain", type=int, default=0,
                         help="only write when the new text gains this many chars")
     parser.add_argument("--confirm-bulk", action="store_true",
@@ -284,6 +526,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.apply and args.dry_run:
+        print("--apply and --dry-run are contradictory; pass only one.",
+              file=sys.stderr)
+        return 2
+
     from src.data.v2.identity import default_corpus_path
 
     corpus = Path(args.corpus) if args.corpus else default_corpus_path()
@@ -293,7 +540,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rolled back {corpus} from {args.rollback}")
         return 0
 
-    targets = [Path(p) for p in args.pdf] if args.pdf else discover_incois_pdfs(corpus)
+    targets = (
+        [Path(p) for p in args.pdf] if args.pdf
+        else discover_org_pdfs(corpus, args.org)
+    )
     if args.apply and len(targets) > BULK_GUARD and not args.confirm_bulk:
         print(
             f"refusing to apply to {len(targets)} documents without "
@@ -302,6 +552,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if not targets:
+        print(
+            f"no corpus records with metadata.org={args.org!r} to consider "
+            f"(corpus: {corpus})",
+            file=sys.stderr,
+        )
+        return 0
 
     backup: Path | None = None
     if args.apply:
@@ -311,13 +568,14 @@ def main(argv: list[str] | None = None) -> int:
     outcomes = [
         reprocess_pdf(
             t, corpus_path=corpus, dry_run=not args.apply,
-            log_path=args.log, min_gain=args.min_gain,
+            log_path=args.log, min_gain=args.min_gain, org=args.org,
         )
         for t in targets
     ]
 
     report: dict[str, Any] = {
         "mode": "apply" if args.apply else "dry-run",
+        "org": args.org,
         "corpus": str(corpus),
         "backup": str(backup) if backup else None,
         "documents": len(outcomes),
@@ -336,7 +594,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{o.old_chars:>8d} -> {o.new_chars:>8d} ({o.ratio}x) {o.reason}"
             )
         print(f"total: {report['total_old_chars']} -> {report['total_new_chars']} chars")
-        print(f"mode: {report['mode']}  statuses: {report['by_status']}")
+        print(f"mode: {report['mode']}  org: {report['org']}  "
+              f"statuses: {report['by_status']}")
     return 0
 
 
@@ -346,12 +605,17 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "BULK_GUARD",
+    "DEFAULT_ORG",
+    "OrgProfile",
     "ReprocessOutcome",
     "backup_corpus",
     "discover_incois_pdfs",
+    "discover_org_pdfs",
     "find_record",
     "load_corpus",
     "main",
+    "org_profile",
+    "record_in_scope",
     "reprocess_pdf",
     "rollback",
     "write_corpus",
