@@ -156,6 +156,10 @@ class ReprocessOutcome:
     new_chars: int = 0
     reason: str = ""
     detail: dict = field(default_factory=dict)
+    #: Set only when ``resolve_source_pdf`` had to re-anchor the stored
+    #: ``source_url`` onto this machine's data root — so the audit log records
+    #: which file was actually read, not just which one was named.
+    resolved_path: str | None = None
 
     @property
     def delta(self) -> int:
@@ -176,6 +180,7 @@ class ReprocessOutcome:
             "ratio": self.ratio,
             "reason": self.reason,
             "detail": self.detail,
+            "resolved_path": self.resolved_path,
         }
 
 
@@ -188,14 +193,90 @@ def load_corpus(path: Path | str) -> list[dict]:
     return records
 
 
+def _source_name(source_url: str) -> str:
+    """The filename of a stored ``source_url``, splitting on EITHER separator.
+
+    ``Path.name`` only understands the *host's* separator, so on POSIX a corpus
+    written on Windows (``E:\\audit3\\...\\01-24173-eng.pdf``) yields the whole
+    string as its "name" and never matches anything. Records are located by
+    filename, so that comparison has to be platform-independent in both
+    directions — a corpus is routinely reprocessed from a different OS than the
+    one that ingested it.
+    """
+    segs = _stored_segments(source_url)
+    return segs[-1] if segs else ""
+
+
 def find_record(records: list[dict], pdf_path: Path | str) -> dict | None:
     """Locate a corpus record by PDF filename (``metadata.source_url``)."""
-    name = Path(str(pdf_path)).name
+    name = _source_name(str(pdf_path))
     for record in records:
         metadata = record.get("metadata") or {}
         source = metadata.get("source_url")
-        if source and Path(str(source)).name == name:
+        if source and _source_name(str(source)) == name:
             return record
+    return None
+
+
+#: A leading drive specifier ("E:") in a stored Windows path. Split out so it is
+#: not treated as a directory component when re-anchoring.
+_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+
+
+def _stored_segments(source_url: str) -> list[str]:
+    """Split a stored ``source_url`` on either separator, dropping anchors.
+
+    Both ``/`` and ``\\`` are split regardless of the host platform, because the
+    value was written by whatever machine did the ingest — a corpus built in the
+    HPC container holds ``/data/...`` while one built on a workstation holds
+    ``E:\\audit3\\data\\...``, and either may be reprocessed from the other.
+    """
+    segs = [s for s in re.split(r"[\\/]+", str(source_url)) if s]
+    return [s for s in segs if not _DRIVE_RE.match(s)]
+
+
+def resolve_source_pdf(
+    source_url: Path | str | None, *, data_root: Path | str | None = None
+) -> Path | None:
+    """Resolve a stored ``metadata.source_url`` to a file that exists **now**.
+
+    ``source_url`` records wherever the crawl put the file *at ingest time*,
+    which need not be reachable from the machine doing the reprocessing: a
+    corpus ingested inside the HPC container stores ``/data/.moes-website/...``
+    while the same staging tree on a workstation lives at
+    ``E:\\audit3\\data\\.moes-website\\...``. Resolving the stored string
+    verbatim therefore reports ``pdf-missing`` for documents that are plainly
+    present. ``identity.build_identity_map`` already keys on the filename for
+    exactly this reason; this applies the same reasoning to opening the file.
+
+    Resolution order, first hit wins:
+
+    1. the stored path verbatim — so any corpus that resolves today behaves
+       identically, and an explicit ``--pdf`` argument is honoured as given;
+    2. progressively shorter suffixes of the stored path re-anchored on the
+       current data root, **longest first**, so the most specific existing
+       match wins and a bare filename is never matched on its own.
+
+    Returns ``None`` when nothing exists. Read-only: it never creates, moves or
+    guesses a file, and it requires at least a parent directory plus the
+    filename to exist, so it cannot silently pick an unrelated document.
+    """
+    if not source_url:
+        return None
+    stored = Path(str(source_url))
+    if stored.is_file():
+        return stored
+
+    from src.utils.app_paths import data_dir
+
+    root = Path(data_root) if data_root is not None else data_dir()
+    segs = _stored_segments(source_url)
+    # Stop at 2 segments: parent + filename. Anchoring on the filename alone
+    # would be ambiguous across staging subtrees.
+    for i in range(len(segs) - 1):
+        candidate = root.joinpath(*segs[i:])
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -306,17 +387,32 @@ def reprocess_pdf(
     """
     pdf = Path(pdf_path)
     corpus = Path(corpus_path)
+    # Display/identity name, split on either separator: a Windows source_url
+    # read on POSIX has no host-native separator to split on.
+    name = _source_name(str(pdf_path))
     # Validated up front so a bad --org fails before any file is touched.
     profile = org_profile(org)
 
     if not corpus.is_file():
-        outcome = ReprocessOutcome(pdf.name, "error", reason="corpus-missing")
+        outcome = ReprocessOutcome(name, "error", reason="corpus-missing")
         _log(log_path, outcome, dry_run)
         return outcome
-    if not pdf.is_file():
-        outcome = ReprocessOutcome(pdf.name, "error", reason="pdf-missing")
+
+    # The stored source_url names the *ingest-time* location, which need not be
+    # reachable from this machine (a corpus built in the HPC container stores
+    # /data/... while the same tree here lives under APP_DATA_DIR). Resolve it
+    # before concluding the document is absent — but only by finding the real
+    # file, never by guessing one.
+    resolved = resolve_source_pdf(pdf)
+    if resolved is None:
+        outcome = ReprocessOutcome(
+            name, "error", reason="pdf-missing",
+            detail={"stored_source_url": str(pdf)},
+        )
         _log(log_path, outcome, dry_run)
         return outcome
+    reanchored = resolved != pdf
+    pdf = resolved
 
     if record_id is None:
         from src.data.v2.identity import build_identity_map
@@ -411,6 +507,9 @@ def reprocess_pdf(
         new_chars=len(new_text),
         reason=reason,
         detail=stats,
+        # Recorded only when it differs from what the corpus named, so the log
+        # shows which file was actually read after re-anchoring.
+        resolved_path=str(pdf) if reanchored else None,
     )
 
     if len(new_text.strip()) - len(old_text.strip()) < min_gain:
@@ -617,6 +716,7 @@ __all__ = [
     "org_profile",
     "record_in_scope",
     "reprocess_pdf",
+    "resolve_source_pdf",
     "rollback",
     "write_corpus",
 ]
