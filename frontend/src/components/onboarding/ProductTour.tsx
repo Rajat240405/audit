@@ -96,8 +96,13 @@ function useViewportSize() {
  * than a Radix Dialog: a tour popover must anchor to an arbitrary element and
  * must not trap focus in the centre of the screen.
  *
- * Auto-starts once per browser (persisted ``hasSeenTour``), can be skipped at
- * any point, and is reopenable from the header Guide button.
+ * Auto-starts once per browser (persisted ``hasSeenTour``) and is reopenable
+ * from the header Guide button.
+ *
+ * DISMISSAL CONTRACT: once open, the tour stays open until the user explicitly
+ * chooses "Skip tour" or "Finish" on the final step. Backdrop clicks, outside
+ * clicks, Escape and ordinary interaction with the (still-interactive) app
+ * underneath never close it.
  */
 export function ProductTour() {
   const open = useTourStore((s) => s.open);
@@ -139,20 +144,25 @@ export function ProductTour() {
     };
   }, [open]);
 
-  /* ---- keyboard navigation ---- */
+  /* ---- keyboard navigation ----
+     Arrows are a convenience only. They must never fire while the user is
+     typing in, or navigating, an underlying control. Escape / Enter / Space no
+     longer drive the tour at all — only Skip and Finish end it. */
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      const s = useTourStore.getState();
-      if (e.key === "Escape") {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const ae = document.activeElement as HTMLElement | null;
+      const inCard = cardRef.current?.contains(ae) ?? false;
+      const idle = !ae || ae === document.body || ae === document.documentElement;
+      if (!inCard && !idle) return; // let the app control handle the key
+      const st = useTourStore.getState();
+      if (e.key === "ArrowRight") {
         e.preventDefault();
-        s.dismiss();
-      } else if (e.key === "ArrowRight" || e.key === "Enter" || e.key === " ") {
+        st.next(total);
+      } else {
         e.preventDefault();
-        s.next(total);
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        s.back();
+        st.back();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -197,12 +207,13 @@ export function ProductTour() {
 
   return (
     <div data-testid="product-tour">
-      {/* Blocks interaction with the app underneath; clicking it skips the tour.
-          Dimming comes from the spotlight's box-shadow, so this stays clear and
-          we never double-darken. */}
+      {/* Purely visual scrim — pointer-events-none, so the app underneath stays
+          fully interactive while the tour runs. Nothing here dismisses the tour;
+          only Skip / Finish end it (no backdrop-click, no outside-click, no
+          Escape). Dimming for targeted steps comes from the spotlight's
+          box-shadow below. */}
       <div
-        className={`fixed inset-0 z-[9997] ${rect ? "" : "bg-black/55"}`}
-        onClick={() => s.dismiss()}
+        className={`pointer-events-none fixed inset-0 z-[9997] ${rect ? "" : "bg-black/55"}`}
         aria-hidden="true"
       />
 

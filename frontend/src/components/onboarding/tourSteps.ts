@@ -93,9 +93,10 @@ export const TOUR_STEPS: TourStep[] = [
     id: "draft-style",
     title: "Draft Style",
     body:
-      "Sets the register of the generated draft: Default Tone, Professional, Parliamentary, Concise or Detailed. " +
-      "It affects wording and structure only — the same evidence is retrieved either way.",
-    when: "Pick Parliamentary or Professional when the draft is going straight into a submission; Concise for a quick briefing note.",
+      "Sets the register of the generated draft. It starts on Parliamentary — the default, which mirrors a Lok Sabha " +
+      "ministry reply — and can switch to Professional, Concise, Detailed or back to Default Tone. It affects wording " +
+      "and structure only — the same evidence is retrieved either way. Your choice is remembered between visits.",
+    when: "Leave it on Parliamentary for submission-ready wording; switch to Concise for a quick briefing note.",
     target: "header-draft-style",
     placement: "bottom",
   },

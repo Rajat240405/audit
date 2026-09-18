@@ -712,7 +712,13 @@ class HybridRAGPipeline:
             if rec is None or rec.metadata is None:
                 return None
             from src.retrieval.frontend.org_tree import derive_category
-            return derive_category({"document_type": rec.metadata.document_type})
+            # Pass house + id so the retrieval-side category facet matches the
+            # /api/sources catalogue (Lok Sabha / Rajya Sabha split).
+            return derive_category({
+                "document_type": rec.metadata.document_type,
+                "house": getattr(rec.metadata, "house", None),
+                "id": rec.question_id,
+            })
 
         if doc_types:
             allowed = set(doc_types)

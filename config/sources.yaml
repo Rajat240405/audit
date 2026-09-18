@@ -216,25 +216,22 @@ presentation:
     sansad:
       name: "Sansad (Parliament Q&A)"
       orgs:
-        sansad: {name: "Parliamentary Questions", categories: [parliamentary]}
+        # Parliamentary Questions is split by house — the catalogue derives
+        # lok_sabha / rajya_sabha doc categories from record metadata, and the
+        # counts below always come from the indexed corpus.
+        sansad: {name: "Parliamentary Questions", categories: [lok_sabha, rajya_sabha]}
     moes:
       name: "Ministry of Earth Sciences"
       orgs:
+        # Only orgs with indexed data are kept; unsupported orgs (IMD, IITM,
+        # NIOT) and ministries (MoA, MoF) are not offered as filters. Orgs that
+        # gain data later reappear automatically via build_sources_catalogue.
         incois:   {name: "INCOIS",  categories: [annual, scientific, technical, general]}
-        imd:      {name: "IMD",     categories: [annual, monthly, scientific]}
-        iitm:     {name: "IITM",    categories: [annual, scientific]}
-        niot:     {name: "NIOT",    categories: [annual, research]}
-        moes_hq:  {name: "MoES HQ", categories: [annual, monthly, budget, policy, gazette, news, scientific, misc]}
-    moa:
-      name: "Ministry of Agriculture & Farmers Welfare"
-      orgs:
-        moa_hq: {name: "MoA HQ", categories: [annual, monthly, budget, policy]}
-    mof:
-      name: "Ministry of Finance"
-      orgs:
-        mof_hq: {name: "MoF HQ", categories: [annual, budget, policy]}
+        moes_hq:  {name: "MoES HQ", categories: [annual, monthly, budget]}
   categories:
     parliamentary: Parliamentary Questions
+    lok_sabha: Lok Sabha
+    rajya_sabha: Rajya Sabha
     annual: Annual Reports
     monthly: Monthly Reports
     quarterly: Quarterly Reports

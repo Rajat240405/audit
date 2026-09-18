@@ -354,6 +354,27 @@ def derive_org(meta: dict | None) -> str:
     return "moes_hq"
 
 
+def _house_category(meta: dict) -> str | None:
+    """Lok Sabha / Rajya Sabha split for parliamentary records.
+
+    Prefers the stamped ``house`` metadata (set at QARecord load time); falls
+    back to the record id prefix (``ls-`` / ``rs-``) for legacy rows that predate
+    the house field. Returns ``None`` when the house cannot be determined so the
+    caller can keep the generic ``parliamentary`` bucket.
+    """
+    house = str(meta.get("house") or "").lower().replace("_", "-")
+    if house == "lok-sabha":
+        return "lok_sabha"
+    if house == "rajya-sabha":
+        return "rajya_sabha"
+    rid = str(meta.get("id") or meta.get("question_id") or "").lower()
+    if rid.startswith("ls-"):
+        return "lok_sabha"
+    if rid.startswith("rs-"):
+        return "rajya_sabha"
+    return None
+
+
 def derive_category(meta: dict | None) -> str:
     """Determine doc_category (cadence axis) from metadata (fallback mapping)."""
     if not meta:
@@ -362,6 +383,8 @@ def derive_category(meta: dict | None) -> str:
     if explicit:
         return str(explicit)
     dt = str(meta.get("document_type") or "").lower()
+    if dt == "parliamentary_qa":
+        return _house_category(meta) or "parliamentary"
     return _DT_CATEGORY.get(dt, "misc")
 
 
@@ -372,11 +395,13 @@ def _record_meta_blob(rec) -> dict:
     if isinstance(rec, dict):
         meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
         blob = dict(meta)
+        blob["id"] = rec.get("question_id") or rec.get("id") or ""
         blob["question_text"] = rec.get("question_text") or ""
         blob["answer_text"] = rec.get("answer_text") or ""
         return blob
     meta = getattr(rec, "metadata", None)
     blob = meta.model_dump() if meta is not None and hasattr(meta, "model_dump") else {}
+    blob["id"] = getattr(rec, "question_id", "") or getattr(rec, "id", "") or ""
     blob["question_text"] = getattr(rec, "question_text", "") or ""
     blob["answer_text"] = getattr(rec, "answer_text", "") or ""
     return blob
@@ -435,6 +460,22 @@ def build_sources_catalogue(records) -> dict:
             "count": sum(e["count"] for e in extra),
             "orgs": extra,
         }
+
+    # Hide orgs that have no indexed records (and ministries left empty by that
+    # pruning). The filter must only offer sources that are actually searchable;
+    # configuration contributes identity/labels, the corpus decides availability.
+    pruned: dict = {}
+    for mslug, m in tree.items():
+        kept = [o for o in m["orgs"] if o["count"] > 0]
+        if not kept:
+            continue
+        pruned[mslug] = {
+            "name": m["name"],
+            "count": sum(o["count"] for o in kept),
+            "orgs": kept,
+        }
+    tree = pruned
+
     return {
         "tree": tree,
         "types": [{"type": t, "count": c} for t, c in types.most_common()],

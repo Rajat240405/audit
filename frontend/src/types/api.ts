@@ -5,12 +5,11 @@ export type ExecutionMode = "fast" | "deep";
 export type ThinkingEffort = "low" | "medium" | "xhigh";
 export type RetrievalMode = "auto" | "hybrid" | "graph" | "hybrid_and_graph";
 export type DraftStyle =
-  | "formal"
+  | "default"
+  | "professional"
+  | "parliamentary"
   | "concise"
-  | "executive"
-  | "scientific"
-  | "government"
-  | "default";
+  | "detailed";
 
 /** One entity matched from the query text (GraphRAG anchor). */
 export interface GraphAnchor {

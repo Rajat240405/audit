@@ -13,6 +13,8 @@ import { Input } from "@/components/ui/input";
  *  the `label` field. Unknown categories fall back to the raw slug. */
 const CATEGORY_LABELS: Record<string, string> = {
   parliamentary: "Parliamentary Questions",
+  lok_sabha: "Lok Sabha",
+  rajya_sabha: "Rajya Sabha",
   annual: "Annual Reports",
   monthly: "Monthly Reports",
   quarterly: "Quarterly Reports",
@@ -25,11 +27,6 @@ const CATEGORY_LABELS: Record<string, string> = {
   news: "Newsletters / News",
   misc: "Misc",
 };
-
-interface Draft {
-  orgs: Set<string>;
-  cats: Set<string>;
-}
 
 function Row({
   label,
@@ -75,8 +72,13 @@ function Row({
 }
 
 /** Source filter popover — Organizations (orgs) + Document Types (categories).
- *  Draft-commit UX: checkboxes edit a local draft; Apply commits to the store,
- *  Clear resets. "N selected" badge on the trigger reflects the APPLIED state.
+ *
+ *  LIVE-COMMIT UX: every checkbox writes straight to the store, so the filter is
+ *  applied the instant it is toggled — there is no Apply/confirm step. Clear
+ *  resets to the unfiltered view immediately. "N selected" on the trigger
+ *  reflects the live (applied) state. The filter only takes effect at query
+ *  time (useChatStream), so toggling never triggers a network request and a
+ *  burst of selections cannot cause a request storm.
  *
  *  HIERARCHY RULE (requirement):
  *  - Each org carries a `categories` list (from /api/sources → org_tree.py).
@@ -91,23 +93,13 @@ export function SourceFilter() {
   const [catalogue, setCatalogue] = useState<SourceCatalogue | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [draft, setDraft] = useState<Draft>({ orgs: new Set(), cats: new Set() });
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     getCatalogue().then(setCatalogue).catch(() => setCatalogue(null));
   }, []);
 
-  // Draft = applied state whenever the panel opens.
-  useEffect(() => {
-    if (open) {
-      setDraft({ orgs: new Set(sourceFilter.orgs), cats: new Set(sourceFilter.docCategories) });
-      setQuery("");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  // Click-outside to close.
+  // Click-outside closes the POPOVER only (never a tour — see ProductTour).
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -120,15 +112,20 @@ export function SourceFilter() {
   const tree = catalogue?.tree ?? {};
   const categories = catalogue?.categories ?? [];
 
-  // Flatten orgs across ministries, sorted by count desc.
+  // Live selection as Sets (single source of truth = the store).
+  const selOrgs = useMemo(() => new Set(sourceFilter.orgs), [sourceFilter.orgs]);
+  const selCats = useMemo(() => new Set(sourceFilter.docCategories), [sourceFilter.docCategories]);
+
+  // Flatten orgs across ministries, sorted by count desc. The backend already
+  // prunes orgs/ministries with no indexed records, so only supported sources
+  // are ever listed here.
   const orgs: SourceOrg[] = useMemo(() => {
     const all: SourceOrg[] = [];
     for (const m of Object.values(tree)) all.push(...m.orgs);
     return all.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }, [tree]);
 
-  // Build a map: org slug -> Set<category> from backend catalogue.
-  // This is the ONLY source of truth for the hierarchy — no hardcoding.
+  // org slug -> Set<category> from the backend catalogue (only source of truth).
   const orgCategoryMap = useMemo(() => {
     const map = new Map<string, Set<string>>();
     for (const org of orgs) {
@@ -137,17 +134,16 @@ export function SourceFilter() {
     return map;
   }, [orgs]);
 
-  // Active categories = union of categories for all selected orgs.
-  // If no orgs selected → all categories are active ("All Sources").
+  // Active categories = union of categories for all SELECTED (applied) orgs.
   const activeCategorySet = useMemo((): Set<string> | null => {
-    if (draft.orgs.size === 0) return null; // null = all active
+    if (selOrgs.size === 0) return null; // null = all active
     const union = new Set<string>();
-    for (const slug of draft.orgs) {
+    for (const slug of selOrgs) {
       const cats = orgCategoryMap.get(slug);
       if (cats) cats.forEach((c) => union.add(c));
     }
     return union;
-  }, [draft.orgs, orgCategoryMap]);
+  }, [selOrgs, orgCategoryMap]);
 
   const cats = useMemo(
     () =>
@@ -164,52 +160,45 @@ export function SourceFilter() {
     : cats;
 
   const appliedCount = sourceFilter.orgs.length + sourceFilter.docCategories.length;
-  const allChecked = draft.orgs.size === 0 && draft.cats.size === 0;
+  const allChecked = appliedCount === 0;
 
-  const toggleOrg = (slug: string) =>
-    setDraft((d) => {
-      const next = new Set(d.orgs);
-      if (next.has(slug)) next.delete(slug);
-      else next.add(slug);
+  const commit = (orgsSet: Set<string>, catsSet: Set<string>) =>
+    setSourceFilter({
+      ministry: "all",
+      orgs: [...orgsSet],
+      docCategories: [...catsSet],
+    });
 
-      // Drop any selected categories that are no longer active after this toggle.
-      // Recompute active set with the new org selection.
-      const newActive = next.size === 0
+  const toggleOrg = (slug: string) => {
+    const nextOrgs = new Set(selOrgs);
+    if (nextOrgs.has(slug)) nextOrgs.delete(slug);
+    else nextOrgs.add(slug);
+
+    // Drop any selected categories that are no longer active after this toggle.
+    const newActive =
+      nextOrgs.size === 0
         ? null
         : (() => {
             const union = new Set<string>();
-            for (const s of next) {
-              const cats = orgCategoryMap.get(s);
-              if (cats) cats.forEach((c) => union.add(c));
+            for (const s of nextOrgs) {
+              const c = orgCategoryMap.get(s);
+              if (c) c.forEach((x) => union.add(x));
             }
             return union;
           })();
 
-      const newCats = new Set(
-        [...d.cats].filter((c) => newActive === null || newActive.has(c))
-      );
-
-      return { orgs: next, cats: newCats };
-    });
-
-  const toggleCat = (cat: string) =>
-    setDraft((d) => {
-      const next = new Set(d.cats);
-      if (next.has(cat)) next.delete(cat);
-      else next.add(cat);
-      return { ...d, cats: next };
-    });
-
-  const apply = () => {
-    setSourceFilter({
-      ministry: "all",
-      orgs: [...draft.orgs],
-      docCategories: [...draft.cats],
-    });
-    setOpen(false);
+    const nextCats = new Set([...selCats].filter((c) => newActive === null || newActive.has(c)));
+    commit(nextOrgs, nextCats);
   };
 
-  const clear = () => setDraft({ orgs: new Set(), cats: new Set() });
+  const toggleCat = (cat: string) => {
+    const nextCats = new Set(selCats);
+    if (nextCats.has(cat)) nextCats.delete(cat);
+    else nextCats.add(cat);
+    commit(selOrgs, nextCats);
+  };
+
+  const clear = () => commit(new Set(), new Set());
 
   return (
     <div className="relative" ref={panelRef}>
@@ -256,7 +245,7 @@ export function SourceFilter() {
               label="All Sources"
               count={catalogue?.total ?? 0}
               checked={allChecked}
-              onToggle={() => clear()}
+              onToggle={clear}
               sublabel={appliedCount > 0 ? "(clear filter)" : undefined}
             />
 
@@ -271,7 +260,7 @@ export function SourceFilter() {
                 key={o.slug}
                 label={o.name}
                 count={o.count}
-                checked={draft.orgs.has(o.slug)}
+                checked={selOrgs.has(o.slug)}
                 disabled={o.count === 0}
                 onToggle={() => toggleOrg(o.slug)}
               />
@@ -281,7 +270,7 @@ export function SourceFilter() {
               Document Types
               {activeCategorySet !== null && (
                 <span className="ml-1 font-normal normal-case text-muted/50">
-                  (filtered by selected org{draft.orgs.size > 1 ? "s" : ""})
+                  (filtered by selected org{selOrgs.size > 1 ? "s" : ""})
                 </span>
               )}
             </div>
@@ -295,7 +284,7 @@ export function SourceFilter() {
                   key={c.category}
                   label={c.label ?? CATEGORY_LABELS[c.category] ?? c.category}
                   count={c.count}
-                  checked={draft.cats.has(c.category)}
+                  checked={selCats.has(c.category)}
                   disabled={!isActive}
                   onToggle={() => toggleCat(c.category)}
                 />
@@ -303,19 +292,13 @@ export function SourceFilter() {
             })}
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2">
+          {/* Footer — Clear only; selections apply live, no confirm step. */}
+          <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
             <button
               onClick={clear}
               className="rounded-md px-2.5 py-1 text-[11px] font-medium text-muted hover:bg-surface-2 hover:text-foreground"
             >
               Clear
-            </button>
-            <button
-              onClick={apply}
-              className="rounded-md bg-accent px-4 py-1 text-[11px] font-semibold text-white hover:opacity-90"
-            >
-              Apply
             </button>
           </div>
         </div>
@@ -323,4 +306,3 @@ export function SourceFilter() {
     </div>
   );
 }
-

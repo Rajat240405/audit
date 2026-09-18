@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { DraftStyle, ExecutionMode, RetrievalMode, ThinkingEffort } from "@/types";
 
 interface AppState {
@@ -42,14 +43,19 @@ export interface SourceFilterState {
   docCategories: string[];
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
   provider: "ollama",
   modelFamily: "qwen2.5",
   model: "qwen2.5:7b",
   mode: "fast",
   thinkingEffort: "medium",
   retrievalMode: "auto",
-  draftStyle: "default",
+  // Parliamentary is the default register for a fresh install. It is the only
+  // field persisted (see persist() below), so a user's later explicit choice is
+  // respected across reloads and never force-reset to Parliamentary.
+  draftStyle: "parliamentary",
   sourceFilter: { ministry: "all", orgs: [], docCategories: [] },
   gpu: "CPU",
   backendOnline: null,
@@ -68,4 +74,12 @@ export const useAppStore = create<AppState>((set) => ({
   setBackendOnline: (v) => set({ backendOnline: v }),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
   setBuildModalOpen: (v) => set({ buildModalOpen: v }),
-}));
+    }),
+    {
+      name: "incois-app",
+      // Persist ONLY the draft style. Everything else (provider, model, mode,
+      // retrieval mode, source filter) stays session-scoped as before.
+      partialize: (s) => ({ draftStyle: s.draftStyle }),
+    }
+  )
+);
