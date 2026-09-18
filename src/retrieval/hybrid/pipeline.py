@@ -718,6 +718,7 @@ class HybridRAGPipeline:
                 "document_type": rec.metadata.document_type,
                 "house": getattr(rec.metadata, "house", None),
                 "id": rec.question_id,
+                "subject": rec.metadata.subject,
             })
 
         if doc_types:

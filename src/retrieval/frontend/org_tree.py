@@ -385,6 +385,13 @@ def derive_category(meta: dict | None) -> str:
     dt = str(meta.get("document_type") or "").lower()
     if dt == "parliamentary_qa":
         return _house_category(meta) or "parliamentary"
+    if dt == "document":
+        # Metadata-aware refinement: MoES "Monthly Reports (YYYY)" rows are
+        # stamped with the generic ``document`` type, but their ``subject``
+        # clearly identifies them. Classify those as monthly WITHOUT changing
+        # the generic ``document`` -> ``misc`` fallback for truly generic docs.
+        if "monthly report" in str(meta.get("subject") or "").lower():
+            return "monthly"
     return _DT_CATEGORY.get(dt, "misc")
 
 
@@ -422,14 +429,22 @@ def build_sources_catalogue(records) -> dict:
     _ensure_fresh()
     from collections import Counter
 
+    from collections import defaultdict
+
     types: Counter = Counter()
     categories: Counter = Counter()
     orgs: Counter = Counter()
+    # org slug -> category -> count, so the frontend can show category counts
+    # scoped to the selected organization(s) instead of global totals.
+    org_cat: dict[str, Counter] = defaultdict(Counter)
     for rec in records:
         blob = _record_meta_blob(rec)
+        org = derive_org(blob)
+        cat = derive_category(blob)
         types[blob.get("document_type") or "document"] += 1
-        categories[derive_category(blob)] += 1
-        orgs[derive_org(blob)] += 1
+        categories[cat] += 1
+        orgs[org] += 1
+        org_cat[org][cat] += 1
 
     tree: dict = {}
     known: set[str] = set()
@@ -483,6 +498,9 @@ def build_sources_catalogue(records) -> dict:
             {"category": c, "count": n, "label": _category_label(c)}
             for c, n in categories.most_common()
         ],
+        "org_category_counts": {
+            o: dict(c.most_common()) for o, c in org_cat.items()
+        },
         "total": sum(orgs.values()),
         "source": "index",
     }

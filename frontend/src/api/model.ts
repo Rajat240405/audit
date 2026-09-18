@@ -225,6 +225,9 @@ export interface SourceCatalogue {
   // label is config-driven (sources.yaml `presentation.categories`); older
   // backends omit it — fall back to CATEGORY_LABELS/slug (see SourceFilter).
   categories: Array<{ category: string; count: number; label?: string }>;
+  /** org slug -> category -> count, for org-scoped category counts. Older
+   *  backends omit it; the UI then falls back to the global counts. */
+  org_category_counts?: Record<string, Record<string, number>>;
   total: number;
 }
 

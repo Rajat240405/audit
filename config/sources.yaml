@@ -227,7 +227,8 @@ presentation:
         # NIOT) and ministries (MoA, MoF) are not offered as filters. Orgs that
         # gain data later reappear automatically via build_sources_catalogue.
         incois:   {name: "INCOIS",  categories: [annual, scientific, technical, general]}
-        moes_hq:  {name: "MoES HQ", categories: [annual, monthly, budget]}
+        # MoES HQ actual corpus: press_release->news, monthly, annual, demands_for_grants->budget.
+        moes_hq:  {name: "MoES HQ", categories: [news, monthly, annual, budget]}
   categories:
     parliamentary: Parliamentary Questions
     lok_sabha: Lok Sabha

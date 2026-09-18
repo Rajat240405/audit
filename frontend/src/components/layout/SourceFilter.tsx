@@ -134,6 +134,14 @@ export function SourceFilter() {
     return map;
   }, [orgs]);
 
+  // org -> category -> count from the backend; used to scope displayed counts.
+  const orgCatCounts = catalogue?.org_category_counts ?? {};
+  const scopedCount = (cat: string): number => {
+    let n = 0;
+    for (const o of selOrgs) n += orgCatCounts[o]?.[cat] ?? 0;
+    return n;
+  };
+
   // Active categories = union of categories for all SELECTED (applied) orgs.
   const activeCategorySet = useMemo((): Set<string> | null => {
     if (selOrgs.size === 0) return null; // null = all active
@@ -283,7 +291,7 @@ export function SourceFilter() {
                 <Row
                   key={c.category}
                   label={c.label ?? CATEGORY_LABELS[c.category] ?? c.category}
-                  count={c.count}
+                  count={selOrgs.size ? scopedCount(c.category) : c.count}
                   checked={selCats.has(c.category)}
                   disabled={!isActive}
                   onToggle={() => toggleCat(c.category)}
