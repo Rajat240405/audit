@@ -97,7 +97,11 @@ export function DraftCanvas() {
   return (
     <div className="flex h-full flex-col p-6">
       {/* Canvas card */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-lg border border-border bg-surface shadow-sm">
+      {/* data-tour: product-tour anchor for "Editing the draft". */}
+      <div
+        data-tour="draft-canvas"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-lg border border-border bg-surface shadow-sm"
+      >
         <div className="flex items-center justify-between border-b border-border bg-surface-2/60 px-4 py-2">
           <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">
             Drafting Canvas
@@ -249,7 +253,8 @@ export function DraftCanvas() {
 
       <div className="space-y-3 rounded-b-lg border border-t-0 border-border bg-surface p-3 shadow-sm">
         <Toolbar editing={editing} />
-        <div className="flex gap-3">
+        {/* data-tour: product-tour anchor for "Cross-Verify Facts". */}
+        <div className="flex gap-3" data-tour="draft-verify">
           <button
             onClick={() => edit("Rewrite this draft in a formal official register.")}
             disabled={!content || editing}

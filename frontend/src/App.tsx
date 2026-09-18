@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { MainLayout } from "@/components/layout/MainLayout";
 import { BuildGraphModal } from "@/components/graph/BuildGraphModal";
+import { ProductTour } from "@/components/onboarding/ProductTour";
 import { useBackendStatus } from "@/hooks/useBackendStatus";
 
 // Route-level code splitting (M7): each page loads on demand, so the initial
@@ -41,6 +42,9 @@ export function App() {
       </MainLayout>
       <Settings />
       <BuildGraphModal />
+      {/* Product tour — mounted once, globally, like Settings/BuildGraphModal.
+          Auto-starts on first run; reopenable from the header Guide button. */}
+      <ProductTour />
     </BrowserRouter>
   );
 }

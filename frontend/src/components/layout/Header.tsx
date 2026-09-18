@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Moon, Sun, Brain, Settings as SettingsIcon } from "lucide-react";
+import { Moon, Sun, Brain, Settings as SettingsIcon, LifeBuoy } from "lucide-react";
 import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import type { RetrievalMode, ThinkingEffort } from "@/types";
 import { SourceFilter } from "./SourceFilter";
 import { useThemeStore } from "@/store/useThemeStore";
 import { useActivityStore } from "@/store/useActivityStore";
+import { useTourStore } from "@/store/useTourStore";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/utils/cn";
@@ -106,6 +107,9 @@ export function Header() {
       </div>
 
       <div className="flex flex-1 items-center justify-center gap-3 text-sm">
+        {/* data-tour: product-tour anchor for "Provider & Model". The wrapper
+            keeps the parent's gap-3, so this is layout-neutral. */}
+        <div className="flex items-center gap-3" data-tour="header-provider-model">
         <Select value={app.provider} onValueChange={changeProvider}>
           <SelectTrigger className="w-28">
             <SelectValue />
@@ -146,8 +150,13 @@ export function Header() {
             ))}
           </SelectContent>
         </Select>
+        </div>
 
-        <Button size="sm" onClick={() => app.setBuildModalOpen(true)}>
+        <Button
+          size="sm"
+          onClick={() => app.setBuildModalOpen(true)}
+          data-tour="header-build-graph"
+        >
           Build Graph
         </Button>
 
@@ -156,6 +165,8 @@ export function Header() {
 
         <GpuBadge gpu={app.gpu} />
 
+        {/* data-tour: product-tour anchor for "Mode & Thinking Effort". */}
+        <div className="flex items-center gap-3" data-tour="header-mode">
         <Select value={app.mode} onValueChange={(m) => app.setMode(m as ExecutionMode)}>
           <SelectTrigger className="w-24">
             <SelectValue />
@@ -168,7 +179,10 @@ export function Header() {
             ))}
           </SelectContent>
         </Select>
+        </div>
 
+        {/* data-tour: product-tour anchor for "Draft Style". */}
+        <div className="flex items-center" data-tour="header-draft-style">
         <Select
           value={app.draftStyle}
           onValueChange={(s) => app.setDraftStyle(s as typeof app.draftStyle)}
@@ -184,12 +198,14 @@ export function Header() {
             ))}
           </SelectContent>
         </Select>
+        </div>
 
         {/* Thinking effort — Deep only. Fast disables thinking entirely, so
             there is nothing to steer and the selector is hidden. */}
         {app.mode === "deep" && (
           <div
             data-testid="thinking-effort"
+            data-tour="header-thinking-effort"
             className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold"
           >
             {THINKING_EFFORTS.map((t) => (
@@ -212,7 +228,10 @@ export function Header() {
 
         {/* Retrieval mode — Auto routes via the query agent; the other three
             are manual selections that skip routing entirely. */}
-        <div className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold">
+        <div
+          data-tour="header-retrieval-mode"
+          className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold"
+        >
           {RETRIEVAL_MODES.map((m) => (
             <button
               key={m.value}
@@ -235,10 +254,28 @@ export function Header() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+        <GuideButton />
         <SettingsButton />
         <ThemeToggle />
       </div>
     </header>
+  );
+}
+
+/** Reopen the product tour. The tour auto-starts once; this is the way back in. */
+function GuideButton() {
+  const start = useTourStore((s) => s.start);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={start}
+      data-tour="header-guide"
+      title="Product guide — replay the feature tour"
+      aria-label="Product guide — replay the feature tour"
+    >
+      <LifeBuoy className="h-4 w-4" />
+    </Button>
   );
 }
 
@@ -268,6 +305,7 @@ function ActivityButton() {
       size="sm"
       onClick={toggle}
       title="Model activity — what the model received and what it's thinking"
+      data-tour="header-activity"
       className={cn("relative", open && "bg-surface-2")}
     >
       <Brain className="h-4 w-4" />

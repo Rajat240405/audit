@@ -56,7 +56,8 @@ export function Toolbar({ editing: _propEditing }: { editing: boolean }) {
   };
 
   return (
-    <div className="space-y-3">
+    // data-tour: product-tour anchor for "AI editing".
+    <div className="space-y-3" data-tour="draft-toolbar">
       <div className="flex gap-2 overflow-x-auto pb-1">
         {CHIPS.map((c) => {
           const isActive = editing && editingLabel === c.label;

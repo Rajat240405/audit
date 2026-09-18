@@ -77,7 +77,11 @@ export function Workspace() {
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-background">
       <nav className="flex shrink-0 items-center justify-between border-b border-border bg-surface px-6 py-2">
-        <div className="flex gap-5 text-xs font-semibold uppercase tracking-wide text-muted">
+        {/* data-tour: product-tour anchor for "The workspace tabs". */}
+        <div
+          data-tour="workspace-tabs"
+          className="flex gap-5 text-xs font-semibold uppercase tracking-wide text-muted"
+        >
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -93,7 +97,8 @@ export function Workspace() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        {/* data-tour: product-tour anchor for "Export" (Copy + Export menu). */}
+        <div data-tour="workspace-actions" className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={copy}>
             {copied ? "Copied ✓" : "Copy"}
           </Button>
@@ -101,7 +106,9 @@ export function Workspace() {
         </div>
       </nav>
 
-      <div className="min-h-0 flex-1">
+      {/* data-tour tracks the active tab so the tour can highlight whichever
+          panel it has just switched to. Layout-neutral: same element. */}
+      <div className="min-h-0 flex-1" data-tour={`workspace-panel-${tab}`}>
         {tab === "draft" && <DraftCanvas />}
         {tab === "history" && (
           <HistoryPanel
