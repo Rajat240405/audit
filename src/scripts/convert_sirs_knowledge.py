@@ -374,6 +374,12 @@ def convert_text_file(path: Path, out: list[QARecord], seen: set[str],
 _DFG_PROFILE = "demands-for-grants"
 #: MoES (HQ website) org slug — kept in sync with src.data.v2.identity.MOES_ORG.
 _MOES_ORG = "moes_hq"
+
+#: Metadata ``org`` value that marks INCOIS records. Mirrors
+#: ``src.data.v2.identity.INCOIS_ORG``; kept local so this module does not
+#: import the V2 package at module scope.
+_INCOIS_ORG = "incois"
+
 _DFG_STEM_RE = re.compile(r"^(\d+)-(\d+)-(eng|hin|both)$")
 
 
@@ -494,11 +500,31 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
     # built-in fallback — one shared stack, not a second implementation.
     # PyMuPDF work runs in a child subprocess (_extract_text_subprocess) so a
     # native SIGSEGV in the MuPDF C layer cannot kill the parent ingestion process.
-    try:
-        text = _extract_text_subprocess(path)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [skip pdf] {path.name}: {e}")
-        return 0
+    #
+    # INCOIS V2 (routing fix): ``src.scripts.ingest`` reaches this generic
+    # branch for every INCOIS PDF, so this — not ``convert_annual_pdf`` /
+    # ``convert_report_pdf`` — is the path a normal ``ingest incois`` run takes.
+    # Those two converters already call ``enhanced_core_text``; this branch now
+    # calls the SAME engine, so there is still exactly one V2 implementation.
+    # Everything else about the record (title, date, ``document_type`` from the
+    # source registry, ``source_url``) is untouched, so the only thing that
+    # changes is the extracted text — and therefore only the content-derived
+    # part of ``question_id``.
+    _enhanced = org == _INCOIS_ORG
+    _estatus: str | None = None
+    text: str | None = None
+    if _enhanced:
+        # sidecar_dir is left at the configured default (<data>/v2_sidecars),
+        # matching convert_annual_pdf / convert_report_pdf exactly. MoES keeps
+        # its own per-source root; INCOIS does not get a second one.
+        text, _estatus = enhanced_core_text(path)
+        _enhanced = text is not None
+    if text is None:
+        try:
+            text = _extract_text_subprocess(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip pdf] {path.name}: {e}")
+            return 0
     if len(text.strip()) < 50:
         # scanned/image-only PDF — try OCR before giving up
         print(f"  [pdf] {path.name}: no embedded text, trying OCR...")
@@ -506,6 +532,9 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         if not text.strip():
             print(f"  [skip pdf] {path.name}: no extractable text (scanned image?)")
             return 0
+        # Legacy whole-document OCR is not V2 core text: it must still go
+        # through _clean and must not be stamped as enhanced.
+        _enhanced = False
     # FIX A: staging title/date (record.json → dateline → filename-year → None)
     _srec = _sibling_record_json(path)
     _title, _title_source = _resolve_doc_title(path, _srec)
@@ -520,6 +549,13 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         document_type=doc_type,
         title_source=_title_source,
         date_source=_date_source,
+        # Preserve the existing corpus identity when this document was already
+        # ingested; None for a genuinely new document (content hash applies).
+        # Identical rule to convert_annual_pdf / convert_report_pdf / MoES.
+        qa_id=_identity_map().get(path.name) if _enhanced else None,
+        pre_cleaned=_enhanced,
+        answer_source="incois_v2_core" if _enhanced else None,
+        answer_text_source=f"enhanced:{_estatus}" if _enhanced else None,
         org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
     if rec and rec.question_id not in seen:
