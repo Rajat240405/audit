@@ -8,6 +8,12 @@ interface AppState {
   model: string;
   mode: ExecutionMode;
   thinkingEffort: ThinkingEffort;
+  /** Effort ladder declared by the ACTIVE model family, synced from
+   * /api/models. `null` = not resolved yet (models still loading); `[]` = the
+   * model documents no effort ladder (selector unavailable). Keeping it here
+   * lets the request path clamp the outgoing effort too, so a value left over
+   * from a previous model can never leak onto the wire. */
+  modelEfforts: ThinkingEffort[] | null;
   retrievalMode: RetrievalMode;
   draftStyle: DraftStyle;
   /** Source filter (ministry-tree + doc categories) for retrieval.
@@ -27,6 +33,7 @@ interface AppState {
   setModel: (m: string) => void;
   setMode: (m: ExecutionMode) => void;
   setThinkingEffort: (e: ThinkingEffort) => void;
+  setModelEfforts: (e: ThinkingEffort[] | null) => void;
   setRetrievalMode: (m: RetrievalMode) => void;
   setDraftStyle: (s: DraftStyle) => void;
   setSourceFilter: (f: SourceFilterState) => void;
@@ -51,6 +58,7 @@ export const useAppStore = create<AppState>()(
   model: "qwen2.5:7b",
   mode: "fast",
   thinkingEffort: "medium",
+  modelEfforts: null,
   retrievalMode: "auto",
   // Parliamentary is the default register for a fresh install. It is the only
   // field persisted (see persist() below), so a user's later explicit choice is
@@ -67,6 +75,7 @@ export const useAppStore = create<AppState>()(
   setModel: (m) => set({ model: m }),
   setMode: (m) => set({ mode: m }),
   setThinkingEffort: (e) => set({ thinkingEffort: e }),
+  setModelEfforts: (e) => set({ modelEfforts: e }),
   setRetrievalMode: (m) => set({ retrievalMode: m }),
   setDraftStyle: (s) => set({ draftStyle: s }),
   setSourceFilter: (f) => set({ sourceFilter: f }),

@@ -13,7 +13,10 @@ import type {
 export interface ChatStreamOptions {
   message: string;
   mode: ExecutionMode;
-  thinkingEffort: ThinkingEffort;
+  /** Effort to request, or undefined when the selected model declares no
+   * ladder — then the field is omitted rather than sending a value the model
+   * cannot honour (the backend also enforces its own ladder). */
+  thinkingEffort?: ThinkingEffort;
   retrievalMode: RetrievalMode;
   draftStyle?: DraftStyle | string;
   docTypes?: string[];

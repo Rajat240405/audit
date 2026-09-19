@@ -57,6 +57,14 @@ providers:
         native_context_window: 262144   # model CAPABILITY (see config/models.yaml)
         thinking_capable: true
         think_mode: template          # vLLM: chat_template_kwargs (no model name suffix)
+        # Mirrors the production capability block: this generation's template
+        # reads reasoning_effort next to enable_thinking. Without the ladder
+        # here, a docker-catalog run would silently stop steering depth.
+        thinking:
+          supported: true
+          control: chat_template_kwargs
+          reasoning_efforts: [low, medium, xhigh]
+          effort_wire: chat_template_kwargs
         recommended_execution_mode: GPU
 
   openai_compatible:

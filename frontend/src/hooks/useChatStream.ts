@@ -122,7 +122,16 @@ export function useChatStream() {
       streamChat({
         message: question,
         mode: app.mode,
-        thinkingEffort: app.thinkingEffort,
+        // Model-aware clamp at the send site: only send an effort the SELECTED
+        // model declares. `null` means the catalog hasn't resolved yet, so the
+        // stored pick is sent as-is (the backend enforces the ladder anyway);
+        // `[]` means the model has no ladder, so nothing is sent.
+        thinkingEffort:
+          app.modelEfforts === null
+            ? app.thinkingEffort
+            : app.modelEfforts.includes(app.thinkingEffort)
+              ? app.thinkingEffort
+              : undefined,
         retrievalMode: app.retrievalMode,
         draftStyle: app.draftStyle,
         // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)

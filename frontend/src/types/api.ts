@@ -1,8 +1,15 @@
 // Shared domain types for the INCOIS Audit Pro workstation.
 
 export type ExecutionMode = "fast" | "deep";
-/** Qwen reasoning depth — Deep mode only. `high` is out of scope. */
-export type ThinkingEffort = "low" | "medium" | "xhigh";
+/**
+ * Reasoning depth — Deep mode only. The union covers every ladder the catalog
+ * declares; which subset a model actually offers comes from that model's
+ * `reasoning_efforts` capability (GET /api/models), never from a hardcoded
+ * list. Note the ladders are NOT the same set: `xhigh` is a Qwen3-style
+ * template effort and `high` is the top-level OpenAI-compatible effort — each
+ * is only ever offered/sent for models that declare it.
+ */
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh";
 export type RetrievalMode = "auto" | "hybrid" | "graph" | "hybrid_and_graph";
 export type DraftStyle =
   | "default"

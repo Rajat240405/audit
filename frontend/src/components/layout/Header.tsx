@@ -34,12 +34,30 @@ const DRAFT_STYLES = [
 ];
 
 /** Retrieval modes offered in the header pill (Auto is the default). */
-/** Qwen reasoning depth — Deep only. `high` is intentionally not offered. */
-const THINKING_EFFORTS: ReadonlyArray<{ value: ThinkingEffort; label: string }> = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "xhigh", label: "XHigh" },
-];
+/**
+ * Display labels for reasoning-effort values — Deep only. Which VALUES a model
+ * offers is NOT decided here: the selected family's `reasoning_efforts`
+ * capability (from /api/models) drives the list, so a model that documents no
+ * ladder gets no selector. `high` and `xhigh` are different ladders (top-level
+ * OpenAI-compatible vs Qwen3-style chat template) and are never mixed.
+ */
+const EFFORT_LABELS: Readonly<Record<ThinkingEffort, string>> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "XHigh",
+};
+/** Fallback when a model's ladder does not contain the user's current pick. */
+const FALLBACK_EFFORT: ThinkingEffort = "medium";
+/**
+ * Ladder shown until the catalog resolves (first paint, or a deployment whose
+ * /api/models is unreachable). This is the app's historical default and keeps
+ * the control — and its product-tour anchor — present in Deep mode regardless
+ * of backend availability. As soon as the selected family resolves, its
+ * declared ladder takes over and the pick is clamped to it; the backend
+ * enforces the real per-model ladder either way.
+ */
+const FALLBACK_LADDER: ThinkingEffort[] = ["low", "medium", "xhigh"];
 
 const RETRIEVAL_MODES: ReadonlyArray<{
   value: RetrievalMode;
@@ -70,6 +88,30 @@ export function Header() {
     enabled: Boolean(app.provider),
     staleTime: 60_000,
   });
+
+  // Effort ladder of the SELECTED family, straight from its declared
+  // capability. [] = the model documents no effort control (selector disabled);
+  // an unresolved catalog falls back to the historical default so the control
+  // (and the product-tour anchor) is always present in Deep mode.
+  const activeFamily = models?.find((m) => m.id === app.modelFamily);
+  const modelEfforts: ThinkingEffort[] = activeFamily
+    ? ((activeFamily.reasoning_efforts ?? []) as ThinkingEffort[])
+    : FALLBACK_LADDER;
+
+  // Model-aware Thinking Effort: publish the selected model's ladder and keep
+  // the stored effort inside it. Switching models can invalidate the pick
+  // (e.g. Qwen3.8 `xhigh` -> a model whose ladder has no `xhigh`); the value is
+  // clamped to the new ladder's default rather than carried over, so an
+  // unsupported effort can never be offered or sent.
+  useEffect(() => {
+    if (!activeFamily) return;
+    const ladder = (activeFamily.reasoning_efforts ?? []) as ThinkingEffort[];
+    app.setModelEfforts(ladder);
+    if (ladder.length > 0 && !ladder.includes(app.thinkingEffort)) {
+      app.setThinkingEffort(ladder.includes(FALLBACK_EFFORT) ? FALLBACK_EFFORT : ladder[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFamily]);
 
   const changeProvider = async (p: string) => {
     app.setProvider(p);
@@ -200,29 +242,50 @@ export function Header() {
         </Select>
         </div>
 
-        {/* Thinking effort — Deep only. Fast disables thinking entirely, so
-            there is nothing to steer and the selector is hidden. */}
+        {/* Thinking effort — Deep only. Fast has nothing to steer, so the
+            selector is hidden. In Deep the options come from the SELECTED
+            model's declared ladder: a model with no ladder (binary
+            enable_thinking only) gets a disabled control that says so, rather
+            than a fake ladder that silently does nothing. */}
         {app.mode === "deep" && (
           <div
             data-testid="thinking-effort"
             data-tour="header-thinking-effort"
-            className="flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold"
+            role="group"
+            aria-label="Thinking effort"
+            aria-disabled={modelEfforts.length === 0}
+            className={cn(
+              "flex items-center rounded-full border border-border bg-surface-2 p-0.5 text-[10px] font-semibold",
+              modelEfforts.length === 0 &&
+                "cursor-not-allowed select-none opacity-40 blur-[0.4px]"
+            )}
           >
-            {THINKING_EFFORTS.map((t) => (
-              <button
-                key={t.value}
-                onClick={() => app.setThinkingEffort(t.value)}
-                className={cn(
-                  "rounded-full px-2.5 py-1 transition-colors",
-                  app.thinkingEffort === t.value
-                    ? "bg-foreground text-background"
-                    : "text-muted hover:text-foreground"
-                )}
-                title={`Thinking: ${t.label}`}
+            {modelEfforts.length === 0 ? (
+              <span
+                className="px-2.5 py-1 text-muted"
+                title={`${
+                  activeFamily?.display_name ?? "This model"
+                } has no reasoning-effort ladder: thinking is on/off only, controlled by the mode (Standard/Deep).`}
               >
-                {t.label}
-              </button>
-            ))}
+                Effort N/A
+              </span>
+            ) : (
+              modelEfforts.map((value) => (
+                <button
+                  key={value}
+                  onClick={() => app.setThinkingEffort(value)}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 transition-colors",
+                    app.thinkingEffort === value
+                      ? "bg-foreground text-background"
+                      : "text-muted hover:text-foreground"
+                  )}
+                  title={`Thinking: ${EFFORT_LABELS[value] ?? value}`}
+                >
+                  {EFFORT_LABELS[value] ?? value}
+                </button>
+              ))
+            )}
           </div>
         )}
 

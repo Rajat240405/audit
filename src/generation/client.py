@@ -18,6 +18,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -172,6 +173,20 @@ class LLMClient:
         # (dev-parity) -> "none" for unknown models. No model-name conditionals.
         return resolve_think_mode(self.provider, self.model)
 
+    def _family_reasoning_effort(self):
+        """Reasoning-effort capability for the active (provider, model):
+        where the effort belongs on the wire and which values the model
+        accepts. Same resolution point / order as ``_family_think_mode``
+        (registry.resolve_reasoning_effort); unknown models resolve to
+        "no effort control", so nothing is ever invented for them."""
+        try:
+            from src.generation.registry import resolve_reasoning_effort
+        except Exception:  # noqa: BLE001
+            # Registry unavailable: declare NO effort control (never invent a
+            # ladder) — mirrors the "none" fallback in _family_think_mode.
+            return SimpleNamespace(wire="none", efforts=())
+        return resolve_reasoning_effort(self.provider, self.model)
+
     @staticmethod
     def _default_base_url(provider: str) -> str:
         """Canonical API base URL for a provider (used unless the caller
@@ -242,6 +257,7 @@ class LLMClient:
         resolved_key = api_key or self.api_key
         prov_inst = provider_registry.get(self.provider)
         if prov_inst:
+            effort_spec = self._family_reasoning_effort()
             return prov_inst.generate(
                 model=self.model,
                 prompt=prompt,
@@ -254,6 +270,8 @@ class LLMClient:
                 think=getattr(self, "think", None),
                 think_mode=self._family_think_mode(),
                 reasoning_effort=getattr(self, "reasoning_effort", None),
+                effort_wire=effort_spec.wire,
+                reasoning_efforts=effort_spec.efforts,
                 base_url=self.base_url,
                 **kwargs
             )
@@ -295,6 +313,7 @@ class LLMClient:
             from src.generation.registry import provider_registry
             prov = provider_registry.get(self.provider)
             if prov:
+                effort_spec = self._family_reasoning_effort()
                 yield from prov.generate_stream(
                     model=self.model, prompt=prompt, system=system,
                     temperature=self.temperature, max_tokens=self.max_tokens,
@@ -302,6 +321,8 @@ class LLMClient:
                     base_url=self.base_url,
                     think_mode=self._family_think_mode(),
                     reasoning_effort=getattr(self, "reasoning_effort", None),
+                    effort_wire=effort_spec.wire,
+                    reasoning_efforts=effort_spec.efforts,
                     **kwargs
                 )
             else:

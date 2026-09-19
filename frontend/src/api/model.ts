@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { ExecutionMode, ServerStatus, SourceItem } from "@/types";
+import type { ExecutionMode, ServerStatus, SourceItem, ThinkingEffort } from "@/types";
 
 export interface ProviderInfo {
   name: string;
@@ -24,6 +24,14 @@ export interface ModelFamily {
   /** tri-state capability: true/false known, null = unknown (dynamic model —
    * never claimed thinking-capable; no thinking control is sent on the wire) */
   thinking_supported?: boolean | null;
+  /** Reasoning-effort ladder THIS model documents (Deep mode only). Empty or
+   * absent = the model has no effort control: the selector must be shown as
+   * unavailable rather than offering a ladder the model cannot honour. */
+  reasoning_efforts?: ThinkingEffort[];
+  /** Where that effort is sent: chat_template_kwargs | request_field | none.
+   * Informational — the backend decides the wire; the UI only renders the
+   * ladder. */
+  effort_wire?: string;
 }
 
 export async function fetchProviders(): Promise<ProviderInfo[]> {

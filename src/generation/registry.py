@@ -11,6 +11,7 @@ import json
 import os
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -91,12 +92,113 @@ def provider_transport_default_think_mode(provider: str) -> str:
     return _wire_for_control(provider_transport_default_control(provider))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Reasoning-effort capability (a SEPARATE axis from thinking on/off)
+#
+# Thinking on/off is `ThinkingSpec.control` (chat_template_kwargs.enable_thinking
+# / Ollama top-level `think` / server default). Reasoning DEPTH is a different
+# mechanism that different model generations expose in different places — and
+# some do not expose at all:
+#
+#   chat_template_kwargs  effort is nested in chat_template_kwargs alongside
+#                         enable_thinking (templates that read it there).
+#   request_field         effort is a TOP-LEVEL OpenAI chat-completions field
+#                         (`reasoning_effort`); chat_template_kwargs is NOT used.
+#   none                  the model documents no effort ladder — NOTHING is
+#                         sent, and the selector must not pretend otherwise.
+#
+# The ladder itself is catalog data (`reasoning_efforts`), never Python: an
+# effort value only reaches the wire if the SELECTED family declares it, so a
+# value valid for one model can never leak onto another (e.g. `high` is a
+# GPT-OSS effort and is never forwarded to a Qwen3-style template, which
+# rejects unknown efforts).
+# ─────────────────────────────────────────────────────────────────────────────
+EFFORT_WIRE_CHAT_TEMPLATE = "chat_template_kwargs"
+EFFORT_WIRE_REQUEST_FIELD = "request_field"
+EFFORT_WIRE_NONE = "none"
+
+_EFFORT_WIRE_ALIASES: dict[str | None, str] = {
+    "chat_template_kwargs": EFFORT_WIRE_CHAT_TEMPLATE,
+    "template": EFFORT_WIRE_CHAT_TEMPLATE,      # legacy wire alias
+    "request_field": EFFORT_WIRE_REQUEST_FIELD,
+    "top_level": EFFORT_WIRE_REQUEST_FIELD,     # spelling accepted from catalogs
+    "request": EFFORT_WIRE_REQUEST_FIELD,
+    "none": EFFORT_WIRE_NONE,
+    None: EFFORT_WIRE_NONE,
+}
+
+
+def _normalize_effort_wire(value: Any) -> str:
+    """Normalize any accepted effort-wire spelling to the canonical value."""
+    token = None if value is None else str(value).strip().lower()
+    norm = _EFFORT_WIRE_ALIASES.get(token)
+    if norm is None:
+        print(f"[models] unrecognized reasoning-effort wire {value!r} — treated as none")
+        return EFFORT_WIRE_NONE
+    return norm
+
+
+def normalize_reasoning_efforts(value: Any) -> tuple[str, ...]:
+    """Normalize a declared effort ladder to a tuple of lowercase tokens.
+
+    Accepts a list/tuple/comma string; anything unrecognized yields the empty
+    ladder (= this model declares no effort control)."""
+    if value is None:
+        return ()
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return tuple(
+        tok for tok in (str(v).strip().lower() for v in items) if tok
+    )
+
+
+def clamp_reasoning_effort(value: Any, allowed: Sequence[str]) -> str | None:
+    """Wire-level safety net: keep the effort ONLY if this model declares it.
+
+    Returns None when the model has no ladder at all, or when the requested
+    value is not a member of the model's ladder. Dropping (rather than
+    substituting) is the safe choice at the wire: an unknown effort is
+    rejected outright by some chat templates, and the request-level
+    normalization in the server already maps bad input to a ladder default
+    before it ever gets here."""
+    ladder = tuple(allowed or ())
+    if not ladder or not isinstance(value, str):
+        return None
+    token = value.strip().lower()
+    return token if token in ladder else None
+
+
 @dataclass
 class ThinkingSpec:
     """Model thinking CAPABILITY. `supported`: None = unknown (never claimed).
-    `control`: canonical mechanism or None (provider transport default)."""
+    `control`: canonical mechanism or None (provider transport default).
+
+    Reasoning DEPTH is a second, independent axis:
+      `reasoning_efforts` — the effort ladder this model documents (empty =
+        the model has no effort control; nothing is sent and the UI must not
+        offer one).
+      `effort_wire` — where that effort belongs on the wire (see
+        EFFORT_WIRE_* above). Forced to "none" when there is no ladder, so an
+        effort can never be sent to a model that does not declare one."""
     supported: Optional[bool] = None
     control: Optional[str] = None  # "request_flag" | "chat_template_kwargs" | "server_default" | None
+    reasoning_efforts: tuple[str, ...] = ()
+    effort_wire: str = EFFORT_WIRE_NONE
+
+    def __post_init__(self) -> None:
+        self.reasoning_efforts = normalize_reasoning_efforts(self.reasoning_efforts)
+        self.effort_wire = _normalize_effort_wire(self.effort_wire)
+        if not self.reasoning_efforts:
+            self.effort_wire = EFFORT_WIRE_NONE
+
+
+@dataclass(frozen=True)
+class ReasoningEffortSpec:
+    """Resolved reasoning-effort capability for one (provider, model) pair:
+    where the effort goes (`wire`) and which values that model accepts
+    (`efforts`). Empty ladder + EFFORT_WIRE_NONE = the model takes no effort
+    control at all."""
+    wire: str = EFFORT_WIRE_NONE
+    efforts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -221,6 +323,11 @@ class ModelFamily:
             thinking=ThinkingSpec(
                 supported=(bool(supported) if supported is not None else None),
                 control=control,
+                # Reasoning-effort ladder + wire location are catalog data
+                # (per model generation); absent = the model declares no
+                # effort control and receives none.
+                reasoning_efforts=t_block.get("reasoning_efforts"),
+                effort_wire=t_block.get("effort_wire"),
             ),
             serving=ServingSpec(
                 reasoning_parser=serving.get("reasoning_parser"),
@@ -441,6 +548,23 @@ def resolve_think_mode(provider: str, model: str) -> str:
         if f.model_name == model or f.id == model:
             return f.think_mode
     return "none"
+
+
+def resolve_reasoning_effort(provider: str, model: str) -> ReasoningEffortSpec:
+    """Resolve the reasoning-effort capability (wire location + ladder) for
+    (provider, model) — the single resolution point behind
+    LLMClient._family_reasoning_effort, mirroring resolve_think_mode.
+
+    Order: exact provider+model family -> model identity across any provider
+    (dev-parity) -> no effort control (never invent a ladder for an unknown
+    or dynamically discovered model)."""
+    for f in model_registry.list_all():
+        if f.provider == provider and (f.model_name == model or f.id == model):
+            return ReasoningEffortSpec(f.thinking.effort_wire, f.thinking.reasoning_efforts)
+    for f in model_registry.list_all():
+        if f.model_name == model or f.id == model:
+            return ReasoningEffortSpec(f.thinking.effort_wire, f.thinking.reasoning_efforts)
+    return ReasoningEffortSpec()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider Interface and Implementations
@@ -934,6 +1058,8 @@ class OpenAICompatibleProvider(BaseProvider):
         self, model: str, messages: list, temperature: float, max_tokens: int,
         num_ctx: int, stream: bool, think: bool | None, think_mode: str = "none",
         reasoning_effort: str | None = None,
+        effort_wire: str = EFFORT_WIRE_NONE,
+        reasoning_efforts: Sequence[str] | None = None,
     ) -> dict:
         body: dict = {
             "model": model,  # sent verbatim — never mangled with /think|/nothink
@@ -942,6 +1068,22 @@ class OpenAICompatibleProvider(BaseProvider):
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        # Reasoning DEPTH is effort-based, not token-based, and it is
+        # CAPABILITY-GATED here (the last checkpoint before the wire): the
+        # value survives only if the SELECTED model declares it in its own
+        # ladder, and it is placed where THAT model reads it. A value that
+        # belongs to another model generation is dropped rather than
+        # translated — some chat templates reject unknown efforts outright, so
+        # an effort valid elsewhere must never be forwarded.
+        # The previous `thinking_token_budget` mechanism is gone entirely; no
+        # replacement token budget is sent.
+        effort = clamp_reasoning_effort(reasoning_effort, reasoning_efforts or ())
+        # Effort is only meaningful with thinking ON: Fast mode has nothing to
+        # steer.
+        if bool(think) and effort and effort_wire == EFFORT_WIRE_REQUEST_FIELD:
+            # TOP-LEVEL OpenAI chat-completions field. Deliberately NOT nested
+            # in chat_template_kwargs — this family does not use that mechanism.
+            body["reasoning_effort"] = effort
         # chat_template_kwargs.enable_thinking is THE vLLM Qwen3.x thinking
         # control (Standard=False / Deep=True, per request, model id untouched).
         # Send it ONLY for "template" families — for "none" the server decides
@@ -949,13 +1091,10 @@ class OpenAICompatibleProvider(BaseProvider):
         # not sending keeps the contract explicit).
         if think is not None and think_mode == "template":
             kwargs: dict = {"enable_thinking": bool(think)}
-            # Reasoning DEPTH is effort-based, not token-based: the chat
-            # template accepts `reasoning_effort` (low|medium|xhigh). It is sent
-            # ONLY with thinking ON — Fast mode has nothing to steer. The
-            # previous `thinking_token_budget` mechanism is gone entirely; no
-            # replacement token budget is sent.
-            if bool(think) and reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
+            # Nested reasoning depth for templates that read it (sent ONLY
+            # with thinking ON — Fast mode has nothing to steer).
+            if bool(think) and effort and effort_wire == EFFORT_WIRE_CHAT_TEMPLATE:
+                kwargs["reasoning_effort"] = effort
             body["chat_template_kwargs"] = kwargs
 
         return body
@@ -965,6 +1104,8 @@ class OpenAICompatibleProvider(BaseProvider):
                  max_tokens=512, num_ctx=16384, api_key=None,
                  timeout_seconds=300, think=None, base_url=None,
                  think_mode: str = "none", reasoning_effort: str | None = None,
+                 effort_wire: str = EFFORT_WIRE_NONE,
+                 reasoning_efforts: Sequence[str] | None = None,
                  **kwargs) -> LLMResponse:
         messages: list = []
         if system:
@@ -973,7 +1114,9 @@ class OpenAICompatibleProvider(BaseProvider):
 
         body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=False, think=think, think_mode=think_mode,
-                             reasoning_effort=reasoning_effort)
+                             reasoning_effort=reasoning_effort,
+                             effort_wire=effort_wire,
+                             reasoning_efforts=reasoning_efforts)
         start = time.monotonic()
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
@@ -1006,7 +1149,10 @@ class OpenAICompatibleProvider(BaseProvider):
                         max_tokens=512, num_ctx=16384, api_key=None,
                         timeout_seconds=300, think=None, base_url=None,
                         think_mode: str = "none",
-                        reasoning_effort: str | None = None, **kwargs):
+                        reasoning_effort: str | None = None,
+                        effort_wire: str = EFFORT_WIRE_NONE,
+                        reasoning_efforts: Sequence[str] | None = None,
+                        **kwargs):
         """Yields {type: reasoning|tokens|answer_start|done} — same contract
         as the Ollama/HF streams, so the frontend reasoning panel is shared.
 
@@ -1031,7 +1177,9 @@ class OpenAICompatibleProvider(BaseProvider):
 
         body = self._payload(model, messages, temperature, max_tokens,
                              num_ctx, stream=True, think=think, think_mode=think_mode,
-                             reasoning_effort=reasoning_effort)
+                             reasoning_effort=reasoning_effort,
+                             effort_wire=effort_wire,
+                             reasoning_efforts=reasoning_efforts)
         buf = ""  # content-side buffer for inline <think> extraction (shape 4)
         # True while the model is mid-thought. Set when the server streams on
         # the reasoning channel, so that if `thinking_token_budget` truncates

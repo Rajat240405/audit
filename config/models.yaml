@@ -100,7 +100,15 @@ providers:
         # more (e.g. 262144).
         native_context_window: 131072
         # Capability block (canonical form); legacy keys kept consistent.
-        thinking: { supported: true, control: chat_template_kwargs }
+        # Thinking control is BINARY for this generation: the template reads
+        # chat_template_kwargs.enable_thinking (Standard=false / Deep=true) and
+        # documents NO reasoning-effort ladder — so none is declared and none
+        # is ever sent. The reasoning_effort kwarg is a Qwen3.8-generation
+        # addition; sending it here would be an unsupported kwarg.
+        thinking:
+          supported: true
+          control: chat_template_kwargs
+          reasoning_efforts: []
         # Serving requirements = HOW the server must be launched (deployment
         # metadata only — never read by execution policy or sent in requests).
         serving: { reasoning_parser: qwen3, max_model_len: 65536, notes: "A40 48GB FP8; serving limit raised 32768->65536 (2026-08-19); fp16 KV default — validate free VRAM via startup KV log before going higher" }
@@ -159,6 +167,23 @@ providers:
         # think_mode: none = never send chat_template_kwargs (not a Qwen3-style model).
         thinking_capable: true
         think_mode: none                  # never send chat_template_kwargs
+        # Capability block (canonical form); agrees with think_mode above
+        # (server_default <-> none), so no conflict is reported.
+        #   control: server_default   — reasoning cannot be switched off per
+        #     request on this serving path; Standard/Fast therefore does NOT
+        #     disable reasoning, it simply sends no control at all.
+        #   reasoning_efforts        — the OpenAI-compatible ladder this model
+        #     documents (low|medium|high). NOTE `high` is valid HERE and is
+        #     not valid for the Qwen3-style template ladder; the per-model
+        #     ladder is what keeps them apart.
+        #   effort_wire: request_field — sent as the TOP-LEVEL
+        #     `reasoning_effort` request field, never nested in
+        #     chat_template_kwargs.
+        thinking:
+          supported: true
+          control: server_default
+          reasoning_efforts: [low, medium, high]
+          effort_wire: request_field
         serving:
           reasoning_parser: openai_gptoss
           notes: "serve with --reasoning-parser openai_gptoss --tool-call-parser openai"
@@ -174,7 +199,17 @@ providers:
         # RAG_MAX_CONTEXT_TOKENS-or-this-entry's-context_window). Serving
         # (131072 today) never shrinks the model's native 262144.
         # Capability block (canonical form); legacy keys kept consistent.
-        thinking: { supported: true, control: chat_template_kwargs }
+        # Thinking control is chat_template_kwargs.enable_thinking (same
+        # mechanism as Qwen3.6), PLUS the reasoning-effort ladder this
+        # generation's template documents: low|medium|xhigh, read from
+        # chat_template_kwargs alongside enable_thinking. `high` is NOT a
+        # member — this template raises on unknown efforts, so declaring the
+        # ladder is what keeps an out-of-ladder value off the wire.
+        thinking:
+          supported: true
+          control: chat_template_kwargs
+          reasoning_efforts: [low, medium, xhigh]
+          effort_wire: chat_template_kwargs
         # Serving requirements = HOW the server must be launched (deployment
         # metadata only — never read by execution policy, never sent on wire).
         serving:

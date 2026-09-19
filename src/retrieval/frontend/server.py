@@ -164,8 +164,11 @@ def _current_serving_limit(prov: str) -> int | None:
     return _LAST_SERVING_LIMIT
 
 
-#: Reasoning-effort values the deployed chat template accepts. Sourced from
-#: the model's documented efforts; `high` is deliberately NOT offered.
+#: Reasoning-effort values accepted when a family declares no ladder of its
+#: own (fallback for callers that resolve without a family). Per-model ladders
+#: are catalog data (ModelFamily.thinking.reasoning_efforts) and are the
+#: authoritative list — `high` is a GPT-OSS effort and is deliberately NOT
+#: offered to the Qwen3-style template ladder.
 REASONING_EFFORTS = ("low", "medium", "xhigh")
 DEFAULT_REASONING_EFFORT = "medium"
 #: Internal (non-user-facing) LLM calls always use the cheapest effort: they
@@ -173,12 +176,33 @@ DEFAULT_REASONING_EFFORT = "medium"
 INTERNAL_REASONING_EFFORT = "low"
 
 
-def normalize_reasoning_effort(value: object) -> str:
-    """Coerce a request value to a supported effort (default medium)."""
-    if not isinstance(value, str):
+def family_reasoning_efforts(family) -> tuple:
+    """Effort ladder the SELECTED model declares (empty = no effort control).
+
+    Read from the model catalog via the capability spec — never hardcoded, and
+    empty for unknown/dynamically discovered models so nothing is invented."""
+    thinking = getattr(family, "thinking", None)
+    return tuple(getattr(thinking, "reasoning_efforts", ()) or ())
+
+
+def _effort_default(ladder: tuple) -> str:
+    """Fallback effort for a ladder: `medium` when the model offers it, else
+    the cheapest documented step (never a value outside the ladder)."""
+    if DEFAULT_REASONING_EFFORT in ladder:
         return DEFAULT_REASONING_EFFORT
-    token = value.strip().lower()
-    return token if token in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
+    return ladder[0] if ladder else DEFAULT_REASONING_EFFORT
+
+
+def normalize_reasoning_effort(value: object, allowed: object = None) -> str:
+    """Coerce a request value to an effort THIS model supports (default medium).
+
+    `allowed` is the selected family's declared ladder; omitting it keeps the
+    legacy behavior (REASONING_EFFORTS). An out-of-ladder value — e.g. `high`
+    arriving for a Qwen3-style template — falls back to the ladder default
+    rather than being forwarded."""
+    ladder = tuple(allowed) if allowed else REASONING_EFFORTS
+    token = value.strip().lower() if isinstance(value, str) else ""
+    return token if token in ladder else _effort_default(ladder)
 
 
 def _apply_execution_plan(family, prov: str, exec_mode: str):
@@ -895,6 +919,15 @@ def _family_entry(f: ModelFamily, metadata_source: str) -> dict:
         # Unknown models are never claimed thinking-capable — and nothing
         # thinking-related is sent to them on the wire (plan.wire_think=None).
         "thinking_supported": (f.thinking.supported if f.thinking else None),
+        # Reasoning-effort capability (model-aware Thinking Effort control).
+        # `reasoning_efforts` is the ladder THIS model documents — the UI
+        # renders exactly these options, and an empty list means the model has
+        # no effort ladder (the control must be shown as unavailable, not
+        # faked). `effort_wire` says where the value is sent
+        # (chat_template_kwargs | request_field | none) — surfaced for
+        # transparency; the wire decision itself lives in the adapter.
+        "reasoning_efforts": list(f.thinking.reasoning_efforts) if f.thinking else [],
+        "effort_wire": (f.thinking.effort_wire if f.thinking else "none"),
         "recommended_execution_mode": f.recommended_execution_mode,
         "think_mode": f.think_mode,
         "served": True,
@@ -1069,9 +1102,14 @@ def _chat_endpoint_body(request: ChatRequest):
     # Deep-only: the user's Thinking selection. Fast leaves it None so no
     # reasoning_effort is sent. Read straight from the request — the router
     # never influences it, so retrieval mode stays fully independent.
+    # MODEL-AWARE: the value is normalized against the SELECTED family's
+    # declared ladder, and models that declare no ladder (binary
+    # enable_thinking only) receive None — so an effort can never be sent to a
+    # model that does not support one, whatever an older client posts.
+    _efforts = family_reasoning_efforts(family)
     llm_client.reasoning_effort = (
-        normalize_reasoning_effort(getattr(request, "reasoning_effort", None))
-        if plan.wire_think else None
+        normalize_reasoning_effort(getattr(request, "reasoning_effort", None), _efforts)
+        if plan.wire_think and _efforts else None
     )
     llm_client.api_key = _active_api_key()  # Propagate cached API key dynamically!
 
@@ -1594,9 +1632,12 @@ def _resolve_exec(request: ChatStreamRequest):
     # Deep-only: the user's Thinking selection. Fast leaves it None so no
     # reasoning_effort is sent. Read straight from the request — the router
     # never influences it, so retrieval mode stays fully independent.
+    # MODEL-AWARE: normalized against the SELECTED family's ladder; families
+    # with no declared ladder get None (no effort on the wire at all).
+    _efforts = family_reasoning_efforts(family)
     llm_client.reasoning_effort = (
-        normalize_reasoning_effort(getattr(request, "reasoning_effort", None))
-        if plan.wire_think else None
+        normalize_reasoning_effort(getattr(request, "reasoning_effort", None), _efforts)
+        if plan.wire_think and _efforts else None
     )
     llm_client.api_key = _active_api_key()
     print(f"[exec] mode={exec_mode} think={'ON' if llm_client.think else 'OFF'} "
