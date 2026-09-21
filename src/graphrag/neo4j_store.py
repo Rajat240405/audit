@@ -21,9 +21,12 @@ from typing import Optional, Sequence
 from src.graphrag.config import GraphConfig
 from src.graphrag.models import (
     DocumentRef,
+    EntityRef,
     FactView,
     GraphContribution,
+    GraphFact,
     NodeView,
+    Support,
 )
 from src.graphrag.schema import (
     ALL_RELS,
@@ -35,6 +38,31 @@ from src.graphrag.store import GraphStore, NEIGHBORS_LIMIT
 __all__ = ["Neo4jGraphStore"]
 
 _ALLOWED_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _remap(key: str, old: str, new: str) -> str:
+    """Point a fact endpoint at the new identity when it named the old one."""
+    return new if key == old else key
+
+
+def _endpoint(row, side: str, key: str, doc_key: str,
+              new_key: str | None = None) -> EntityRef:
+    """Rebuild an EntityRef from a read-back row's endpoint columns.
+
+    A fact may name the document itself; on a re-key that endpoint has to
+    become the NEW key, or the retired Document node comes back to life.
+    """
+    new_key = new_key or doc_key
+    if key == new_key:
+        return EntityRef(label="Document", key=key, name=key,
+                         resolution="canonical", raw=key)
+    label = row.get(f"{side}_label")
+    name = row.get(f"{side}_name")
+    if key == new_key and str(label or "") == "Document":
+        name = key
+    return EntityRef(label=str(label or "Entity"), key=key,
+                     name=str(name or key), resolution="canonical",
+                     raw=None if key == new_key else str(name or key))
 
 
 def _ident(name: str) -> str:
@@ -391,6 +419,70 @@ class Neo4jGraphStore(GraphStore):
             })
         return {"fact": fact_view, "supports": supports}
 
+    def incorporated_evidence(self, doc_keys) -> dict[str, dict]:
+        keys = sorted(set(doc_keys))
+        out: dict[str, dict] = {}
+        # chunked so a multi-thousand-document corpus stays inside the
+        # parameter-size envelope and keeps each query index-backed
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i:i + 1000]
+            rows = self._run_read(
+                """
+                MATCH (d:Document) WHERE d.key IN $keys
+                OPTIONAL MATCH (d)-[s:SUPPORTS]->(:Fact)
+                WHERE s.origin = 'llm'
+                RETURN d.key AS k, d.content_hash AS ch, count(s) AS n
+                """, keys=chunk)
+            for r in rows:
+                out[str(r["k"])] = {"content_hash": r.get("ch") or "",
+                                    "has_llm_facts": int(r.get("n") or 0) > 0}
+        return out
+
+    def read_llm_contribution(self, doc_key: str,
+                              rename_to: str | None = None) -> GraphContribution | None:
+        new_key = rename_to or doc_key
+        rows = self._run_read(
+            """
+            MATCH (d:Document {key: $doc})-[s:SUPPORTS]->(f:Fact)
+            WHERE s.origin = 'llm'
+            OPTIONAL MATCH (a) WHERE a.key = f.src_key
+            OPTIONAL MATCH (b) WHERE b.key = f.dst_key
+            RETURN f.key AS fk, f.rel_type AS rel, f.origin AS origin,
+                   f.src_key AS a, f.dst_key AS b,
+                   head(labels(a)) AS a_label, a.name AS a_name,
+                   head(labels(b)) AS b_label, b.name AS b_name,
+                   s.evidence AS evidence, s.extracted_at AS ts
+            """, doc=doc_key)
+        if not rows:
+            return None
+        facts: list[GraphFact] = []
+        supports: list[Support] = []
+        by_key: dict[str, EntityRef] = {}
+        node_keys: set[str] = set()
+        for r in rows:
+            # every reference to the retired identity becomes the new one
+            src = _endpoint(r, "a", _remap(str(r["a"]), doc_key, new_key),
+                            doc_key, new_key)
+            dst = _endpoint(r, "b", _remap(str(r["b"]), doc_key, new_key),
+                            doc_key, new_key)
+            fact = GraphFact(rel=str(r["rel"]), src=src, dst=dst,
+                             origin=str(r.get("origin") or "llm"))
+            facts.append(fact)
+            by_key.setdefault(src.key, src)
+            by_key.setdefault(dst.key, dst)
+            node_keys.update((src.key, dst.key))
+            # fact_key embeds the endpoint keys, so a rename CHANGES it
+            supports.append(Support(
+                doc_key=new_key, fact_key=fact.fact_key,
+                evidence=r.get("evidence"), origin="llm",
+                extracted_at=r.get("ts") or ""))
+        if not facts:
+            return None
+        # the Document node itself is rewritten via apply_contribution(doc=)
+        nodes = [by_key[k] for k in sorted(node_keys) if k != new_key]
+        return GraphContribution(doc_key=new_key, nodes=nodes, facts=facts,
+                                 supports=supports)
+
     def stats(self) -> dict:
         labels = {}
         for label in NODE_LABELS:
@@ -495,14 +587,21 @@ def _apply_contribution_tx(tx, contrib: GraphContribution, now: str,
             doc=doc_key, fks=fks,
         )
         existing = {r["fk"] for r in res}
-    rows = [
-        {
+    # doc_count must grow at most ONCE per (document, fact): the SUPPORTS edge
+    # below is MERGE-keyed on (doc, fact_key), so a contribution carrying two
+    # supports for the same fact still produces ONE edge. Counting per row
+    # instead inflated doc_count, and since withdrawal decrements per edge the
+    # fact could never reach 0 — leaving a stale fact behind after a reconcile.
+    rows = []
+    counted: set[str] = set()
+    for s in contrib.supports:
+        is_new = s.fact_key not in existing and s.fact_key not in counted
+        counted.add(s.fact_key)
+        rows.append({
             "fk": s.fact_key, "doc": s.doc_key, "evidence": s.evidence,
             "origin": s.origin, "ts": s.extracted_at or now,
-            "is_new": s.fact_key not in existing,
-        }
-        for s in contrib.supports
-    ]
+            "is_new": is_new,
+        })
     if rows:
         tx.run(
             """

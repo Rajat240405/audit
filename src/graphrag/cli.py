@@ -150,6 +150,42 @@ def cmd_build(config, args) -> int:
         store.close()
 
 
+def cmd_migrate_checkpoint(config, args) -> int:
+    """Backfill stable identity + proof of incorporation on an existing
+    checkpoint, so an incremental build can RESUME instead of rebuilding.
+
+    Additive and idempotent: never changes ``status``, never rewrites a hash,
+    never deletes an entry, never touches the graph. Safe to run beside a
+    live build, and a no-op the second time.
+    """
+    from src.graphrag.checkpoint import GraphCheckpoint
+    from src.graphrag.migrate import migrate_checkpoint
+    from src.graphrag.pipeline import load_corpus
+
+    if not config.corpus_path.exists():
+        log.error("corpus not found: %s", config.corpus_path)
+        return 1
+    records = load_corpus(config.corpus_path)
+    ck = GraphCheckpoint(config.checkpoint_path)
+
+    store = None
+    if not args.no_graph_evidence:
+        # Without the graph, a "failed" entry cannot be proven and WILL be
+        # re-extracted. That is the difference between resuming and rebuilding,
+        # so it is on by default and must be opted out of explicitly.
+        store = _store(config)
+    try:
+        stats = migrate_checkpoint(ck, records, store=store,
+                                   dry_run=args.dry_run)
+    finally:
+        if store is not None:
+            store.close()
+    stats["dry_run"] = bool(args.dry_run)
+    stats["graph_evidence_used"] = store is not None
+    print(json.dumps(stats, indent=2))
+    return 0
+
+
 def cmd_prune(config, args) -> int:
     from src.graphrag.pipeline import GraphBuilder
     store = _store(config)
@@ -244,6 +280,17 @@ def cli(argv=None) -> int:
     pr = sub.add_parser("prune", help="withdraw docs missing from the corpus")
     pr.add_argument("--no-resume", action="store_true")
 
+    mg = sub.add_parser(
+        "migrate-checkpoint",
+        help="backfill stable identity + proof of incorporation on an "
+             "existing checkpoint (idempotent; run before an incremental "
+             "build so it resumes instead of rebuilding)")
+    mg.add_argument("--dry-run", action="store_true",
+                    help="report what would change, write nothing")
+    mg.add_argument("--no-graph-evidence", action="store_true",
+                    help="do not consult the graph; 'failed' entries then "
+                         "cannot be proven and will be re-extracted")
+
     args = p.parse_args(argv)
     try:
         config = load_graph_config()
@@ -257,6 +304,8 @@ def cli(argv=None) -> int:
         return cmd_build(config, args)
     if args.cmd == "prune":
         return cmd_prune(config, args)
+    if args.cmd == "migrate-checkpoint":
+        return cmd_migrate_checkpoint(config, args)
     if args.cmd == "query":
         return cmd_query(config, args)
     if args.cmd == "stats":

@@ -27,11 +27,17 @@ from src.graphrag.models import (
     EntityRef,
     FactView,
     GraphContribution,
+    GraphFact,
     NodeView,
     Support,
 )
 
 __all__ = ["GraphStore", "InMemoryGraphStore", "NEIGHBORS_LIMIT"]
+
+
+def _remap(key: str, old: str, new: str) -> str:
+    """Point a fact endpoint at the new identity when it named the old one."""
+    return new if key == old else key
 
 # Default cap on neighbour expansion. Hub entities can otherwise return
 # thousands of nodes, and callers issue further per-neighbour queries. Sized
@@ -155,6 +161,37 @@ class GraphStore(ABC):
     def provenance(self, fact_key: str) -> Optional[dict]:
         """Fact + all its supports: {fact: FactView, supports: [{doc_key,
         evidence, origin, extracted_at, document: {…props}}]} or None."""
+
+    @abstractmethod
+    def incorporated_evidence(self, doc_keys: Iterable[str]) -> dict[str, dict]:
+        """Per-document proof of what is actually in the graph.
+
+        Returns ``{doc_key: {"content_hash": str, "has_llm_facts": bool}}``
+        for the subset of ``doc_keys`` that exist as Document nodes.
+
+        Exists because "a Document node exists" does NOT imply "the semantic
+        contribution exists" — a deterministic-only pass creates the node too.
+        The checkpoint migration needs this distinction and must not infer it.
+        """
+
+    @abstractmethod
+    def read_llm_contribution(self, doc_key: str,
+                              rename_to: str | None = None) -> GraphContribution | None:
+        """The document's LLM-origin facts+supports, read back from the graph.
+
+        Used to move a contribution to a new question_id WITHOUT re-calling the
+        LLM (same content, regenerated id). Returns None when the document is
+        absent or has no LLM-origin support. The deterministic part is not
+        returned — the caller recomputes it from the current record, which is
+        both cheaper and keeps ``source_field`` provenance intact.
+
+        ``rename_to`` is REQUIRED for a re-key and is not a cosmetic detail:
+        extraction makes the Document itself a fact endpoint
+        (``extract.py``: ``EntityRef("Document", res.doc_key, ...)``), so every
+        MENTIONS fact and every Support carries the OLD key. Re-applying them
+        verbatim would resurrect the retired Document node and attach the facts
+        to an identity that no longer exists in the corpus.
+        """
 
     @abstractmethod
     def stats(self) -> dict:
@@ -441,6 +478,72 @@ class InMemoryGraphStore(GraphStore):
                 "document": self.get_document(dk),
             })
         return {"fact": self._fact_view(f), "supports": supports}
+
+    def incorporated_evidence(self, doc_keys) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        wanted = set(doc_keys)
+        llm_docs = {dk for per_doc in self._supports.values()
+                    for dk, s in per_doc.items() if s.origin == "llm"}
+        for k in wanted:
+            d = self._docs.get(k)
+            if d is None:
+                continue
+            out[k] = {"content_hash": d.get("content_hash", ""),
+                      "has_llm_facts": k in llm_docs}
+        return out
+
+    def read_llm_contribution(self, doc_key: str,
+                              rename_to: str | None = None) -> GraphContribution | None:
+        if doc_key not in self._docs:
+            return None
+        new_key = rename_to or doc_key
+        facts: list[GraphFact] = []
+        supports: list[Support] = []
+        node_keys: set[str] = set()
+        for fk, per_doc in self._supports.items():
+            s = per_doc.get(doc_key)
+            if s is None or s.origin != "llm":
+                continue
+            f = self._facts.get(fk)
+            if f is None:
+                continue
+            # every reference to the retired identity becomes the new one
+            src = self._endpoint_ref(_remap(f["src_key"], doc_key, new_key), new_key)
+            dst = self._endpoint_ref(_remap(f["dst_key"], doc_key, new_key), new_key)
+            fact = GraphFact(rel=f["rel"], src=src, dst=dst,
+                             origin=f.get("origin", "llm"),
+                             source_field=f.get("source_field"))
+            facts.append(fact)
+            node_keys.update((src.key, dst.key))
+            # fact_key embeds the endpoint keys, so a rename CHANGES it — the
+            # support must carry the remapped key or apply_contribution rejects
+            # it as a support for an unknown fact.
+            supports.append(Support(doc_key=new_key, fact_key=fact.fact_key,
+                                    evidence=s.evidence, origin=s.origin,
+                                    extracted_at=s.extracted_at))
+        if not facts:
+            return None
+        # the Document node itself is (re)written via apply_contribution(doc=)
+        nodes = [self._endpoint_ref(k, new_key)
+                 for k in sorted(node_keys) if k != new_key]
+        return GraphContribution(doc_key=new_key, nodes=nodes, facts=facts,
+                                 supports=supports)
+
+    def _endpoint_ref(self, key: str, doc_key: str) -> EntityRef:
+        """Rebuild an EntityRef for a stored node key.
+
+        A fact may point at the document itself (e.g. MENTIONS doc->entity),
+        in which case the node carries the Document label.
+        """
+        n = self._nodes.get(key) or {}
+        if key == doc_key:
+            return EntityRef(label="Document", key=key, name=key,
+                             resolution="canonical", raw=key)
+        return EntityRef(
+            label=n.get("label") or "Entity", key=key,
+            name=n.get("name") or key,
+            resolution=n.get("resolution") or "canonical",
+            raw=n.get("raw"))
 
     def stats(self) -> dict:
         labels: dict[str, int] = {}

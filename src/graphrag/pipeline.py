@@ -40,10 +40,12 @@ from src.graphrag.checkpoint import (
     EXTRACTION_DETERMINISTIC,
     EXTRACTION_SEMANTIC,
     GraphCheckpoint,
+    normalize_extraction,
 )
 from src.graphrag.config import GraphConfig
 from src.graphrag.deterministic import build_contribution
 from src.graphrag.extract import ExtractionError, SemanticExtractor
+from src.graphrag.identity import stable_content_hash
 from src.graphrag.models import GraphContribution
 from src.graphrag.store import GraphStore
 
@@ -71,6 +73,8 @@ class BuildReport:
     skipped_unchanged: int = 0
     reconciled: int = 0
     withdrawn: int = 0
+    rekeyed: int = 0    # same content moved to a new question_id (no LLM)
+    ambiguous: int = 0  # several ids claim one content -> sent to the LLM
     failed: int = 0
     extraction_errors: int = 0
     documents: int = 0  # Document nodes applied
@@ -84,11 +88,53 @@ class BuildReport:
             "total": self.total, "added": self.added,
             "skipped_unchanged": self.skipped_unchanged,
             "reconciled": self.reconciled, "withdrawn": self.withdrawn,
+            "rekeyed": self.rekeyed, "ambiguous": self.ambiguous,
             "failed": self.failed, "extraction_errors": self.extraction_errors,
             "documents": self.documents, "facts_applied": self.facts_applied,
             "supports_applied": self.supports_applied,
             "failures": self.failures[:20], "seconds": round(self.seconds, 2),
         }
+
+
+def graph_confirms(ev: dict | None, content_hash: str, mode: str) -> bool:
+    """True iff the GRAPH itself shows this exact content is incorporated.
+
+    The graph is the authority, not the checkpoint. A checkpoint entry can
+    outlive the contribution it describes — a crash between
+    ``withdraw_document()`` and ``apply_contribution()`` leaves the old proof in
+    the file with nothing behind it in Neo4j, and skipping on that proof would
+    silently lose the document.
+
+    Conversely the graph can hold a contribution the checkpoint never recorded —
+    a crash between ``apply_contribution()`` committing and ``mark_done()`` —
+    and that document must NOT be re-extracted.
+
+    Module-level so the read-only audit tool predicts the build by calling this
+    very function rather than a copy that can drift.
+    """
+    if not ev or ev.get("content_hash") != content_hash:
+        return False
+    if normalize_extraction(mode) != EXTRACTION_SEMANTIC:
+        return True
+    return bool(ev.get("has_llm_facts"))
+
+
+def churn_source(checkpoint, stable: str, doc_key: str, mode: str,
+                 corpus_keys: set, graph_ev: dict) -> tuple:
+    """(source key to re-key from, number of live claimants).
+
+    A candidate only counts when its contribution is still IN the graph —
+    re-keying from a key whose contribution was withdrawn would silently drop
+    the LLM facts.
+    """
+    cands = checkpoint.churn_candidates(stable, doc_key, mode, corpus_keys)
+    live = [k for k in cands
+            if graph_ev.get(k) is not None
+            and (normalize_extraction(mode) != EXTRACTION_SEMANTIC
+                 or graph_ev[k].get("has_llm_facts"))]
+    # None, never "": an empty string is falsy but IS NOT None, and the caller
+    # tests `is not None` before re-keying
+    return (live[0] if len(live) == 1 else None), len(live)
 
 
 class _ExtractionPrefetcher:
@@ -221,12 +267,25 @@ class GraphBuilder:
         prune: bool = False,
         resume: bool = True,
         semantic_backfill: bool = False,
+        migrate: bool = True,
     ) -> BuildReport:
         started = time.monotonic()
         report = BuildReport()
         all_records = load_corpus(corpus_path)
         # corpus membership for prune is the FULL corpus, never the slice
         corpus_keys = {r.question_id for r in all_records}
+
+        # ── checkpoint migration (idempotent, additive) ────────────────────
+        # Checkpoints written before the incremental fix carry no proof of
+        # incorporation and no stable identity. Without them nothing is
+        # provable and the whole corpus would go to the LLM — the full rebuild
+        # this step exists to prevent. It never changes status, never rewrites
+        # a hash, never deletes an entry, and re-running it is a no-op.
+        if resume and migrate:
+            from src.graphrag.migrate import migrate_checkpoint
+            stats = migrate_checkpoint(self.checkpoint, all_records,
+                                       store=self.store)
+            self._log.info("[graph] checkpoint migration: %s", stats)
 
         if semantic_backfill:
             if deterministic_only:
@@ -243,7 +302,8 @@ class GraphBuilder:
             records = [
                 r for r in all_records
                 if self.checkpoint.needs_extraction(
-                    r.question_id, qa_content_hash(r), EXTRACTION_SEMANTIC)
+                    r.question_id, qa_content_hash(r), EXTRACTION_SEMANTIC,
+                    stable_content_hash(r), corpus_keys)
             ]
             self._log.info(
                 "[graph] semantic backfill: %d of %d document(s) still need "
@@ -287,11 +347,23 @@ class GraphBuilder:
         # real LLM call (and GPU time) for nothing. This mirrors the loop's own
         # skip rule; anything mis-predicted still falls back to an inline call
         # inside take(), so the two can never disagree on correctness.
+        # One batched round-trip for what the graph actually holds right now.
+        # This is the evidence the skip decision rests on — see
+        # _graph_confirms for why the checkpoint alone is not trusted.
+        # The key set must include checkpoint keys that are NOT in the corpus:
+        # a re-key source is by definition absent from the corpus, and deciding
+        # whether its contribution is still present is exactly what tells a
+        # rename apart from a document whose contribution was withdrawn.
+        evidence_keys = set(corpus_keys)
+        if resume:
+            evidence_keys |= self.checkpoint.keys()
+        graph_ev = (self.store.incorporated_evidence(evidence_keys)
+                    if resume else {})
+
         candidates = (
             [r for r in records
              if resume is False
-             or self.checkpoint.needs_extraction(
-                 r.question_id, qa_content_hash(r), run_extraction)]
+             or self._needs_llm(r, graph_ev, corpus_keys, run_extraction)]
             if extractor is not None else []
         )
         prefetch = _ExtractionPrefetcher(
@@ -303,16 +375,36 @@ class GraphBuilder:
             for rec in records:
                 doc_key = rec.question_id
                 h = qa_content_hash(rec)
+                stable = stable_content_hash(rec)
                 entry = self.checkpoint.get(doc_key) if resume else None
-                in_graph = self.store.get_document(doc_key) is not None
+                ev = graph_ev.get(doc_key)
+                in_graph = ev is not None
 
-                # ── SKIP: unchanged content, already ingested by a pass at
-                # least as strong as this run's. An entry built by the
-                # deterministic pass does NOT satisfy a semantic run, which is
-                # what makes backfill possible without touching the file.
-                if (entry is not None and entry.status == "done"
-                        and entry.hash == h and entry.satisfies(run_extraction)):
+                # ── SKIP: the GRAPH shows this exact content is already
+                # incorporated at the strength this run requires.
+                #
+                # The graph is the authority and the checkpoint is only a
+                # cache, which is what makes both crash windows safe:
+                #   * crash after apply_contribution committed but before
+                #     mark_done -> no checkpoint entry, but the graph has it,
+                #     so 0 LLM calls instead of paying twice for one document
+                #   * crash after withdraw_document but before apply -> the
+                #     stale applied_* proof is still in the checkpoint, but the
+                #     graph no longer has it, so the document is rebuilt
+                #
+                # A deterministic-only pass does NOT satisfy a semantic run
+                # (no llm-origin support), so backfill remains possible.
+                if resume and self._graph_confirms(ev, h, run_extraction):
                     report.skipped_unchanged += 1
+                    if not self.checkpoint.incorporation_for(
+                            doc_key, h, stable, run_extraction):
+                        # heal a checkpoint that lost track of a contribution
+                        # the graph demonstrably holds (the crash window above)
+                        self.checkpoint.mark_done(
+                            doc_key, h, now=self._now(),
+                            facts=entry.facts if entry else 0,
+                            supports=entry.supports if entry else 0,
+                            extraction=run_extraction, stable_hash=stable)
                     # In-memory only: skips do not write the checkpoint (they change
                     # nothing), so flush periodically to keep the UI moving during
                     # long unchanged stretches on a re-run.
@@ -323,6 +415,37 @@ class GraphBuilder:
                     )
                     if report.skipped_unchanged % self.config.write_batch_size == 0:
                         self.checkpoint.flush_run()
+                    continue
+
+                # ── RE-KEY: same content, regenerated question_id ──────────
+                # Exactly one other checkpoint key already holds this content,
+                # so the document is unchanged and needs NO LLM call. But the
+                # graph is keyed by question_id, so the contribution has to
+                # move to the new key — otherwise the prune pass below sees
+                # the old key missing from the corpus and withdraws a document
+                # that is still very much present.
+                #
+                # Several claimants are AMBIGUOUS: they fall through to the
+                # LLM rather than being silently merged into one document.
+                churn_from = None
+                if resume:
+                    churn_from, n_live = self._churn_source(
+                        stable, doc_key, run_extraction, corpus_keys, graph_ev)
+                    if not churn_from and n_live > 1:
+                        report.ambiguous += 1
+                        self._log.warning(
+                            "[graph] %s: %d checkpoint keys claim this exact "
+                            "content — not assuming unchanged, sending to the "
+                            "LLM", doc_key, n_live)
+                if churn_from is not None:
+                    self._rekey_document(churn_from, rec, h, stable,
+                                         run_extraction)
+                    report.rekeyed += 1
+                    self.checkpoint.update_run(
+                        now=self._now(), current_doc=None, last_doc=doc_key,
+                        processed=report.skipped_unchanged + report.documents
+                                  + report.failed + report.rekeyed,
+                    )
                     continue
 
                 # ── action classification ───────────────────────────────────
@@ -362,7 +485,7 @@ class GraphBuilder:
                     self.checkpoint.mark_done(
                         doc_key, h, now=self._now(),
                         facts=counters["facts"], supports=counters["supports"],
-                        extraction=run_extraction)
+                        extraction=run_extraction, stable_hash=stable)
                     report.documents += 1
                     report.facts_applied += counters["facts"]
                     report.supports_applied += counters["supports"]
@@ -371,7 +494,9 @@ class GraphBuilder:
                     report.extraction_errors += 1
                     report.failures.append({"doc": doc_key, "error": str(e)[:300]})
                     self._run_progress(report, doc_key)
-                    self.checkpoint.mark_failed(doc_key, h, str(e), now=self._now())
+                    self.checkpoint.mark_failed(doc_key, h, str(e),
+                                                now=self._now(),
+                                                stable_hash=stable)
                     if report.failed >= self.config.max_failures:
                         self._log.warning("aborting: failures exceed max_failures=%d",
                                           self.config.max_failures)
@@ -380,7 +505,9 @@ class GraphBuilder:
                     report.failed += 1
                     report.failures.append({"doc": doc_key, "error": str(e)[:300]})
                     self._run_progress(report, doc_key)
-                    self.checkpoint.mark_failed(doc_key, h, str(e), now=self._now())
+                    self.checkpoint.mark_failed(doc_key, h, str(e),
+                                                now=self._now(),
+                                                stable_hash=stable)
                     self._log.exception("graph ingest failed for %s", doc_key)
 
             # ── WITHDRAW: checkpointed docs missing from the corpus ─────────
@@ -422,6 +549,70 @@ class GraphBuilder:
         )
 
     # ── per-document unit ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _graph_confirms(ev: dict | None, content_hash: str,
+                        mode: str) -> bool:
+        """Delegates to the module-level rule the audit tool also calls."""
+        return graph_confirms(ev, content_hash, mode)
+
+    def _churn_source(self, stable: str, doc_key: str, mode: str,
+                      corpus_keys: set, graph_ev: dict) -> tuple:
+        """Delegates to the module-level rule the audit tool also calls."""
+        return churn_source(self.checkpoint, stable, doc_key, mode,
+                            corpus_keys, graph_ev)
+
+    def _needs_llm(self, rec: QARecord, graph_ev: dict, corpus_keys: set,
+                   mode: str) -> bool:
+        """Single source of truth for "will this document reach the LLM?".
+
+        The prefetcher and the main loop both call this, so the prefetcher can
+        never burn a real GPU call on a document the loop is about to skip.
+        """
+        h = qa_content_hash(rec)
+        if self._graph_confirms(graph_ev.get(rec.question_id), h, mode):
+            return False
+        src, n = self._churn_source(stable_content_hash(rec), rec.question_id,
+                                    mode, corpus_keys, graph_ev)
+        return not (src and n == 1)
+
+    def _rekey_document(self, old_key: str, rec: QARecord, h: str,
+                        stable: str, extraction: str) -> None:
+        """Move an existing contribution to a new question_id — no LLM call.
+
+        The content is provably unchanged (same stable hash) and exactly one
+        other checkpoint key holds it, so re-extracting would burn GPU time to
+        regenerate the same facts. But the graph is keyed by question_id, so
+        the contribution has to MOVE: the old key is withdrawn and the new one
+        applied. Withdraw-then-apply keeps a fact shared with other documents
+        from ever being observed at doc_count 0 by another reader.
+
+        The deterministic half is recomputed from the current record — cheaper
+        than reading it back and it keeps ``source_field`` provenance exact.
+        Only the LLM half is read back from the graph. If there is none (a
+        deterministic-only document), the deterministic half alone is applied.
+        """
+        now = self._now()
+        llm = self.store.read_llm_contribution(
+            old_key, rename_to=rec.question_id)
+        self.store.withdraw_document(old_key, now=now)
+        doc, det = build_contribution(rec, self.voc, now=now)
+        contrib = (self._merge_contributions(det, llm)
+                   if llm is not None else det)
+        counters = self.store.apply_contribution(contrib, now=now, doc=doc)
+        # The old key is absent from the corpus, so its checkpoint entry must
+        # go too — leaving it behind would make the next prune pass withdraw
+        # the very document we just re-keyed.
+        self.checkpoint.remove(old_key)
+        self.checkpoint.mark_done(
+            rec.question_id, h, now=now, facts=counters["facts"],
+            supports=counters["supports"], extraction=extraction,
+            stable_hash=stable)
+        self.last_counters = {"facts": counters["facts"],
+                              "supports": counters["supports"]}
+        self._log.info("[graph] re-keyed %s -> %s (content unchanged, "
+                       "no LLM call, %d facts)", old_key, rec.question_id,
+                       counters["facts"])
 
     def _process_one(self, rec: QARecord, h: str, action: str,
                      extractor: Optional[SemanticExtractor],
