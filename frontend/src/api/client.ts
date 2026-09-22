@@ -49,6 +49,12 @@ export interface StreamHandlers {
   onMeta?: (meta: unknown) => void;
   onGrounding?: (grounding: unknown) => void;
   onFinal?: (text: string, droppedCount: number, dropped: string[], judgeRewritten: boolean) => void;
+  /** Saved-knowledge matches offered alongside the fresh RAG answer. */
+  onKnowledge?: (payload: {
+    matches: unknown[];
+    tier: string | null;
+    ambiguous: boolean;
+  }) => void;
   onError?: (message: string) => void;
   onDone?: () => void;
 }
@@ -143,6 +149,15 @@ export function consumeSSE(
               Array.isArray(ev.citation_dropped) ? ev.citation_dropped : [],
               Boolean(ev.judge_rewritten)
             );
+            break;
+          case "knowledge":
+            // Additive event: unknown to older handlers, which simply never
+            // registered onKnowledge — the fresh RAG answer is unaffected.
+            handlers.onKnowledge?.({
+              matches: Array.isArray(ev.matches) ? ev.matches : [],
+              tier: typeof ev.tier === "string" ? ev.tier : null,
+              ambiguous: Boolean(ev.ambiguous),
+            });
             break;
           case "error":
             handlers.onError?.(String(ev.message ?? "Unknown error"));

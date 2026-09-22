@@ -1,5 +1,12 @@
 import { apiFetch } from "./client";
-import type { ExecutionMode, ServerStatus, SourceItem, ThinkingEffort } from "@/types";
+import type {
+  ExecutionMode,
+  KnowledgeLookupResult,
+  KnowledgeRecord,
+  ServerStatus,
+  SourceItem,
+  ThinkingEffort,
+} from "@/types";
 
 export interface ProviderInfo {
   name: string;
@@ -193,25 +200,65 @@ export async function uploadToTarget(
   return res.json();
 }
 
+/**
+ * Save a NEW contribution to the shared knowledge base. Every call creates an
+ * independent record (never overwrites another saver's), keyed by a
+ * server-generated UUID. `savedBy` is the display name the user typed in the
+ * save modal — v1 identity is manual.
+ */
 export async function saveKnowledge(payload: {
   question: string;
   answer: string;
   sources?: SourceItem[];
-}): Promise<{ status: string; file: string }> {
+  savedBy?: string;
+}): Promise<{ status: string; knowledge_id: string; file: string; saved_by: string }> {
   return apiFetch("/api/save-knowledge", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      question: payload.question,
+      answer: payload.answer,
+      sources: payload.sources,
+      saved_by: payload.savedBy,
+    }),
   });
 }
 
-export async function lookupKnowledge(q: string): Promise<{
-  found: boolean;
-  answer?: string;
-  sources?: SourceItem[];
-  question?: string;
-  matched?: string;
-}> {
+/** Look up saved answers relevant to a question (top 5, ranked by similarity). */
+export async function lookupKnowledge(q: string): Promise<KnowledgeLookupResult> {
   return apiFetch(`/api/knowledge-lookup?q=${encodeURIComponent(q)}`);
+}
+
+/** The current user's own saved contributions. */
+export async function myKnowledge(
+  owner: string
+): Promise<{ owner_name: string; owner_id: string; count: number; records: KnowledgeRecord[] }> {
+  return apiFetch(`/api/knowledge/mine?owner=${encodeURIComponent(owner)}`);
+}
+
+/** Edit one of my contributions — keeps the id, bumps the version. */
+export async function updateKnowledge(
+  knowledgeId: string,
+  payload: { question?: string; answer?: string; savedBy?: string }
+): Promise<{ status: string; record: KnowledgeRecord }> {
+  return apiFetch(`/api/knowledge/${encodeURIComponent(knowledgeId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      question: payload.question,
+      answer: payload.answer,
+      saved_by: payload.savedBy,
+    }),
+  });
+}
+
+/** Archive (soft-delete) one of my contributions. */
+export async function deleteKnowledge(
+  knowledgeId: string,
+  owner: string
+): Promise<{ status: string; knowledge_id: string; lifecycle: string }> {
+  return apiFetch(
+    `/api/knowledge/${encodeURIComponent(knowledgeId)}?owner=${encodeURIComponent(owner)}`,
+    { method: "DELETE" }
+  );
 }
 
 export interface SourceOrg {

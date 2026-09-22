@@ -65,6 +65,32 @@ from src.utils.app_paths import (
     index_dir as resolve_index_dir,
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PyTorch CPU thread limits — MUST be applied here, at import time.
+#
+# OMP_NUM_THREADS / MKL_NUM_THREADS / OPENBLAS_NUM_THREADS are read by OpenMP
+# and the BLAS layer, and torch's intra-op default derives from
+# omp_get_max_threads(). But PyTorch has NO environment variable for INTER-OP
+# threads (TORCH_NUM_THREADS / TORCH_INTEROP_THREADS are not recognised by
+# torch 2.6.0), so that value can only be set programmatically.
+#
+# The ordering constraint is why this lives here rather than in the warm-up
+# path: torch.set_num_interop_threads() raises once the inter-op pool exists,
+# and the first torch work in this process happens in the BACKGROUND warm-up
+# thread spawned by the startup event below. uvicorn imports this module before
+# running any startup event, so an import-time call always wins the race.
+#
+# Values come from the environment; nothing is hardcoded here.
+# ─────────────────────────────────────────────────────────────────────────────
+from src.utils.torch_threads import (  # noqa: E402
+    apply_torch_thread_limits,
+    format_thread_report,
+    torch_thread_state,
+)
+
+_THREAD_REPORT = apply_torch_thread_limits()
+print(f"[threads] {format_thread_report(_THREAD_REPORT)}")
+
 app = FastAPI(
     title="Parliamentary & Audit Assistant Multi-Provider API",
     description="Provider-agnostic API backing the Interactive Chat Frontend."
@@ -420,6 +446,15 @@ class _LazyPipeline:
                 f"rerank={p.reranker.device} (RERANK_DEVICE) | "
                 f"policy=GPU reserved for vLLM/LLM inference"
             )
+            # Actual torch thread counts, so the effective configuration is
+            # visible in the same banner as the device policy. Read live
+            # rather than from the startup report: this is what the process
+            # is really using at the moment the model finished loading.
+            _t = torch_thread_state()
+            print(
+                f"Torch threads : intra={_t.get('intra')} | "
+                f"inter={_t.get('inter')}"
+            )
             print("FAISS Index Built Successfully")
             print("=" * 60)
         return p
@@ -533,6 +568,12 @@ def _run_hybrid_warmup() -> None:
     started = time.perf_counter()
     _WARMUP_STATE["status"] = "running"
     print("[hybrid-warmup] started")
+    # Defensive re-apply. Normally a no-op — the import-time call in this module
+    # already did the work — but it protects any future path that builds the
+    # pipeline without importing the server first. Idempotent, never raises.
+    _report = apply_torch_thread_limits()
+    if not _report.get("already_applied") and _report.get("applied"):
+        print(f"[hybrid-warmup] {format_thread_report(_report)}")
     try:
         # stages 1-4: BGE-M3 (via HybridRAGPipeline.__init__ reading
         # embedder.embedding_dim), FAISS, BM25, doc_map/chunk_map
@@ -1222,6 +1263,31 @@ def _chat_endpoint_body(request: ChatRequest):
         # generation receives the user's original query.
         generation_query = qplan.original_query or retrieval_query
         want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
+
+        # ── Shared query embedding + Knowledge lookup ──────────────────────
+        # The query is embedded EXACTLY ONCE here and the same vector feeds
+        # both knowledge matching and dense retrieval. Embedding is the most
+        # expensive part of a request, so doing it twice for the same text is
+        # the thing to avoid. Computed only when the hybrid branch will run, so
+        # a graph-only route pays for nothing.
+        #
+        # A knowledge hit NO LONGER bypasses RAG: both the saved answer(s) and
+        # a freshly generated answer are produced. With no strong match nothing
+        # is emitted and the request proceeds exactly as it always has.
+        _knowledge_vector = _shared_query_vector(retrieval_query) if want_hybrid else None
+        _knowledge_payload = None
+        if _knowledge_store_has_any():
+            try:
+                _kn = knowledge_lookup(query, query_vector=_knowledge_vector)
+                if _kn.get("matches"):
+                    _knowledge_payload = _kn
+                    print(f"[knowledge] {_kn.get('tier')} match: "
+                          f"{len(_kn['matches'])} saved answer(s) offered alongside RAG")
+                elif _kn.get("ambiguous"):
+                    print("[knowledge] match suppressed as ambiguous — normal RAG only")
+            except Exception as e:  # noqa: BLE001 — must never block a real query
+                print(f"[knowledge] lookup failed: {type(e).__name__}: {e}")
+
         want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
         # Bound up-front: only the branches that actually run Hybrid RAG assign
         # it, and the route is decided by the agent (AUTO), so keying the trace
@@ -1249,6 +1315,7 @@ def _chat_endpoint_body(request: ChatRequest):
                         top_k=_effective_top_k(request.top_k, plan),
                         doc_types=request.doc_types,
                         orgs=request.orgs, doc_categories=request.doc_categories,
+                        query_embedding=_knowledge_vector,
                     )
                     _maybe_enrich_deep_neighbors(plan, hybrid_results)
                 except Exception as e:  # noqa: BLE001
@@ -1671,28 +1738,6 @@ def chat_stream(request: ChatStreamRequest):
 
         ret_mode = request.retrieval_mode.lower()
 
-        # ── User-Knowledge shortcut: same/similar question saved before? ──
-        # If found, return the SAVED curated answer directly (no RAG, no LLM
-        # call) — the user-curated answer always wins.
-        try:
-            hit = knowledge_lookup(query)
-            if hit.get("found"):
-                yield _sse({"type": "sources", "sources": hit.get("sources") or [], "is_graph": False})
-                yield _sse({"type": "tokens", "text": hit.get("answer", "")})
-                yield _sse({"type": "meta", "meta": {
-                    "provider": "user-knowledge", "model": "saved-answer",
-                    "profile": request.mode.lower(),
-                    "retrieved_documents": len(hit.get("sources") or []),
-                    "response_time_ms": 0.0, "is_fallback": False,
-                    "knowledge_match": hit.get("matched"),
-                }})
-                yield _sse({"type": "status", "stage": "generate", "message": "Answered from saved knowledge", "done": True})
-                yield _sse({"type": "phase", "phase": "done"})
-                yield _sse({"type": "done"})
-                return
-        except Exception:  # noqa: BLE001 — lookup must never block a real query
-            pass
-
         try:
             family, plan, resolved_model = _resolve_exec(request)
         except Exception as e:  # noqa: BLE001
@@ -1793,6 +1838,29 @@ def chat_stream(request: ChatStreamRequest):
         # language hint appended to the system prompt.
         generation_query = qplan.original_query or retrieval_query
         want_hybrid = route in (ROUTE_HYBRID, ROUTE_BOTH)
+
+        # ── Shared query embedding + Knowledge lookup ──────────────────────
+        # The query is embedded EXACTLY ONCE here and the same vector feeds
+        # both knowledge matching and dense retrieval. Embedding is the most
+        # expensive part of a request, so doing it twice for the same text is
+        # the thing to avoid. Computed only when the hybrid branch will run, so
+        # a graph-only route pays for nothing.
+        #
+        # A knowledge hit NO LONGER bypasses RAG: both the saved answer(s) and
+        # a freshly generated answer are produced. With no strong match nothing
+        # is emitted and the request proceeds exactly as it always has.
+        _knowledge_vector = _shared_query_vector(retrieval_query) if want_hybrid else None
+        if _knowledge_store_has_any():
+            try:
+                _kn = knowledge_lookup(query, query_vector=_knowledge_vector)
+                if _kn.get("matches"):
+                    yield _sse({"type": "knowledge", **_kn})
+                    print(f"[knowledge] {_kn.get('tier')} match: "
+                          f"{len(_kn['matches'])} saved answer(s) offered alongside RAG")
+                elif _kn.get("ambiguous"):
+                    print("[knowledge] match suppressed as ambiguous — normal RAG only")
+            except Exception as e:  # noqa: BLE001 — must never block a real query
+                print(f"[knowledge] lookup failed: {type(e).__name__}: {e}")
         want_graph = route in (ROUTE_GRAPH, ROUTE_BOTH)
         is_graph = route == ROUTE_GRAPH
 
@@ -1839,6 +1907,9 @@ def chat_stream(request: ChatStreamRequest):
                             doc_types=request.doc_types,
                             orgs=request.orgs,
                             doc_categories=request.doc_categories,
+                            # Reuse the vector already computed for knowledge
+                            # matching instead of embedding the query again.
+                            query_embedding=_knowledge_vector,
                         )
                         _maybe_enrich_deep_neighbors(plan, hybrid_results)
                         print(f"[retrieval] hybrid completed results={len(hybrid_results)} "
@@ -1884,6 +1955,9 @@ def chat_stream(request: ChatStreamRequest):
                     doc_types=request.doc_types,
                     orgs=request.orgs,
                     doc_categories=request.doc_categories,
+                    # One encode per request: this is the same vector knowledge
+                    # matching already used.
+                    query_embedding=_knowledge_vector,
                 )
                 # Task 3 (Deep): re-bond heading-like neighbor chunks
                 _maybe_enrich_deep_neighbors(plan, results)
@@ -2272,6 +2346,36 @@ def ai_edit(payload: dict):
 # Health endpoints (P1.8) — proxy/launcher liveness + readiness.
 # ─────────────────────────────────────────────────────────────────────────────
 
+@app.get("/api/debug/threads")
+def debug_threads():
+    """Read-only view of the thread configuration ACTUALLY in effect.
+
+    Exists because a separate ``python -c`` proves nothing — it is a different
+    process with a different environment. This reports the live server's own
+    values, with ``pid`` so the caller can confirm they are talking to the
+    process ``runtime/app.pid`` names.
+
+    Safe to call at any time: it re-runs the (idempotent) apply only to surface
+    the recorded report, and never mutates thread state that is already set.
+    Set ``APP_DEBUG_THREADS=0`` to disable.
+    """
+    if (os.environ.get("APP_DEBUG_THREADS") or "1").strip().lower() in ("0", "false", "no", "off"):
+        raise HTTPException(status_code=404, detail="Not found")
+    report = apply_torch_thread_limits()
+    env_names = (
+        "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+        "TORCH_INTRA_OP_THREADS", "TORCH_INTER_OP_THREADS", "TORCH_THREAD_CONTROL",
+    )
+    return {
+        "pid": os.getpid(),
+        "configured": report.get("configured"),
+        "actual": report.get("actual"),
+        "errors": report.get("errors") or [],
+        "applied_at_import": _THREAD_REPORT.get("applied", False),
+        "environment": {k: os.environ.get(k) for k in env_names},
+    }
+
+
 @app.get("/health/live")
 def health_live():
     """Process is up (does not validate models/index)."""
@@ -2442,19 +2546,40 @@ def sources_catalogue():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# User-Knowledge API — curated Q&A saved by scientists
+# User-Knowledge API — SHARED curated Q&A saved by scientists
 # ─────────────────────────────────────────────────────────────────────────────
-# user-knowledge/ holds {question, answer, sources, saved_at} JSON files.
-# On a NEW query the system FIRST checks this folder for an exact/normalized
-# question match; if found, the SAVED answer is returned directly (the
-# user-curated answer always wins — no RAG, no hallucination). No embeddings
-# needed for this lookup.
+# Storage is data/user-knowledge/records/<uuid>.json — ONE file per
+# CONTRIBUTION, keyed by a server-generated UUID. Identity is never the question
+# slug: the slug is derived from mutable text and truncated to 60 chars, so two
+# different long questions collide onto one file and the second save silently
+# destroys the first. Two people saving the same question get two independent
+# records; deleting one never touches the other.
+#
+# A knowledge match no longer bypasses RAG. Both the saved answer(s) and a
+# freshly generated answer are produced, and the frontend offers a comparison.
+
+from src.retrieval.knowledge.match import (  # noqa: E402
+    knowledge_config,
+    match_knowledge,
+    sync_question_embeddings,
+)
+from src.retrieval.knowledge.migrate import plan_migration, run_migration  # noqa: E402
+from src.retrieval.knowledge.store import (  # noqa: E402
+    KnowledgeStore,
+    normalize_question,
+    owner_id_from,
+)
 
 USER_KNOWLEDGE_DIR = user_knowledge_dir()
 
 
 def knowledge_fuzzy_threshold() -> float:
-    """Documented default 0.85. Override: KNOWLEDGE_FUZZY_THRESHOLD."""
+    """Documented default 0.85. Override: KNOWLEDGE_FUZZY_THRESHOLD.
+
+    Retained unchanged: SequenceMatcher is now only a FALLBACK for when semantic
+    matching is unavailable, but its threshold is still configurable and still
+    defaults to 0.85.
+    """
     raw = (os.environ.get("KNOWLEDGE_FUZZY_THRESHOLD") or "0.85").strip()
     try:
         val = float(raw)
@@ -2467,64 +2592,105 @@ def knowledge_fuzzy_threshold() -> float:
 
 def _normalize_q(text: str) -> str:
     """Lowercase, strip punctuation/whitespace for question matching."""
-    import re as _re
-
-    t = text.lower()
-    t = _re.sub(r"[^a-z0-9]+", " ", t)
-    return _re.sub(r"\s+", " ", t).strip()
+    return normalize_question(text)
 
 
-def _load_user_knowledge() -> list[dict]:
-    """All saved knowledge entries (question normalized for matching)."""
-    entries = []
-    if not USER_KNOWLEDGE_DIR.exists():
-        return entries
-    for f in sorted(USER_KNOWLEDGE_DIR.glob("*.json")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            data["_file"] = f.name
-            data["_q_norm"] = _normalize_q(str(data.get("question", "")))
-            entries.append(data)
-        except Exception:  # noqa: BLE001
-            continue
-    return entries
+def _knowledge_store() -> KnowledgeStore:
+    """Store rooted at the CURRENT USER_KNOWLEDGE_DIR.
+
+    Built per call rather than cached at import so tests (and a changed
+    APP_DATA_DIR) are honoured, and so no stale handle outlives a rebuild.
+    """
+    return KnowledgeStore(USER_KNOWLEDGE_DIR)
+
+
+def _knowledge_store_has_any() -> bool:
+    """Cheap guard so an empty knowledge base costs a request nothing.
+
+    Checked on the hot path before any matching work: with no saved knowledge
+    at all there is no reason to touch the index or consider embeddings.
+    """
+    try:
+        store = _knowledge_store()
+        return store.has_records() or bool(store.read_legacy())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _knowledge_lookup_result(result, legacy_single: bool = True) -> dict:
+    """Shape a match result for the wire.
+
+    Carries BOTH the new contract (``matches`` / ``tier`` / ``ambiguous``) and
+    the legacy single-hit keys (``found`` / ``answer`` / ``matched`` / …) so an
+    older client that only understands the old shape keeps working.
+    """
+    matches = result.get("matches") or []
+    out = {
+        "matches": matches,
+        "tier": result.get("tier"),
+        "ambiguous": bool(result.get("ambiguous")),
+        "diagnostics": result.get("diagnostics") or {},
+        "found": bool(matches),
+    }
+    if matches and legacy_single:
+        top = matches[0]
+        out.update({
+            "answer": top.get("answer", ""),
+            "question": top.get("question", ""),
+            "sources": top.get("sources", []),
+            "matched": top.get("tier", result.get("tier")),
+            "score": top.get("score"),
+            "saved_by": ", ".join(top.get("contributors") or []),
+        })
+    return out
+
+
+def _shared_query_vector(query: str):
+    """Embed the query ONCE for both knowledge matching and dense retrieval.
+
+    Returns None when semantic matching is disabled, in which case retrieval
+    embeds its own expanded query exactly as it always has — that is the
+    rollback path for this whole feature.
+    """
+    if not knowledge_config()["semantic"]:
+        return None
+    try:
+        p = pipeline._get()
+        return p.embed_query(query)
+    except Exception as e:  # noqa: BLE001 — knowledge must never block a query
+        print(f"[knowledge] query embedding unavailable: {type(e).__name__}: {e}")
+        return None
+
+
+def knowledge_lookup(q: str, query_vector=None) -> dict:
+    """Up to KNOWLEDGE_TOP_K saved answers relevant to ``q``.
+
+    Cascade: exact normalized match -> semantic over saved questions ->
+    ambiguity gate. SequenceMatcher is a fallback only. A weak or ambiguous
+    result returns no matches, so the caller behaves exactly as it would with
+    no knowledge at all.
+
+    ``query_vector`` is the vector the caller already computed for dense
+    retrieval. Omitted only by the standalone GET endpoint, which has no
+    retrieval running and therefore embeds for itself.
+    """
+    if not q or not q.strip():
+        return _knowledge_lookup_result({"matches": [], "tier": None,
+                                         "ambiguous": False, "diagnostics": {}})
+    try:
+        if query_vector is None:
+            query_vector = _shared_query_vector(q)
+        result = match_knowledge(_knowledge_store(), q, query_vector=query_vector)
+        return _knowledge_lookup_result(result)
+    except Exception as e:  # noqa: BLE001
+        return {"matches": [], "tier": None, "ambiguous": False, "found": False,
+                "diagnostics": {"error": f"{type(e).__name__}: {e}"}}
 
 
 @app.get("/api/knowledge-lookup")
-def knowledge_lookup(q: str):
-    """Find a saved answer for a question. Exact normalized match first,
-    then fuzzy (difflib ratio >= 0.85) fallback. Returns {found, answer,
-    sources, question} or {found: false}."""
-    if not q or not q.strip():
-        return {"found": False}
-    qn = _normalize_q(q)
-    entries = _load_user_knowledge()
-    if not entries:
-        return {"found": False}
-
-    # exact normalized match
-    for e in entries:
-        if e["_q_norm"] == qn:
-            return {"found": True, "answer": e.get("answer", ""),
-                    "sources": e.get("sources", []), "question": e.get("question", q),
-                    "matched": "exact", "saved_by": e.get("saved_by")}
-    # fuzzy fallback (similar wording, e.g. "Doppler Radars" vs
-    # "Doppler Weather Radars" ~0.91). Default 0.85 — override with
-    # KNOWLEDGE_FUZZY_THRESHOLD (must stay in 0..1).
-    import difflib
-
-    threshold = knowledge_fuzzy_threshold()
-    best, best_ratio = None, 0.0
-    for e in entries:
-        r = difflib.SequenceMatcher(None, qn, e["_q_norm"]).ratio()
-        if r > best_ratio:
-            best, best_ratio = e, r
-    if best and best_ratio >= threshold:
-        return {"found": True, "answer": best.get("answer", ""),
-                "sources": best.get("sources", []), "question": best.get("question", q),
-                "matched": "fuzzy", "score": round(best_ratio, 3),
-                "saved_by": best.get("saved_by")}
-    return {"found": False}
+def knowledge_lookup_endpoint(q: str):
+    """HTTP surface for :func:`knowledge_lookup`."""
+    return knowledge_lookup(q)
 
 
 def _resolve_saved_by(request: Request | None, payload: dict | None = None) -> str:
@@ -2544,47 +2710,161 @@ def _resolve_saved_by(request: Request | None, payload: dict | None = None) -> s
         import getpass
 
         return (getpass.getuser() or "local-user")[:128]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "local-user"
+
+
+def _trim(s: dict) -> dict:
+    """Citation identity ONLY — full document texts already live in the index."""
+    return {
+        "doc_id": s.get("doc_id") or "",
+        "subject": s.get("subject") or "",
+        "ministry": s.get("ministry") or "",
+        "document_type": s.get("document_type") or "",
+        "score": s.get("score"),
+    }
 
 
 @app.post("/api/save-knowledge")
 def save_knowledge(payload: dict, request: Request):
-    """Save a curated Q&A into user-knowledge/<slug>.json. Overwrites if the
-    same question was saved before (so re-saving an edited answer updates it)."""
+    """Create a NEW saved contribution. Never overwrites anyone's record.
+
+    Every save mints a fresh UUID, so two users saving the same question each
+    get their own file. Re-saving your own edited answer is an explicit PATCH to
+    /api/knowledge/{id}, not another POST.
+    """
     question = (payload.get("question") or "").strip()
     answer = (payload.get("answer") or "").strip()
     if not question or not answer:
         raise HTTPException(status_code=400, detail="question and answer required")
-    import re as _re
 
-    USER_KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    slug = _re.sub(r"[^a-z0-9]+", "_", question.lower())[:60] or "knowledge"
-    dest = USER_KNOWLEDGE_DIR / f"{slug}.json"
-    # Trim sources to citation identity ONLY (doc_id/subject/ministry/type) —
-    # the full document texts are already in the main index; storing them here
-    # would bloat the file and slow every lookup.
-    def _trim(s: dict) -> dict:
-        return {
-            "doc_id": s.get("doc_id") or "",
-            "subject": s.get("subject") or "",
-            "ministry": s.get("ministry") or "",
-            "document_type": s.get("document_type") or "",
-            "score": s.get("score"),
-        }
-    trimmed_sources = [_trim(s) for s in (payload.get("sources") or []) if isinstance(s, dict)]
-    # update existing file (don't create duplicates for same question)
     saved_by = _resolve_saved_by(request, payload)
-    entry = {
-        "question": question,
-        "answer": answer,
-        "sources": trimmed_sources,
-        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    store = _knowledge_store()
+    try:
+        record = store.create(
+            question=question,
+            answer=answer,
+            sources=[s for s in (payload.get("sources") or []) if isinstance(s, dict)],
+            owner_name=saved_by,
+            owner_id=owner_id_from(payload.get("owner_id") or saved_by),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # Keep the saved-question embedding matrix usable. Best-effort: a failure
+    # here only means semantic matching falls back until the next reindex.
+    try:
+        sync_question_embeddings(store, lambda texts: pipeline._get().embedder.embed_batch(
+            list(texts), show_progress=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"[knowledge] embedding sync skipped: {type(e).__name__}: {e}")
+
+    print(f"[save-knowledge] {record['knowledge_id']} by {saved_by} "
+          f"({len(record['sources'])} sources)")
+    return {
+        "status": "saved",
+        "knowledge_id": record["knowledge_id"],
+        # Legacy keys retained so an older client still reads the response.
+        "file": f"{record['knowledge_id']}.json",
         "saved_by": saved_by,
     }
-    dest.write_text(json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"[save-knowledge] {dest.name} by {saved_by} ({len(trimmed_sources)} sources trimmed)")
-    return {"status": "saved", "file": dest.name, "saved_by": saved_by}
+
+
+@app.get("/api/knowledge/mine")
+def knowledge_mine(request: Request, owner: str | None = None):
+    """The current user's own contributions, grouped for display."""
+    name = (owner or _resolve_saved_by(request, None)).strip()
+    oid = owner_id_from(name)
+    store = _knowledge_store()
+    records = store.for_owner(oid)
+    return {
+        "owner_name": name,
+        "owner_id": oid,
+        "count": len(records),
+        "records": records,
+        "groups": KnowledgeStore.group_duplicates(records),
+    }
+
+
+@app.patch("/api/knowledge/{knowledge_id}")
+def knowledge_update(knowledge_id: str, payload: dict, request: Request):
+    """Edit one contribution. Owner-scoped; bumps version, keeps the id."""
+    name = (payload.get("saved_by") or _resolve_saved_by(request, payload)).strip()
+    oid = owner_id_from(payload.get("owner_id") or name)
+    store = _knowledge_store()
+    try:
+        rec = store.update(
+            knowledge_id, owner_id=oid,
+            question=payload.get("question"), answer=payload.get("answer"),
+            sources=payload.get("sources"),
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    try:
+        sync_question_embeddings(store, lambda texts: pipeline._get().embedder.embed_batch(
+            list(texts), show_progress=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"[knowledge] embedding sync skipped: {type(e).__name__}: {e}")
+    return {"status": "updated", "record": rec}
+
+
+@app.delete("/api/knowledge/{knowledge_id}")
+def knowledge_delete(knowledge_id: str, request: Request, owner: str | None = None):
+    """Archive ONE contribution. Other owners' identical records are untouched."""
+    name = (owner or _resolve_saved_by(request, None)).strip()
+    oid = owner_id_from(name)
+    store = _knowledge_store()
+    try:
+        rec = store.archive(knowledge_id, owner_id=oid)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    try:
+        sync_question_embeddings(store, lambda texts: pipeline._get().embedder.embed_batch(
+            list(texts), show_progress=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"[knowledge] embedding sync skipped: {type(e).__name__}: {e}")
+    return {"status": "archived", "knowledge_id": rec["knowledge_id"],
+            "lifecycle": rec["lifecycle"]}
+
+
+@app.post("/api/knowledge/reindex")
+def knowledge_reindex(payload: dict | None = None, request: Request = None):
+    """Rebuild index.json / questions.f32, and optionally migrate legacy files.
+
+    Read-only preview by default. Migration is non-destructive: originals are
+    left in place and the operation is idempotent.
+    """
+    body = payload or {}
+    dry_run = bool(body.get("dry_run", True))
+    do_migrate = bool(body.get("migrate", False))
+    store = _knowledge_store()
+    out: dict = {"dry_run": dry_run}
+
+    if do_migrate:
+        out["migration"] = run_migration(store, dry_run=dry_run,
+                                         rename_originals=bool(body.get("rename_originals", False)))
+    else:
+        out["migration"] = plan_migration(store)
+
+    if dry_run:
+        out["index"] = {"entries": len(store.build_index()), "rebuilt": False}
+        return out
+
+    index = store.refresh_index()
+    out["index"] = {"entries": len(index), "rebuilt": True}
+    try:
+        rows = sync_question_embeddings(store, lambda texts: pipeline._get().embedder.embed_batch(
+            list(texts), show_progress=False))
+        out["embeddings"] = {"rows": rows}
+    except Exception as e:  # noqa: BLE001
+        out["embeddings"] = {"rows": 0, "error": f"{type(e).__name__}: {e}"}
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────

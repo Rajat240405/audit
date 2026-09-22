@@ -56,6 +56,19 @@ def user_knowledge_dir() -> Path:
     return data_dir() / "user-knowledge"
 
 
+def user_knowledge_records_dir() -> Path:
+    """One JSON file per saved CONTRIBUTION, keyed by a stable UUID.
+
+    Deliberately separate from :func:`user_knowledge_dir`, which keeps the
+    legacy flat ``<question-slug>.json`` files. The slug is derived from
+    mutable question text and is truncated to 60 characters, so it cannot be a
+    primary key: two different long questions collide onto one file and the
+    second save silently destroys the first. See
+    ``src/retrieval/knowledge/migrate.py`` for the non-destructive upgrade.
+    """
+    return user_knowledge_dir() / "records"
+
+
 def prompt_debug_path() -> Path:
     """Optional generation prompt dump. Always under APP_DATA_DIR (never CWD)."""
     return data_dir() / "generation_prompt_debug.txt"

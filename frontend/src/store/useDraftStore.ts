@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import type { GroundingClaim, RetrievalTrace, SourceItem , InvestigationResult } from "@/types";
+import type {
+  GroundingClaim,
+  InvestigationResult,
+  KnowledgeMatchCard,
+  RetrievalTrace,
+  SourceItem,
+} from "@/types";
 import { buildGroundingReport } from "@/services/grounding";
 
 /**
@@ -76,6 +82,15 @@ interface DraftState {
   /** Cross-Verified Facts panel visibility — ANSWER-SCOPED (lifted from
    *  DraftCanvas local state so a new query can reset it). */
   factsOpen: boolean;
+  /** Saved-knowledge matches for the CURRENT answer — ANSWER-SCOPED.
+   *  `fresh` snapshots the freshly generated answer at stream completion so
+   *  the comparison panel can offer "Use This" on both sides even after the
+   *  user has already picked the saved one. */
+  knowledge: {
+    matches: KnowledgeMatchCard[];
+    tier: string | null;
+    fresh: { content: string; sources: SourceItem[] } | null;
+  } | null;
   /** claim_id -> investigation result / in-flight marker. Answer-scoped. */
   investigations: Record<string, InvestigationResult>;
   investigating: Record<string, boolean>;
@@ -99,6 +114,13 @@ interface DraftState {
   /** Bind the canvas to a chat message (edits then update that message). */
   bindMessage: (sessionId: string | null, messageId: string | null) => void;
   setFactsOpen: (open: boolean) => void;
+  /** SSE `knowledge` event: remember the saved matches for this answer. */
+  setKnowledge: (matches: KnowledgeMatchCard[], tier: string | null) => void;
+  /** Capture the fresh RAG answer once the stream completes (comparison panel). */
+  snapshotKnowledgeFresh: () => void;
+  /** "Use This" on the comparison panel: the picked answer becomes the draft.
+   *  Deliberately does NOT re-save anything to the knowledge base. */
+  useKnowledgeAnswer: (answer: string, sources: SourceItem[]) => void;
   setInvestigating: (claimId: string, busy: boolean) => void;
   setInvestigation: (claimId: string, result: InvestigationResult) => void;
   /** Mark a Deep answer's verification as in flight, bound to its identity. */
@@ -130,6 +152,7 @@ export const useDraftStore = create<DraftState>((set) => ({
   activeSessionId: null,
   activeMessageId: null,
   factsOpen: false,
+  knowledge: null,
   investigations: {},
   investigating: {},
   deepVerify: IDLE_DEEP_VERIFY,
@@ -142,6 +165,7 @@ export const useDraftStore = create<DraftState>((set) => ({
       isStreaming: true, streamingText: "", content: "", sources: [],
       // answer-scoped panels belong to the PREVIOUS answer
       factsOpen: false, investigations: {}, investigating: {},
+      knowledge: null,
       // A new query supersedes any in-flight verification banner. The old pass
       // keeps running (it has no AbortSignal) but its identity no longer
       // matches, so settleDeepVerify will drop its result.
@@ -199,6 +223,30 @@ export const useDraftStore = create<DraftState>((set) => ({
   setLastMeta: (meta) => set({ lastMeta: meta }),
   setFactsOpen: (open) => set({ factsOpen: open }),
 
+  setKnowledge: (matches, tier) =>
+    set({ knowledge: { matches, tier, fresh: null } }),
+
+  snapshotKnowledgeFresh: () =>
+    set((s) => {
+      if (!s.knowledge) return {}; // nothing to snapshot — no comparison shown
+      return {
+        knowledge: {
+          ...s.knowledge,
+          fresh: { content: s.content, sources: s.sources },
+        },
+      };
+    }),
+
+  useKnowledgeAnswer: (answer, sources) =>
+    set(() => ({
+      content: answer,
+      sources,
+      // Re-ground the picked text so the Facts panel reflects what is shown.
+      grounding: buildGroundingReport(answer, sources),
+      selectedEvidence: null,
+      // knowledge stays as-is: the user may switch to the other side after.
+    })),
+
   setInvestigating: (claimId, busy) =>
     set((s) => ({ investigating: { ...s.investigating, [claimId]: busy } })),
 
@@ -242,6 +290,7 @@ export const useDraftStore = create<DraftState>((set) => ({
       investigations: {},
       investigating: {},
       deepVerify: IDLE_DEEP_VERIFY,
+      knowledge: null,
     }),
 
   bindMessage: (sessionId, messageId) =>

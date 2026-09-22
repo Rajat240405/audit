@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useStickyScroll } from "@/hooks/useStickyScroll";
 import {
   Brain,
   CheckCircle2,
@@ -38,10 +38,12 @@ export function ModelActivityPanel() {
   const openDoc = useDocViewerStore((s) => s.openDoc);
   const setTab = useChatActionsStore((s) => s.setTab);
 
-  const reasonRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    reasonRef.current?.scrollTo({ top: reasonRef.current.scrollHeight });
-  }, [reasoning]);
+  // Follow the live reasoning ONLY while the user is at the bottom — reading
+  // back through earlier reasoning during generation no longer fights a
+  // forced scroll on every chunk.
+  const { ref: reasonRef, onScroll: onReasonScroll } = useStickyScroll<HTMLDivElement>([
+    reasoning,
+  ]);
 
   if (!open) return null;
 
@@ -167,6 +169,7 @@ export function ModelActivityPanel() {
           </p>
           <div
             ref={reasonRef}
+            onScroll={onReasonScroll}
             className={cn(
               "max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background/60 p-2.5 font-mono text-[11px] leading-relaxed text-muted",
               !reasoning && phase === "thinking" && "flex items-center gap-2 text-foreground/70"

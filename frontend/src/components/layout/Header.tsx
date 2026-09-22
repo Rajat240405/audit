@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Moon, Sun, Brain, Settings as SettingsIcon, LifeBuoy } from "lucide-react";
+import { Moon, Sun, Brain, Settings as SettingsIcon, LifeBuoy, BookMarked } from "lucide-react";
 import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import type { RetrievalMode, ThinkingEffort } from "@/types";
@@ -318,10 +318,27 @@ export function Header() {
 
       <div className="flex shrink-0 items-center gap-1">
         <GuideButton />
+        <MyKnowledgeButton />
         <SettingsButton />
         <ThemeToggle />
       </div>
     </header>
+  );
+}
+
+/** Open "My Saved Knowledge" — the current user's saved contributions. */
+function MyKnowledgeButton() {
+  const setKnowledgeOpen = useAppStore((s) => s.setKnowledgeOpen);
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={() => setKnowledgeOpen(true)}
+      title="My Saved Knowledge — your saved Q&A contributions"
+      data-testid="my-knowledge-btn"
+    >
+      <BookMarked className="h-4 w-4" />
+    </Button>
   );
 }
 

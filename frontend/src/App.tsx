@@ -16,6 +16,11 @@ const Dashboard = lazy(() =>
 const Settings = lazy(() =>
   import("@/pages/Settings").then((m) => ({ default: m.Settings }))
 );
+const MyKnowledgeModal = lazy(() =>
+  import("@/components/knowledge/MyKnowledgeModal").then((m) => ({
+    default: m.MyKnowledgeModal,
+  }))
+);
 
 function Loader() {
   return (
@@ -41,6 +46,7 @@ export function App() {
         </Suspense>
       </MainLayout>
       <Settings />
+      <MyKnowledgeModal />
       <BuildGraphModal />
       {/* Product tour — mounted once, globally, like Settings/BuildGraphModal.
           Auto-starts on first run; reopenable from the header Guide button. */}

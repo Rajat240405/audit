@@ -27,6 +27,8 @@ interface AppState {
   // header / global flags
   settingsOpen: boolean;
   buildModalOpen: boolean;
+  /** "My Saved Knowledge" modal (Settings area). */
+  knowledgeOpen: boolean;
 
   setProvider: (p: string) => void;
   setModelFamily: (f: string) => void;
@@ -41,6 +43,7 @@ interface AppState {
   setBackendOnline: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
   setBuildModalOpen: (v: boolean) => void;
+  setKnowledgeOpen: (v: boolean) => void;
 }
 
 /** Source filter selection (see AppState.sourceFilter). */
@@ -69,6 +72,7 @@ export const useAppStore = create<AppState>()(
   backendOnline: null,
   settingsOpen: false,
   buildModalOpen: false,
+  knowledgeOpen: false,
 
   setProvider: (p) => set({ provider: p }),
   setModelFamily: (f) => set({ modelFamily: f }),
@@ -82,6 +86,7 @@ export const useAppStore = create<AppState>()(
   setGpu: (g) => set({ gpu: g }),
   setBackendOnline: (v) => set({ backendOnline: v }),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
+  setKnowledgeOpen: (v) => set({ knowledgeOpen: v }),
   setBuildModalOpen: (v) => set({ buildModalOpen: v }),
     }),
     {

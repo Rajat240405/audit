@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/utils/cn";
-import { saveKnowledge } from "@/api/model";
+import { SaveKnowledgeModal } from "@/components/chat/SaveKnowledgeModal";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
@@ -12,7 +12,22 @@ import { usePipelineStore } from "@/store/usePipelineStore";
 /** Message card in the left assistant column (matches the Stitch design). */
 export function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
-  const [saving, setSaving] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
+
+  // The question this answer belongs to: the PRECEDING user message. When
+  // there is none (e.g. a restored standalone answer) the save is disabled
+  // rather than silently storing the answer as its own question — that
+  // fallback polluted the knowledge base with truncated answers-as-questions.
+  const question = (() => {
+    const sessions = useSessionStore.getState();
+    const active = sessions.sessions.find((s) => s.id === sessions.activeSessionId);
+    if (!active) return "";
+    const idx = active.messages.findIndex((m) => m.id === message.id);
+    for (let i = idx - 1; i >= 0; i--) {
+      if (active.messages[i].role === "user") return active.messages[i].content;
+    }
+    return "";
+  })();
 
   // Live state for the assistant message currently being generated. The
   // session transcript only receives `content` at the END of the stream
@@ -32,33 +47,6 @@ export function Message({ message }: { message: ChatMessage }) {
   // arrives, "Generating answer…" disappears and the answer takes its place.
   const liveBody = isLive ? streamingText : "";
   const body = message.content || liveBody;
-
-  const onSaveKnowledge = async () => {
-    if (saving) return;
-    setSaving(true);
-    try {
-      // find the preceding USER message = the question for this answer
-      const sessions = useSessionStore.getState();
-      const active = sessions.sessions.find((s) => s.id === sessions.activeSessionId);
-      let question = "";
-      if (active) {
-        const idx = active.messages.findIndex((m) => m.id === message.id);
-        for (let i = idx - 1; i >= 0; i--) {
-          if (active.messages[i].role === "user") {
-            question = active.messages[i].content;
-            break;
-          }
-        }
-      }
-      if (!question) question = message.content.slice(0, 80);
-      await saveKnowledge({ question, answer: message.content, sources: message.sources ?? [] });
-      alert("Saved to Knowledge ✓");
-    } catch (e) {
-      alert("Save failed: " + (e instanceof Error ? e.message : String(e)));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   if (isUser) {
     return (
@@ -135,13 +123,25 @@ export function Message({ message }: { message: ChatMessage }) {
           Copy
         </button>
         <button
-          className="rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] text-foreground/70 hover:bg-surface disabled:opacity-50"
-          onClick={onSaveKnowledge}
-          disabled={saving}
+          className="rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] text-foreground/70 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="save-knowledge-btn"
+          onClick={() => setSaveOpen(true)}
+          disabled={!question}
+          title={question ? "Save this answer to shared Knowledge" : "No user question found for this answer"}
         >
-          {saving ? "Saving…" : "Save to Knowledge"}
+          Save to Knowledge
         </button>
       </div>
+
+      {question && (
+        <SaveKnowledgeModal
+          open={saveOpen}
+          onOpenChange={setSaveOpen}
+          question={question}
+          answer={message.content}
+          sources={message.sources ?? []}
+        />
+      )}
     </div>
   );
 }

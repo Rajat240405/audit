@@ -11,7 +11,7 @@ import { useToastStore } from "@/store/useToastStore";
 import { useActivityStore } from "@/store/useActivityStore";
 import { graphStages, hybridStages } from "@/utils/formatters";
 import { expandOrgFilter } from "@/lib/sourceFilter";
-import type { ChatMessage, SourceItem } from "@/types";
+import type { ChatMessage, KnowledgeMatchCard, SourceItem } from "@/types";
 
 /**
  * Drives the full streaming flow: pipeline stages -> sources -> trace ->
@@ -200,6 +200,11 @@ export function useChatStream() {
               }>).map((g) => ({ text: g.text, found: g.found, source: g.source })),
             });
           },
+          onKnowledge: ({ matches, tier }) => {
+            const cards = matches as KnowledgeMatchCard[];
+            if (!cards.length) return; // weak/ambiguous → nothing to compare
+            useDraftStore.getState().setKnowledge(cards, tier);
+          },
           onFinal: (text, droppedCount, _dropped, judgeRewritten) => {
             const draft = useDraftStore.getState();
             if (judgeRewritten && text && text !== draft.content) {
@@ -235,6 +240,12 @@ export function useChatStream() {
             // session/History. Commit any still-pending stream text first.
             if (draftState.isStreaming) {
               draftState.commitStream();
+            }
+            // Snapshot the FRESH answer now that it is complete: the knowledge
+            // comparison panel needs a stable "Fresh RAG" side even after the
+            // user picks the saved answer (and the draft content changes).
+            if (useDraftStore.getState().knowledge) {
+              useDraftStore.getState().snapshotKnowledgeFresh();
             }
             const content = useDraftStore.getState().content;
             if (content) {

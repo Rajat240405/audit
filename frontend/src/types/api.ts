@@ -176,6 +176,70 @@ export interface GraphBuildStatus {
   path?: string;
 }
 
+// ── Saved Knowledge (shared curated Q&A) ────────────────────────────────────
+
+/** Citation-identity source attached to a saved answer (no full text). */
+export interface KnowledgeSource {
+  doc_id: string;
+  subject: string;
+  ministry: string;
+  document_type: string;
+  score: number | null;
+}
+
+/**
+ * One display card in a knowledge lookup result. Records whose question AND
+ * answer are byte-identical (same content_hash) from different savers are
+ * collapsed into ONE card listing every contributor; the underlying records
+ * stay independent server-side.
+ */
+export interface KnowledgeMatchCard {
+  content_hash: string;
+  question: string;
+  question_normalized: string;
+  answer: string;
+  sources: KnowledgeSource[];
+  knowledge_ids: string[];
+  contributors: string[];
+  created_at: string;
+  updated_at: string;
+  score: number;
+  tier: string;
+}
+
+export interface KnowledgeLookupResult {
+  matches: KnowledgeMatchCard[];
+  tier: string | null;
+  ambiguous: boolean;
+  found: boolean;
+  diagnostics?: Record<string, unknown>;
+  // Legacy single-hit keys — still populated by the backend for older clients.
+  answer?: string;
+  question?: string;
+  sources?: KnowledgeSource[];
+  matched?: string;
+  score?: number;
+  saved_by?: string;
+}
+
+/** One saved contribution, as returned by /api/knowledge/mine. */
+export interface KnowledgeRecord {
+  schema_version: number;
+  knowledge_id: string;
+  content_hash: string;
+  question: string;
+  question_normalized: string;
+  answer: string;
+  sources: KnowledgeSource[];
+  owner_id: string;
+  owner_name: string;
+  created_at: string;
+  updated_at: string;
+  version: number;
+  lifecycle: string;
+  legacy?: boolean;
+}
+
 // SSE event types emitted by the backend /api/chat/stream endpoint
 export type StreamEvent =
   | { type: "status"; stage: string; message: string; done: boolean; count?: number }
@@ -197,4 +261,8 @@ export type StreamEvent =
       citation_dropped: string[];
     }
   | { type: "error"; message: string }
+  /** Saved-knowledge matches offered ALONGSIDE the fresh RAG answer — the
+   *  saved answer never replaces generation, so old clients that ignore this
+   *  event keep working unchanged. */
+  | { type: "knowledge"; matches: KnowledgeMatchCard[]; tier: string | null; ambiguous: boolean }
   | { type: "done" };

@@ -1,10 +1,12 @@
-import { useRef, useEffect, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useDraftStore } from "@/store/useDraftStore";
 import { FactVerificationPanel } from "./FactVerificationPanel";
 import { DeepVerifyBanner } from "./DeepVerifyBanner";
 import { useSessionStore } from "@/store/useSessionStore";
+import { KnowledgeComparisonPanel } from "@/components/workspace/KnowledgeComparisonPanel";
+import { useStickyAnchorScroll } from "@/hooks/useStickyScroll";
 import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
 import { useEditStore } from "@/store/useEditStore";
@@ -33,11 +35,11 @@ export function DraftCanvas() {
   const { edit, pendingEdit, accept, reject } = useEditDraft();
   const editing = useEditStore((s) => s.editing);
   const pushToast = useToastStore((s) => s.push);
-  const streamRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    streamRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [streamingText]);
+  // Auto-follow the stream ONLY while the user is at the bottom. Scrolling up
+  // during thinking/generation now keeps the user's position instead of
+  // dragging them back down on every token; returning to the bottom resumes
+  // the follow. (Previously this force-scrolled on every token.)
+  const { ref: streamRef } = useStickyAnchorScroll<HTMLDivElement>([streamingText]);
 
   const verified = grounding.filter((g) => g.found).length;
   const score = grounding.length ? Math.round((verified / grounding.length) * 100) : null;
@@ -130,7 +132,12 @@ export function DraftCanvas() {
             </span>
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+        {/* Saved Knowledge vs Fresh RAG comparison — shown only when the
+            backend found strong saved matches for this query. Answer-scoped:
+            a new query clears it. */}
+        <KnowledgeComparisonPanel />
+
+        <div data-testid="canvas-scroll" className="min-h-0 flex-1 overflow-y-auto p-6">
           {editingText != null ? (
             <div className="flex h-full flex-col gap-2">
               <textarea

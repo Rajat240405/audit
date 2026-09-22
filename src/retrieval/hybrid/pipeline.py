@@ -63,6 +63,10 @@ class RetrievalTimings:
     rrf_fusion_ms: float = 0.0
     rerank_ms: float = 0.0
     total_ms: float = 0.0
+    #: True when the caller supplied the query vector (shared with knowledge
+    #: matching) and no encode happened here. Deliberately excluded from
+    #: as_dict() so that keeps its float-only contract for existing consumers.
+    embed_reused: bool = False
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -549,6 +553,20 @@ class HybridRAGPipeline:
             ch = self._v2_chunk_map.get(unit_id)
         return ch.parent_doc_id if ch is not None else unit_id
 
+    def embed_query(self, query: str):
+        """Embed a query once, for sharing between consumers.
+
+        Exists so a single BGE-M3 encode can serve BOTH knowledge matching and
+        dense retrieval. Embedding is the most expensive part of a request, so
+        doing it twice for the same text is the thing to avoid.
+
+        Note this embeds the RAW query, not the expanded one: query expansion
+        appends a dozen role keywords per recognised entity, which is valuable
+        for the lexical channel but would swamp a short saved question during
+        similarity comparison.
+        """
+        return self.embedder.embed(query)
+
     def retrieve(
         self,
         query: str,
@@ -557,6 +575,7 @@ class HybridRAGPipeline:
         doc_types: Optional[list[str]] = None,
         orgs: Optional[list[str]] = None,
         doc_categories: Optional[list[str]] = None,
+        query_embedding=None,
     ) -> tuple[list[RetrievedResult], RetrievalTimings]:
         """
         Retrieve relevant results with standardized runtime logging (Phase 11).
@@ -564,6 +583,11 @@ class HybridRAGPipeline:
         ``on_stage`` is an optional callback invoked as each pipeline stage
         completes (stage name -> info dict); used by the frontend SSE endpoint
         to drive the live Pipeline tab.
+
+        ``query_embedding`` lets the caller supply an already-computed query
+        vector so it can be shared with another consumer (knowledge matching).
+        When given, the internal embed is skipped entirely — the request pays
+        for ONE encode, not two. When omitted, behaviour is exactly as before.
         """
         total_start = time.perf_counter()
         timings = RetrievalTimings()
@@ -577,11 +601,17 @@ class HybridRAGPipeline:
         # ── Stage 1: Embed query ───────────────────────────────────────────
         t_embed = time.perf_counter()
         if on_stage:
-            on_stage("embed", {})
-        # Use the expanded query for retrieval; the reranker still sees the
-        # original user query for relevance scoring.
-        query_embedding = self.embedder.embed(expanded_query)
-        timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
+            on_stage("embed", {"reused": query_embedding is not None})
+        if query_embedding is not None:
+            # Caller already paid for this encode (knowledge matching uses the
+            # same vector). Reuse it verbatim rather than embedding again.
+            timings.embed_query_ms = 0.0
+            timings.embed_reused = True
+        else:
+            # Use the expanded query for retrieval; the reranker still sees the
+            # original user query for relevance scoring.
+            query_embedding = self.embedder.embed(expanded_query)
+            timings.embed_query_ms = (time.perf_counter() - t_embed) * 1000
 
         # ── Stage 2/3: retrieval — oversample when filters are active (#2) ───
         # Metadata filters run AFTER fusion; with the default 50-slot pool a
