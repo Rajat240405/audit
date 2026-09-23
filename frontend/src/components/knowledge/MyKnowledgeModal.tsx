@@ -23,6 +23,12 @@ export function MyKnowledgeModal() {
   const pushToast = useToastStore((s) => s.push);
 
   const [owner, setOwner] = useState("");
+  // The form is shown until the user EXPLICITLY submits (button or Enter).
+  // Keying it on `owner` being empty was the bug: the first typed character
+  // made `owner` truthy and flipped the render straight to the "No saved
+  // contributions yet for 'R'…" empty state, kicking the user out of the input
+  // mid-word. Typing must only ever update local state.
+  const [submitted, setSubmitted] = useState(false);
   const [records, setRecords] = useState<KnowledgeRecord[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<KnowledgeRecord | null>(null);
@@ -50,9 +56,19 @@ export function MyKnowledgeModal() {
     setRecords(null);
     setEditing(null);
     setDeleting(null);
-    if (name) refresh(name);
+    if (name) {
+      // Returning user with a remembered name: that stored name is already
+      // an explicit earlier choice, so list their knowledge straight away
+      // (current persistence behaviour, unchanged).
+      setSubmitted(true);
+      refresh(name);
+    } else {
+      setSubmitted(false);
+    }
   }, [open]);
 
+  // The ONLY paths from the form to a lookup: this function, invoked by the
+  // button click or by pressing Enter (native form submit). Never by typing.
   const saveOwner = () => {
     const name = owner.trim();
     if (!name) return;
@@ -61,6 +77,7 @@ export function MyKnowledgeModal() {
     } catch {
       /* storage unavailable — works for this session only */
     }
+    setSubmitted(true);
     refresh(name);
   };
 
@@ -112,8 +129,15 @@ export function MyKnowledgeModal() {
       className="max-w-2xl"
     >
       <div className="space-y-4 text-sm" data-testid="my-knowledge">
-        {!owner ? (
-          <div className="space-y-2">
+        {!submitted ? (
+          <form
+            data-testid="my-kn-name-form"
+            className="space-y-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveOwner();
+            }}
+          >
             <p className="text-[12px] text-muted">
               Enter the name you save knowledge under to see your contributions.
             </p>
@@ -123,13 +147,18 @@ export function MyKnowledgeModal() {
                 value={owner}
                 onChange={(e) => setOwner(e.target.value)}
                 placeholder="e.g. Rajat"
+                autoComplete="off"
                 className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
               />
-              <Button data-testid="my-kn-name-save" onClick={saveOwner} disabled={!owner.trim()}>
+              <Button
+                type="submit"
+                data-testid="my-kn-name-save"
+                disabled={!owner.trim()}
+              >
                 Show my knowledge
               </Button>
             </div>
-          </div>
+          </form>
         ) : loading ? (
           <p className="text-muted">Loading…</p>
         ) : !records || records.length === 0 ? (

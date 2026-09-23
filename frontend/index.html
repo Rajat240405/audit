@@ -6,14 +6,16 @@
     <title>INCOIS Audit Pro</title>
     <meta name="description" content="AI-powered parliamentary audit and scientific research workstation" />
     <script>
-      // Apply persisted theme before paint (prevents flash). Default: dark.
+      // Apply persisted theme before paint (prevents flash). Default: LIGHT.
+      // An explicitly stored light/dark preference always wins; anything
+      // else — including no preference at all — starts light (no dark class).
       (function () {
         try {
           var t = localStorage.getItem("incois-theme");
-          if (t !== "light" && t !== "dark") t = "dark";
+          if (t !== "light" && t !== "dark") t = "light";
           document.documentElement.classList.toggle("dark", t === "dark");
         } catch (e) {
-          document.documentElement.classList.add("dark");
+          /* storage unavailable -> light mode: add no dark class */
         }
       })();
     </script>
@@ -21,5 +23,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-  </body>
+  <script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a3f131ea7d553b0a',t:'MTc5MDA3ODkwNQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>

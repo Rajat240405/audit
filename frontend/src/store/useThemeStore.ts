@@ -7,9 +7,11 @@ const STORAGE_KEY = "incois-theme";
 function readInitialTheme(): Theme {
   try {
     const t = localStorage.getItem(STORAGE_KEY);
-    return t === "light" ? "light" : "dark";
+    // An explicit stored preference wins; no preference (or a garbage value)
+    // starts in LIGHT mode — the application default.
+    return t === "dark" ? "dark" : "light";
   } catch {
-    return "dark";
+    return "light";
   }
 }
 

@@ -244,7 +244,11 @@ export const useDraftStore = create<DraftState>((set) => ({
       // Re-ground the picked text so the Facts panel reflects what is shown.
       grounding: buildGroundingReport(answer, sources),
       selectedEvidence: null,
-      // knowledge stays as-is: the user may switch to the other side after.
+      // Choosing an answer CLOSES the comparison: the panel disappears and
+      // the state is cleared so the next query starts clean. (The panel used
+      // to linger so the other side could still be picked — now re-asking
+      // the query is the way back.) Nothing is re-saved to Knowledge.
+      knowledge: null,
     })),
 
   setInvestigating: (claimId, busy) =>
