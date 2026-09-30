@@ -10,36 +10,28 @@ now routinely exist. Which one wins is decided PER FIELD by
 ``question_text`` (the PDF-derived form carries document furniture and can be
 an arbitrary one-third ratio split).
 
-Reuses the canonical, production-proven stack from the legacy archive scraper
-(``src/data/scraper.py``, untouched):
-
-- ``RealArchiveScraper._extract_pdf_text_bytes`` — PyMuPDF table-aware first,
-  pypdf fallback.
-- ``RealArchiveScraper._split_question_answer`` — ANSWER/REPLY boundary
-  split (with the legacy ratio fallback).
-
-The DOCX paragraph/table walk is re-implemented here (``_docx_text``) because
-the legacy copy is an instance method — the equivalence is pinned by a test
-against the legacy method. Nothing is ever synthesized: failures return a
-machine-readable reason and the record keeps empty text.
+Uses the canonical table-aware and OCR-driven extraction pipeline:
+- ``src.data.pdf_table_extract.extract_pdf_text`` — PyMuPDF table-aware + multi-page
+  continuity + in-memory OCR for scanned pages.
+- ``src.data.pdf_table_extract.split_question_answer`` — ANSWER/REPLY boundary split.
 """
 
 from __future__ import annotations
 
 import io
+from typing import Any
 
-from src.data.scraper import RealArchiveScraper
+from src.data.pdf_table_extract import DependencyMissingError, extract_pdf_text, split_question_answer
 
 #: extraction failure reasons (verbatim legacy vocabulary)
-Reason = str  # "scanned" | "parser_failure" | "unsupported"
+Reason = str  # "scanned" | "parser_failure" | "unsupported" | "dependency_unavailable"
 
 
 def _docx_text(data: bytes) -> str | None:
-    """All text of an OOXML DOCX (paragraphs + table cells), mirroring
-    ``RealArchiveScraper._extract_text_from_docx`` (equivalence-tested)."""
+    """All text of an OOXML DOCX (paragraphs + table cells)."""
     try:
         from docx import Document
-    except ImportError as exc:  # pragma: no cover — environment guard
+    except ImportError as exc:
         raise RuntimeError(
             "python-docx is required for DOCX support. Install with: pip install python-docx"
         ) from exc
@@ -52,7 +44,7 @@ def _docx_text(data: bytes) -> str | None:
                     if cell.text and cell.text.strip():
                         parts.append(cell.text)
         return "\n".join(parts)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -60,16 +52,20 @@ def extract_qa(body: bytes, doc_format: str) -> tuple[tuple[str, str] | None, Re
     """Extract (question, answer) from document bytes of a sniffed format.
 
     Returns ``((question, answer), None)`` on success, else ``(None, reason)``
-    with reason in the legacy vocabulary. Empty body/format values degrade to
-    ``unsupported`` — callers never see an exception from this stage.
+    with reason in the legacy vocabulary.
     """
     if not body:
         return None, "unsupported"
+        
     if doc_format == "pdf":
-        text = RealArchiveScraper._extract_pdf_text_bytes(body)  # noqa: SLF001 — canonical reuse
-        if text is None:
+        try:
+            text = extract_pdf_text(body, enable_ocr=True)
+        except DependencyMissingError as exc:
+            return None, f"dependency_unavailable: {exc}"
+        except Exception:
             return None, "parser_failure"
-        if not text.strip():
+            
+        if text is None or not text.strip():
             return None, "scanned"
     elif doc_format == "docx":
         text = _docx_text(body)
@@ -79,4 +75,6 @@ def extract_qa(body: bytes, doc_format: str) -> tuple[tuple[str, str] | None, Re
             return None, "scanned"
     else:
         return None, "unsupported"
-    return RealArchiveScraper._split_question_answer(text), None  # noqa: SLF001
+        
+    res = split_question_answer(text)
+    return res, None
