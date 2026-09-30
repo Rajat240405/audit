@@ -48,7 +48,10 @@ try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageFilter
     for _bin_dir, _, _ in _LOCAL_PATHS:
-        if os.path.exists(f"{_bin_dir}/tesseract"):
+        if os.path.exists(f"{_bin_dir}/tesseract_runner"):
+            pytesseract.pytesseract.tesseract_cmd = f"{_bin_dir}/tesseract_runner"
+            break
+        elif os.path.exists(f"{_bin_dir}/tesseract"):
             pytesseract.pytesseract.tesseract_cmd = f"{_bin_dir}/tesseract"
             break
     _OCR_LIBS_AVAILABLE = True
@@ -159,6 +162,12 @@ def ocr_page_to_structured_text(page, dpi: int = 300, timeout: float = 10.0) -> 
     proc.start()
     pid = proc.pid
 
+    # Close parent copy of child pipe endpoint so worker EOF is clean
+    try:
+        child_conn.close()
+    except Exception:
+        pass
+
     chunks: list[str] = []
     deadline = time.time() + timeout
     result_str: str | None = None
@@ -166,8 +175,18 @@ def ocr_page_to_structured_text(page, dpi: int = 300, timeout: float = 10.0) -> 
     try:
         while time.time() < deadline:
             remaining = max(0.001, deadline - time.time())
-            if parent_conn.poll(min(0.02, remaining)):
-                msg_type, payload = parent_conn.recv()
+            try:
+                has_data = parent_conn.poll(min(0.02, remaining))
+            except (EOFError, BrokenPipeError, OSError):
+                # Worker closed pipe on completion/exit
+                break
+
+            if has_data:
+                try:
+                    msg_type, payload = parent_conn.recv()
+                except (EOFError, BrokenPipeError, OSError):
+                    break
+
                 if msg_type == "CHUNK":
                     chunks.append(payload)
                 elif msg_type == "SUCCESS":
@@ -179,21 +198,32 @@ def ocr_page_to_structured_text(page, dpi: int = 300, timeout: float = 10.0) -> 
                     raise RuntimeError(f"Subprocess OCR failed: {payload}")
             elif not proc.is_alive():
                 # Process exited; drain any remaining buffered chunks
-                while parent_conn.poll():
-                    msg_type, payload = parent_conn.recv()
-                    if msg_type == "CHUNK":
-                        chunks.append(payload)
-                    elif msg_type == "SUCCESS":
-                        result_str = "".join(chunks)
-                        break
-                    elif msg_type == "ERROR":
-                        if "DependencyMissingError" in payload:
-                            raise DependencyMissingError(payload)
-                        raise RuntimeError(f"Subprocess OCR failed: {payload}")
+                try:
+                    while parent_conn.poll():
+                        msg_type, payload = parent_conn.recv()
+                        if msg_type == "CHUNK":
+                            chunks.append(payload)
+                        elif msg_type == "SUCCESS":
+                            result_str = "".join(chunks)
+                            break
+                        elif msg_type == "ERROR":
+                            if "DependencyMissingError" in payload:
+                                raise DependencyMissingError(payload)
+                            raise RuntimeError(f"Subprocess OCR failed: {payload}")
+                except (EOFError, BrokenPipeError, OSError):
+                    pass
                 break
 
-        proc.join(timeout=0.1)
+        # If SUCCESS was received, allow worker up to 2.0s to finish clean exit
+        if result_str is not None:
+            proc.join(timeout=2.0)
+            if proc.is_alive():
+                _kill_process_tree(pid, proc)
+                proc.join(timeout=0.5)
+            return result_str
 
+        # If not completed and process still alive after deadline, terminate
+        proc.join(timeout=0.1)
         if proc.is_alive():
             _kill_process_tree(pid, proc)
             proc.join(timeout=0.5)
