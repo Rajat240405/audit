@@ -334,6 +334,24 @@ def _is_split_continuation_row(row: list[str], active_header: list[str]) -> bool
     return False
 
 
+def _extract_serial_number(row: list[str]) -> int | None:
+    """Extract a positive integer serial number from the first non-empty cell of a table row."""
+    if not row:
+        return None
+    for cell in row[:2]:
+        cell_str = clean_cell_text(cell)
+        if not cell_str:
+            continue
+        m = re.match(r'^\s*\(?\s*(\d{1,5})\s*[\.\)\-]?\s*$', cell_str)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        break
+    return None
+
+
 def _stitch_multipage_payloads(payloads: list[dict[str, Any]]) -> list[str]:
     """Stitch multi-page tables across consecutive pages, prune repeated headers, fuse split rows, and output clean Markdown in visual order."""
     output_chunks = []
@@ -364,15 +382,42 @@ def _stitch_multipage_payloads(payloads: list[dict[str, Any]]) -> list[str]:
                     same_cols = (t_cols == active_multi_table["cols"])
                     sim = header_similarity(active_multi_table["header"], t_header)
                     
-                    if (
+                    # 1. Repeated header match
+                    has_repeated_header = (sim >= _CONTINUITY_CONFIDENCE_THRESHOLD)
+
+                    # 2. Headerless serial continuation match
+                    is_serial_continuation = False
+                    if not has_repeated_header and is_consec and same_cols and not is_section_boundary:
+                        n_prev = None
+                        for r in reversed(active_multi_table["rows"]):
+                            sp = _extract_serial_number(r)
+                            if sp is not None:
+                                n_prev = sp
+                                break
+                        
+                        if n_prev is not None and len(t_rows) > 0:
+                            n_curr = _extract_serial_number(t_rows[0])
+                            if n_curr is None and _is_split_continuation_row(t_rows[0], active_multi_table["header"]) and len(t_rows) > 1:
+                                n_curr = _extract_serial_number(t_rows[1])
+                            
+                            if n_curr is not None and n_curr == n_prev + 1:
+                                is_serial_continuation = True
+                    
+                    is_continuation = (
                         is_consec
                         and same_cols
                         and not is_section_boundary
-                        and sim >= _CONTINUITY_CONFIDENCE_THRESHOLD
-                    ):
-                        if header_similarity(active_multi_table["header"], t_rows[0]) >= _CONTINUITY_CONFIDENCE_THRESHOLD:
-                            incoming_rows = t_rows[1:]
+                        and (has_repeated_header or is_serial_continuation)
+                    )
+
+                    if is_continuation:
+                        if has_repeated_header:
+                            if header_similarity(active_multi_table["header"], t_rows[0]) >= _CONTINUITY_CONFIDENCE_THRESHOLD:
+                                incoming_rows = t_rows[1:]
+                            else:
+                                incoming_rows = t_rows
                         else:
+                            # Headerless continuation: row 0 is a data row (e.g. Row 21)
                             incoming_rows = t_rows
                         
                         for r in incoming_rows:
