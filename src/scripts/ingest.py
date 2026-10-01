@@ -747,10 +747,82 @@ def _replace_corpus_rows(replacements: dict[str, QARecord],
     return len(replaced) + len(dropped)
 
 
+def _probe_question_id(line: str) -> str:
+    """Best-effort question_id from a row that failed QARecord validation.
+
+    A failed row still needs an identity in ``failed_ids`` so an operator can
+    find it. Falls back to a content fingerprint when the id is unreadable.
+    """
+    import hashlib
+
+    try:
+        obj = json.loads(line)
+        qid = obj.get("question_id")
+        if isinstance(qid, str) and qid:
+            return qid
+    except Exception:  # noqa: BLE001 — the row is malformed by definition
+        pass
+    return f"<unparseable:{hashlib.sha256(line.encode('utf-8', 'replace')).hexdigest()[:12]}>"
+
+
+def run_manifest_path() -> Path:
+    """Where the per-run id manifest is written."""
+    return _data_path("storage/ingest/last_run_ids.json")
+
+
+def write_run_manifest(source: str, ids: dict[str, list[str]]) -> Path | None:
+    """Persist the added/changed/unchanged/failed ids for ONE source run.
+
+    This is the handoff to incremental consumers. GraphRAG is deliberately NOT
+    wired into the nightly cron — it stays manually controlled — so the ids
+    must outlive the ingest process on disk. A later manual GraphRAG run reads
+    ``added + changed`` and processes only those documents; on a 100k corpus
+    with 500 changed records it extracts 500, never 100k.
+
+    Written atomically and best-effort: a manifest failure must never fail an
+    otherwise successful ingest.
+    """
+    from datetime import datetime, timezone
+
+    from src.utils.atomic_io import write_text_atomic
+
+    try:
+        payload = {
+            "source": source,
+            "written_at": datetime.now(timezone.utc).isoformat(),
+            "extractor_version": _current_extractor_version(),
+            "added_ids": sorted(set(ids.get("added", []))),
+            "changed_ids": sorted(set(ids.get("changed", []))),
+            "unchanged_ids": sorted(set(ids.get("unchanged", []))),
+            "failed_ids": sorted(set(ids.get("failed", []))),
+        }
+        payload["graphrag_pending_ids"] = sorted(
+            set(payload["added_ids"]) | set(payload["changed_ids"])
+        )
+        path = run_manifest_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        return path
+    except Exception as exc:  # noqa: BLE001 — never fail ingest over telemetry
+        _engine.log(f"  [warn] could not write run manifest: {exc}")
+        return None
+
+
+def _current_extractor_version() -> str:
+    """Current extractor version, or an empty string if unavailable."""
+    try:
+        from src.data.pdf_table_extract import current_extractor_version
+
+        return current_extractor_version()
+    except Exception:  # noqa: BLE001 — telemetry only
+        return ""
+
+
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                       source: str | None = None, recursive: bool = False,
                       seen_hashes: dict[str, str] | None = None,
-                      out_changed: list[QARecord] | None = None) -> tuple[int, int]:
+                      out_changed: list[QARecord] | None = None,
+                      out_ids: dict[str, list[str]] | None = None) -> tuple[int, int]:
     """Merge ready-made QARecord JSONL (Phase-1 parliament output, staged
     crawler corpora) into `out`.
 
@@ -774,12 +846,23 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
     0). The first staged occurrence of an id always wins (declaration order)
     — later same-id rows in the same run are ignored either way.
 
+    ``out_ids`` (optional) collects the question_ids behind the counts, into
+    the keys ``added`` / ``changed`` / ``unchanged`` / ``failed``. The counts
+    answer "how much moved"; downstream incremental consumers — GraphRAG above
+    all — need to know exactly WHICH records moved so they can process
+    ``added + changed`` and nothing else. Purely additive: omit it and this
+    function behaves exactly as before.
+
     Returns ``(added, changed)`` — the legacy int return grew a second
     element with the detection; both are plain counts.
     """
     added = 0
     changed = 0
     skipped = 0
+
+    def _note(bucket: str, qid: str) -> None:
+        if out_ids is not None:
+            out_ids.setdefault(bucket, []).append(qid)
     handled: set[str] = set()   # first staged occurrence of an id wins
     for rel in dirs:
         d = _data_path(rel)
@@ -796,6 +879,7 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                         rec = QARecord.model_validate_json(line)
                     except Exception:  # noqa: BLE001 — count malformed/incomplete rows
                         skipped += 1
+                        _note("failed", _probe_question_id(line))
                         continue
                     if rec.question_id in handled:
                         continue
@@ -806,6 +890,7 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                             rec.metadata.source = source
                         out.append(rec)
                         added += 1
+                        _note("added", rec.question_id)
                         if seen_hashes is not None:
                             seen_hashes[rec.question_id] = _qa_content_hash(rec)
                     elif seen_hashes is not None:
@@ -814,8 +899,14 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                             handled.add(rec.question_id)
                             seen_hashes[rec.question_id] = h
                             changed += 1
+                            _note("changed", rec.question_id)
                             if out_changed is not None:
                                 out_changed.append(rec)
+                        else:
+                            # Re-crawled and re-extracted, but semantically
+                            # identical. Explicitly recorded so a run can prove
+                            # "seen and unchanged" rather than "never seen".
+                            _note("unchanged", rec.question_id)
             except OSError as e:
                 _engine.log(f"  [warn] {f}: {e}")
     if skipped:
@@ -840,10 +931,12 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
         out_changed: list[QARecord] = []
         seen = _seed_seen_from_corpus()
         hashes = _seed_seen_with_hash()
+        run_ids: dict[str, list[str]] = {}
         added, changed = merge_record_dirs(
             spec.record_dirs, out, seen, source=spec.name,
             recursive=spec.recursive,
             seen_hashes=hashes, out_changed=out_changed,
+            out_ids=run_ids,
         )
         if out_changed:
             n_rep = _replace_corpus_rows({r.question_id: r for r in out_changed})
@@ -855,7 +948,21 @@ def ingest_source(spec: SourceSpec, move_processed: bool | None = None,
             _engine.log(f"[ingest:{spec.name}] appended {added} record(s) -> {corpus_path()}")
         elif not out_changed:
             _engine.log(f"[ingest:{spec.name}] no new or changed records in {spec.record_dirs}")
-        return {"added": added, "changed": changed, "folders": 0}
+        manifest = write_run_manifest(spec.name, run_ids)
+        if manifest is not None and (run_ids.get("added") or run_ids.get("changed")):
+            _engine.log(
+                f"[ingest:{spec.name}] run manifest -> {manifest} "
+                f"(graphrag_pending={len(set(run_ids.get('added', [])) | set(run_ids.get('changed', [])))})"
+            )
+        return {
+            "added": added,
+            "changed": changed,
+            "folders": 0,
+            "added_ids": sorted(set(run_ids.get("added", []))),
+            "changed_ids": sorted(set(run_ids.get("changed", []))),
+            "unchanged_ids": sorted(set(run_ids.get("unchanged", []))),
+            "failed_ids": sorted(set(run_ids.get("failed", []))),
+        }
 
     # kind == "folders" — expand (flat or hierarchical) into leaf jobs, each
     # handed to the proven engine path (detect -> convert -> dedup -> append).

@@ -94,18 +94,69 @@ class SessionReport:
 
 
 def _extract_answer_fallback(pdf_body: bytes) -> str | None:
-    """Table-aware whole-document text; None when the PDF is a scan (no text)."""
+    """Table-aware whole-document text; None when the PDF is a scan (no text).
+
+    Two failure classes, deliberately handled differently:
+
+    * **Document-level** (corrupt/unopenable/encrypted PDF) -> ``None``. The
+      document really is unusable, so "answer unavailable" is the honest
+      outcome. Unchanged behaviour.
+
+    * **Infrastructure-level** (DOTS endpoint down, DOTS output rejected by the
+      validator, PicoDet unavailable, Tesseract missing, OCR timeout) ->
+      **re-raised**. These mean "we could not tell", not "there is no answer".
+      Swallowing them would stamp ``answer_source=unavailable`` on a record
+      that already has a perfectly good answer, overwriting real content with
+      emptiness because a GPU box was rebooting. The caller must fail the
+      record so the previous corpus row is retained and the failure is
+      visible and diagnosable.
+    """
     try:
-        from src.data.pdf_table_extract import extract_pdf_text
+        from src.data.pdf_table_extract import (
+            DependencyMissingError,
+            ExtractionTimeoutError,
+            extract_pdf_text,
+        )
     except ImportError:
         return None
+
     try:
         text = extract_pdf_text(pdf_body)
+    except (DependencyMissingError, ExtractionTimeoutError):
+        # Must precede `except ImportError`: DependencyMissingError subclasses
+        # it, so the old ordering silently downgraded a missing extraction
+        # dependency to "unavailable".
+        raise
     except ImportError:
         return None
-    except Exception:  # noqa: BLE001 — unopenable/corrupt: treat as unavailable
-        return None
+    except Exception as exc:  # noqa: BLE001
+        if _is_extraction_infrastructure_failure(exc):
+            raise
+        return None  # unopenable/corrupt: treat as unavailable
     return (text or "").strip() or None
+
+
+def _is_extraction_infrastructure_failure(exc: BaseException) -> bool:
+    """Is this failure about the extraction stack rather than the document?
+
+    Resolved by type, with a lazy import so a repo without the DOTS extras
+    still imports cleanly and simply sees no infrastructure failures.
+    """
+    try:
+        from src.data.dots_client import DotsInvalidOutput, DotsUnavailable
+
+        if isinstance(exc, (DotsUnavailable, DotsInvalidOutput)):
+            return True
+    except ImportError:
+        pass
+    try:
+        from src.data.table_detect import TableDetectorUnavailable
+
+        if isinstance(exc, TableDetectorUnavailable):
+            return True
+    except ImportError:
+        pass
+    return False
 
 
 def apply_answer_fallback(

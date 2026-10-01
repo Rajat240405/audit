@@ -11,12 +11,28 @@ Design & Policy:
   6. Context-Aware Number Repair: Repairs intra-cell newline wraps without corrupting distinct numbers.
   7. Page-Boundary Row Reconstruction: Fuses wrapped split rows across page breaks.
   8. Process-Tree Hard Timeout: Runs OCR in an isolated subprocess with cross-platform termination.
+  9. PicoDet -> DOTS Table Routing (opt-in via DOTS_ENABLED): when enabled, PicoDet is the
+     ONLY table detector and DOTS OCR is the ONLY table extractor. A page PicoDet flags is
+     owned end-to-end by DOTS and Strategies 1-3 are bypassed for that page; a page PicoDet
+     clears takes the unchanged non-table path. With DOTS_ENABLED unset (the default) this
+     module behaves exactly as before, byte for byte.
+
+Routing (DOTS_ENABLED=true):
+
+    page -> scanned? -> yes -> Tesseract OCR (unchanged; non-table scanned pages)
+                     -> no  -> PicoDet -> TABLE    -> DOTS            ("dots_table")
+                                       -> NO TABLE -> _render_merged  ("prose")
+
+Page order is preserved: routing happens inside the per-page loop and every branch returns
+a payload for that page, which the stitcher consumes in order.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import math
+import os
 import re
 from statistics import median
 from typing import Any, List, Optional, Tuple
@@ -49,7 +65,21 @@ def check_extraction_environment(ocr_required: bool = False) -> tuple[bool, str]
             pytesseract.get_tesseract_version()
         except Exception as exc:
             return False, f"Mandatory dependency missing: Tesseract OCR is unavailable ({exc})."
-            
+
+    if dots_routing_enabled():
+        from src.data import dots_client, table_detect
+
+        if not table_detect.is_available():
+            return False, (
+                "DOTS_ENABLED=true but the PicoDet table detector is unavailable "
+                "(install paddlepaddle + paddleocr, or set DOTS_ENABLED=false)."
+            )
+        if not dots_client.get_client().is_available():
+            return False, (
+                "DOTS_ENABLED=true but the DOTS vLLM endpoint is unreachable at "
+                f"{dots_client.DotsConfig.from_env().base_url or '<DOTS_BASE_URL unset>'}."
+            )
+
     return True, "All mandatory extraction dependencies are operational."
 
 
@@ -61,6 +91,57 @@ def _import_fitz():
         return fitz
     except ImportError:
         raise DependencyMissingError("Extraction blocked: PyMuPDF is required but not installed.")
+
+
+# ── PicoDet -> DOTS routing ──────────────────────────────────────────────────
+
+#: Payload type emitted for a page extracted by DOTS. The stitcher's generic
+#: branch passes any payload carrying "content" straight through in page order,
+#: so no stitcher change is required.
+DOTS_PAYLOAD_TYPE = "dots_table"
+
+#: Rendering DPI recorded in extractor_version, so a DPI change is a visible
+#: extraction-decision change rather than a silent one.
+_DEFAULT_DPI = 200
+
+
+def dots_routing_enabled() -> bool:
+    """Is PicoDet -> DOTS routing switched on?
+
+    Defaults to **false**: merely deploying this code must not change a single
+    byte of extracted text. An operator opts in with DOTS_ENABLED=true.
+    """
+    return (os.environ.get("DOTS_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def current_extractor_version() -> str:
+    """Identifier for the extraction *decisions* currently in force.
+
+    Shape: ``dots-<version>/picodet-<version>/dpi<value>``, or
+    ``legacy/dpi<value>`` when routing is off.
+
+    This is extraction-decision metadata, NOT semantic content. It is stored on
+    the record (``metadata.extractor_version``) purely so a changed extractor
+    can trigger re-extraction, and ``qa_content_hash`` excludes it so that a
+    version bump alone never marks a record as changed.
+    """
+    dpi = (os.environ.get("DOTS_RENDER_DPI") or "").strip() or str(_DEFAULT_DPI)
+    if not dots_routing_enabled():
+        return f"legacy/dpi{dpi}"
+    from src.data import dots_client, table_detect
+
+    return f"{dots_client.dots_version()}/{table_detect.detector_version()}/dpi{dpi}"
+
+
+def source_sha256_of(data: bytes) -> str:
+    """SHA-256 of the raw source PDF bytes.
+
+    Stored as ``metadata.source_sha256`` and used only to decide whether
+    re-extraction is needed. Like ``extractor_version`` it is excluded from
+    ``qa_content_hash``: a byte-level PDF change (a re-stamped download, a new
+    timestamp in the file trailer) is not by itself a semantic record change.
+    """
+    return hashlib.sha256(data).hexdigest()
 
 
 _MIN_SERIALS = 4
@@ -229,6 +310,15 @@ def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[
         if not lines:
             return {"page_num": page_num, "type": "empty", "content": "", "tables": []}
 
+    # PicoDet -> DOTS routing gate.
+    # When enabled this REPLACES Strategies 1-3 (the competing table extractors)
+    # for this page: PicoDet is the only detector and DOTS is the only table
+    # extractor. A page PicoDet clears falls through to the same baseline
+    # rendering Strategy 4 would have produced, so table-free documents are
+    # unaffected. Scanned-page OCR above still runs first and is untouched.
+    if dots_routing_enabled():
+        return _extract_page_payload_dots(page, page_num, lines, native_char_count)
+
     # Strategy 1: Check for PyMuPDF structured vector/grid tables
     try:
         tabs = page.find_tables()
@@ -310,6 +400,48 @@ def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[
     # Strategy 4: Baseline-merged prose
     content = _render_merged(lines)
     return {"page_num": page_num, "type": "prose", "content": content, "tables": []}
+
+
+def _extract_page_payload_dots(page, page_num: int, lines: list[dict], native_char_count: int) -> dict[str, Any]:
+    """Route one page through PicoDet and, if a table is present, DOTS.
+
+    Contract:
+
+    * **No table detected** -> the page renders through ``_render_merged``, which
+      is byte-identical to what Strategy 4 produces today. A document with no
+      tables is therefore unchanged by enabling routing.
+    * **Table detected** -> DOTS owns the page outright. Its text replaces the
+      page entirely; nothing is merged with a legacy table extraction.
+    * **Detector unavailable / DOTS unreachable / output rejected** -> the
+      exception propagates. There is deliberately no fallback to an inferior
+      table extractor: a hard, diagnosable failure leaves the previous corpus
+      row intact, whereas a silent downgrade would overwrite good data with
+      worse data and nobody would ever know.
+
+    The single exception is ``RULE_NO_TABLE_FOUND`` — PicoDet fired but DOTS
+    found no table. That is a detector false positive, not an extraction
+    failure, so the page keeps its legacy text.
+    """
+    from src.data import dots_client, table_detect
+
+    # TableDetectorUnavailable and DotsUnavailable are both RuntimeError
+    # subclasses and are intentionally allowed to propagate to the caller.
+    if not table_detect.page_has_table(page):
+        return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
+
+    try:
+        content = dots_client.get_client().page_to_text(
+            page,
+            page_num,
+            native_char_count=native_char_count,
+            detector_found_table=True,
+        )
+    except dots_client.DotsInvalidOutput as exc:
+        if exc.rule == dots_client.RULE_NO_TABLE_FOUND:
+            return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
+        raise
+
+    return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
 
 
 def _fuse_split_row(prev_row: list[str], cont_row: list[str]) -> list[str]:

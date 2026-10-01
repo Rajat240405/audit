@@ -253,6 +253,34 @@ class QARecordMetadata(BaseModel):
         examples=["document-richer", "inline-preferred:document-ratio-split"],
     )
 
+    # ── Extraction-decision provenance (PicoDet -> DOTS routing) ────────────
+    # These two answer "do we need to run extraction again?" — they are NOT
+    # semantic content and MUST NOT participate in change detection.
+    # ``qa_content_hash`` (src/scripts/ingest_folder.py) drops both
+    # unconditionally, so introducing them re-hashes nothing, and bumping the
+    # extractor version never makes an unchanged record look changed. Both
+    # default to None so every pre-existing corpus row stays valid and
+    # byte-stable.
+    source_sha256: str | None = Field(
+        default=None,
+        description="SHA-256 (64-char hex) of the raw source PDF bytes this "
+                    "record was extracted from. Used only for the "
+                    "re-extraction short-circuit: unchanged bytes + unchanged "
+                    "extractor_version means extraction is skipped entirely. "
+                    "None for records predating the field or with no source PDF.",
+        examples=["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+    )
+    extractor_version: str | None = Field(
+        default=None,
+        description="Identifier of the extraction decisions in force when this "
+                    "record was produced, e.g. "
+                    "'dots-<model>@<prompt>/picodet-<model>@<threshold>/dpi200' "
+                    "or 'legacy/dpi200'. A mismatch against the current version "
+                    "triggers re-extraction; it does NOT by itself mark the "
+                    "record as changed. None for records predating the field.",
+        examples=["legacy/dpi200"],
+    )
+
 
 class QARecord(BaseModel):
     """

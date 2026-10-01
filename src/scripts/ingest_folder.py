@@ -199,11 +199,33 @@ def qa_content_hash(rec) -> str:
     identically) and the ``content_hash`` computed field (a
     question_text-only projection — redundant noise here).
 
+    It also excludes the two extraction-decision fields ``source_sha256`` and
+    ``extractor_version`` — see below.
+
     64-char hex (full digest — hash collisions in a 2.6k-row corpus are a
     non-issue, but the full digest keeps this safe for arbitrary growth).
     """
     d = rec.model_dump(mode="json", exclude={"scraped_at"})
     d.pop("content_hash", None)
+    # Extraction-decision metadata is NOT semantic content and is dropped
+    # UNCONDITIONALLY — including when set. This is load-bearing:
+    #
+    #   * Introducing the fields must not re-hash the existing corpus. Popping
+    #     only-when-None would still re-hash every record the moment migration
+    #     populated them.
+    #   * A PDF re-published with identical text but different bytes changes
+    #     source_sha256. That is a reason to re-extract, not evidence the
+    #     record changed.
+    #   * Bumping extractor_version (new DOTS build, new threshold, new DPI)
+    #     would otherwise mark all ~2.6k records changed at once, forcing a
+    #     full GraphRAG re-extraction for text that never moved.
+    #
+    # Whether a re-extraction actually changed anything is decided by
+    # comparing this hash before and after, with these two fields held out.
+    _meta_x = d.get("metadata")
+    if isinstance(_meta_x, dict):
+        _meta_x.pop("source_sha256", None)
+        _meta_x.pop("extractor_version", None)
     # Per-field text provenance (LS inline-vs-document arbitration) is
     # HASH-INERT while unset. These keys were added after the corpus was
     # built, so dumping them as ``null`` would re-hash every existing record
@@ -219,6 +241,60 @@ def qa_content_hash(rec) -> str:
                 _meta.pop(_k, None)
     blob = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def needs_reextraction(
+    existing_rec,
+    source_bytes: bytes | None = None,
+    *,
+    source_sha256: str | None = None,
+    current_version: str | None = None,
+) -> bool:
+    """Source-hash short-circuit: must this document be extracted again?
+
+    Returns ``False`` — meaning skip PicoDet, skip DOTS, skip everything —
+    only when BOTH hold:
+
+    * the source PDF bytes hash to the same ``source_sha256`` as the stored
+      record, and
+    * the stored ``extractor_version`` equals the current one.
+
+    Anything unknown (no stored record, either field absent on a legacy row,
+    no source bytes supplied) returns ``True``. Re-extracting unnecessarily
+    costs GPU time; skipping wrongly silently freezes a record at stale text,
+    so the default must always be to re-extract.
+
+    Note that returning ``True`` does not mean the record changed. It only
+    authorises re-extraction; whether anything actually changed is decided
+    afterwards by comparing ``qa_content_hash`` before and after.
+    """
+    if existing_rec is None:
+        return True
+
+    meta = getattr(existing_rec, "metadata", None)
+    if isinstance(meta, dict):
+        stored_hash = meta.get("source_sha256")
+        stored_version = meta.get("extractor_version")
+    else:
+        stored_hash = getattr(meta, "source_sha256", None)
+        stored_version = getattr(meta, "extractor_version", None)
+
+    if not stored_hash or not stored_version:
+        return True  # legacy row: no provenance recorded, cannot short-circuit
+
+    if source_sha256 is None:
+        if source_bytes is None:
+            return True
+        from src.data.pdf_table_extract import source_sha256_of
+
+        source_sha256 = source_sha256_of(source_bytes)
+
+    if current_version is None:
+        from src.data.pdf_table_extract import current_extractor_version
+
+        current_version = current_extractor_version()
+
+    return not (stored_hash == source_sha256 and stored_version == current_version)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
