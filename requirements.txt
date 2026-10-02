@@ -49,6 +49,40 @@ PyMuPDF>=1.24.0
 python-docx>=1.1.0
 neo4j>=5.14.0
 
+# ── Table detection: PicoDet layout model via PaddleOCR (CPU) ─────────────
+# paddlepaddle is PINNED to 3.2.2 and MUST NOT be bumped to 3.3.x.
+#
+# 3.3.x raises, on the first CPU inference, on Linux x86-64:
+#     NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+#     [pir::ArrayAttribute<pir::DoubleAttribute>]   (onednn_instruction.cc:116)
+# Cause: the PIR->runtime attribute converter has branches for
+# ArrayAttribute<Int32/Int64/Float> but none for DoubleAttribute
+# (PaddlePaddle issue #79749). PaddleOCR defaults to enable_mkldnn=True, so
+# oneDNN is on by default and CPU inference does not work AT ALL out of the
+# box on 3.3.x. Reproduced here on Linux; it is *not* a Windows-only issue,
+# and the widely-posted FLAGS_enable_pir_api=0 workaround does NOT fix it.
+#
+# We pin rather than pass enable_mkldnn=False because disabling oneDNN costs
+# 2.3x (measured: 296 ms/page with oneDNN on 3.2.2 vs 678 ms with it off).
+# If someone must run 3.3.x, the zero-code escape hatch is the environment
+# variable PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 (slower, but it works).
+#
+# Python constraint: PaddleOCR supports 3.8-3.12 only. Production is 3.12.
+# Do not move the image to 3.13.
+paddlepaddle==3.2.2
+paddleocr==3.7.0
+# Tesseract binding for ordinary scanned (non-table) pages. Previously only
+# installed inline by Dockerfile.base, so a plain `pip install -r` produced a
+# broken OCR path.
+pytesseract>=0.3.10
+# cv2 is required by paddlex. NOTE: paddleocr pulls `opencv-contrib-python`
+# (the GUI build), whose cv2 .so links libGL.so.1 / libglib-2.0.so.0 — absent
+# from python:3.12-slim-bookworm. Dockerfile.base therefore normalises every
+# cv2 variant to this headless one AFTER installing paddleocr, and asserts at
+# build time that the result does not link libGL. Declaring it here does not
+# by itself win the race against the transitive pull; install order does.
+opencv-contrib-python-headless>=4.10.0
+
 # torch is required by sentence-transformers (and imported directly by the
 # cross-encoder reranker). Install the lightweight CPU build first per
 # RUNNING.md to avoid the large CUDA wheel:

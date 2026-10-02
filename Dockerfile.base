@@ -16,7 +16,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_DATA_DIR=/data \
     APP_INDEX_DIR=/storage/hybrid_rag \
     APP_MODEL_DIR=/models \
-    APP_MODE=serve
+    APP_MODE=serve \
+    PICODET_MODEL_DIR=/models/PicoDet_layout_1x_table \
+    PADDLE_PDX_CACHE_HOME=/models/paddlex-cache
 
 WORKDIR /app
 
@@ -57,7 +59,53 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
         "pypdf>=5.0.0" \
         "python-docx>=1.1.0" \
         "PyMuPDF>=1.24.0" \
-        "pytesseract>=0.3.10" \
-        "opencv-python-headless"
+        "pytesseract>=0.3.10"
+# NOTE: opencv is deliberately NOT installed here. It is installed by the
+# cv2-normalisation layer below, after paddleocr, because paddleocr pulls a
+# conflicting GUI build. Installing it here as well would only be overwritten.
 
-RUN mkdir -p /data /storage/hybrid_rag /storage/graphrag /models /models/hf-cache
+# ── PicoDet table detector (CPU) ─────────────────────────────────────────
+# paddlepaddle is PINNED to 3.2.2. DO NOT BUMP TO 3.3.x.
+#
+# On 3.3.x the first CPU inference raises, on Linux x86-64:
+#     NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+#     [pir::ArrayAttribute<pir::DoubleAttribute>]  (onednn_instruction.cc:116)
+# The PIR->runtime attribute converter has branches for
+# ArrayAttribute<Int32/Int64/Float> but none for DoubleAttribute (Paddle
+# issue #79749). PaddleOCR sets enable_mkldnn=True by default, so oneDNN is
+# active by default and CPU inference is broken out of the box on 3.3.x.
+# Verified by reproduction on Linux — this is NOT Windows-specific, and the
+# commonly cited FLAGS_enable_pir_api=0 workaround does NOT fix it.
+#
+# We pin instead of forcing enable_mkldnn=False because disabling oneDNN is
+# 2.3x slower (measured: 296 ms/page on 3.2.2 with oneDNN vs 678 ms without).
+# Escape hatch if 3.3.x ever becomes unavoidable: set the environment
+# variable PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0 at runtime. No code change.
+RUN pip install \
+        "paddlepaddle==3.2.2" \
+        "paddleocr==3.7.0"
+
+# ── cv2 normalisation (MUST stay after paddleocr) ────────────────────────
+# paddleocr/paddlex depend on `opencv-contrib-python`, the GUI build, whose
+# cv2 .so links libGL.so.1, libglib-2.0.so.0, libGLdispatch.so.0, libGLX.so.0.
+# python:3.12-slim-bookworm ships none of them, so importing cv2 would fail
+# with "ImportError: libGL.so.1: cannot open shared object file". Every cv2
+# variant installs into the same `cv2` package, so the last install wins:
+# uninstall them all, then install only the headless contrib build.
+# The alternative (apt-get install libgl1 libglib2.0-0) drags ~100 MB of
+# X/GL into a headless server image; this way no GL dependency exists.
+RUN pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless \
+ && pip install --no-cache-dir "opencv-contrib-python-headless>=4.10.0"
+
+# Fail the BUILD, not the first PDF of the nightly run, if the above did not
+# hold: imports must succeed, paddle must be the pinned version, and the cv2
+# shared object must not link libGL.
+RUN python -c "import glob, subprocess, sys, cv2, paddle, paddleocr; \
+assert paddle.__version__ == '3.2.2', 'paddle must be 3.2.2, got ' + paddle.__version__; \
+so = glob.glob(cv2.__path__[0] + '/cv2*.so')[0]; \
+out = subprocess.run(['ldd', so], capture_output=True, text=True).stdout; \
+sys.exit('FATAL: cv2 links libGL (GUI build leaked in): ' + so) if 'libGL.so' in out else None; \
+print('OK  cv2', cv2.__version__, 'headless | paddle', paddle.__version__, '| paddleocr', paddleocr.__version__)"
+
+RUN mkdir -p /data /storage/hybrid_rag /storage/graphrag /models /models/hf-cache \
+             /models/paddlex-cache

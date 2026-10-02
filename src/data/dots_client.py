@@ -372,6 +372,33 @@ def _distinct_ngram_ratio(text: str, n: int = 10) -> tuple[float, str]:
     return len(counts) / total, " ".join(gram)
 
 
+def _distinct_char_ngram_ratio(text: str, n: int = 40) -> tuple[float, str]:
+    """Distinct-ratio over CHARACTER n-grams, for loops with no whitespace.
+
+    Necessary because a looping HTML table is frequently emitted as one
+    unbroken line with no spaces, e.g.
+    ``<table><tr><td>...</td></tr><tr><td>...</td></tr>...``. That defeats
+    the line check (one line) and the word check (``str.split`` yields a
+    single token), so the most likely real-world shape of the documented
+    dots.ocr repetition failure would otherwise pass validation.
+
+    For a unit of length ``u`` repeated ``k`` times the ratio tends to
+    ``1/k``, which is what lets the threshold be derived from the same
+    "maximum acceptable repeats" knob the line check uses. Varied text sits
+    near 1.0.
+    """
+    sample = (text or "")[:200_000]  # bound the cost on pathological output
+    total = len(sample) - n + 1
+    if total < n:
+        return 1.0, ""
+    counts: dict[str, int] = {}
+    for i in range(total):
+        gram = sample[i : i + n]
+        counts[gram] = counts.get(gram, 0) + 1
+    gram, _hits = max(counts.items(), key=lambda kv: kv[1])
+    return len(counts) / total, gram
+
+
 def _tag_count(text: str, tag: str) -> tuple[int, int]:
     opens = len(re.findall(rf"<{tag}\b", text, re.IGNORECASE))
     closes = len(re.findall(rf"</{tag}\s*>", text, re.IGNORECASE))
@@ -462,16 +489,31 @@ def validate_dots_output(
                 "reject",
             )
 
-    # V4 — n-gram saturation, for non-consecutive loops V3 cannot see. Guarded
-    # by a length floor so short legitimate output never trips it.
+    # V4 — n-gram saturation, for loops V3 cannot see. Guarded by a length
+    # floor so short legitimate output never trips it. Two passes:
+    #   * word 10-grams  — whitespace-separated loops
+    #   * char 40-grams  — loops with no whitespace at all (unbroken HTML)
     if len(haystack) > 2000:
         ratio, gram = _distinct_ngram_ratio(haystack)
         if ratio < cfg.min_distinct_ngram_ratio:
             return ValidationResult(
                 False,
                 RULE_NGRAM_SATURATION,
-                f"only {ratio:.2%} of 10-grams are distinct "
+                f"only {ratio:.2%} of word 10-grams are distinct "
                 f"(< {cfg.min_distinct_ngram_ratio:.2%}); top gram {gram[:80]!r}",
+                "reject",
+            )
+        # Threshold derived from the same knob as V3: a unit repeated k times
+        # drives this ratio to ~1/k, so 1/max_line_repeat keeps the two checks
+        # consistent instead of introducing a second arbitrary constant.
+        char_floor = 1.0 / max(cfg.max_line_repeat, 1)
+        char_ratio, char_gram = _distinct_char_ngram_ratio(haystack)
+        if char_ratio < char_floor:
+            return ValidationResult(
+                False,
+                RULE_NGRAM_SATURATION,
+                f"only {char_ratio:.2%} of char 40-grams are distinct "
+                f"(< {char_floor:.2%}); repeated unit {char_gram[:60]!r}",
                 "reject",
             )
 

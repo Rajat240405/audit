@@ -3,7 +3,9 @@ name = "parliamentary-rag"
 version = "0.1.0"
 description = "Hybrid RAG vs GraphRAG on Parliamentary Q&A Data"
 readme = "README.md"
-requires-python = ">=3.11"
+# Upper bound is a hard constraint, not caution: PaddleOCR (table detection)
+# supports Python 3.8-3.12 only. Production runs 3.12.
+requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
 authors = [
     { name = "Parliamentary RAG Team" }
@@ -55,6 +57,20 @@ dependencies = [
     "PyMuPDF>=1.24.0",
     "python-docx>=1.1.0",
     "neo4j>=5.14.0",
+
+    # Table detection: PicoDet layout model via PaddleOCR, CPU.
+    # paddlepaddle is PINNED to 3.2.2 and must NOT be bumped to 3.3.x, which
+    # raises NotImplementedError (ArrayAttribute<DoubleAttribute>, oneDNN PIR
+    # converter) on the first CPU inference. PaddleOCR enables oneDNN by
+    # default, so CPU inference is completely broken on 3.3.x. Pinning is
+    # preferred over enable_mkldnn=False, which costs 2.3x. See the long note
+    # in requirements.txt.
+    "paddlepaddle==3.2.2",
+    "paddleocr==3.7.0",
+    "pytesseract>=0.3.10",
+    # paddleocr pulls the GUI build of cv2, which links libGL (absent in
+    # slim images); Dockerfile.base normalises to this headless build.
+    "opencv-contrib-python-headless>=4.10.0",
 
     # Testing
     "pytest>=8.2.0",

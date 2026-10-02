@@ -92,7 +92,7 @@ _ENV_CPU_THREADS = "PICODET_CPU_THREADS"
 
 _DEFAULT_MODEL_NAME = "PicoDet_layout_1x_table"
 
-_backend: Callable[[bytes], Sequence[Any]] | None = None
+_backend: Callable[[bytes, float], Sequence[Any]] | None = None
 _backend_name: str = "none"
 _lock = threading.Lock()
 
@@ -189,10 +189,10 @@ def detector_version() -> str:
 # ── backend management ───────────────────────────────────────────────────────
 
 
-def set_backend(fn: Callable[[bytes], Sequence[Any]] | None, *, name: str = "injected") -> None:
+def set_backend(fn: Callable[[bytes, float], Sequence[Any]] | None, *, name: str = "injected") -> None:
     """Install a detection backend.
 
-    ``fn(image_bytes)`` returns an iterable of raw detections. Each item may be
+    ``fn(image_bytes, threshold)`` returns an iterable of raw detections. Each item may be
     a :class:`TableBox`, a mapping, or a sequence — :func:`_normalise_detection`
     accepts all three. Used by tests and by any future detector swap; the
     production backend is built lazily by :func:`_load_backend`.
@@ -208,7 +208,7 @@ def reset_backend() -> None:
     set_backend(None)
 
 
-def _load_backend() -> Callable[[bytes], Sequence[Any]]:
+def _load_backend() -> Callable[[bytes, float], Sequence[Any]]:
     """Build the production PaddleOCR/PaddleX PicoDet backend. CPU-pinned."""
     global _backend, _backend_name
     if _backend is not None:
@@ -230,6 +230,27 @@ def _load_backend() -> Callable[[bytes], Sequence[Any]]:
             for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
                 os.environ.setdefault(var, str(threads))
 
+        # Preflight the staged weights before touching Paddle. The production
+        # image sets PICODET_MODEL_DIR=/models/PicoDet_layout_1x_table, which
+        # is a bind mount: if the operator has not staged the weights there,
+        # Paddle's own error is an opaque load failure deep in the predictor.
+        # Checking here turns that into one actionable line. Deliberately only
+        # when the variable is set — leaving it unset keeps the stock
+        # download-to-cache behaviour for local development.
+        if model_dir:
+            weights = os.path.join(model_dir, "inference.pdiparams")
+            if not os.path.isdir(model_dir) or not os.path.isfile(weights):
+                raise TableDetectorUnavailable(
+                    f"PICODET_MODEL_DIR={model_dir!r} does not contain staged "
+                    f"PicoDet weights (expected {weights!r}). The HPC runtime "
+                    "must not fall back to a developer-machine cache. Stage "
+                    f"the {model_name} model into that directory (7.4 MB: "
+                    "inference.pdiparams, inference.json, inference.yml, "
+                    "config.json), or unset PICODET_MODEL_DIR to allow a "
+                    "download, or set PICODET_ENABLED=false to stay on the "
+                    "legacy extraction path."
+                )
+
         try:
             import paddle  # type: ignore
         except ImportError as exc:  # pragma: no cover - env dependent
@@ -247,12 +268,10 @@ def _load_backend() -> Callable[[bytes], Sequence[Any]]:
                 f"could not select PaddlePaddle device {dev!r}: {exc}"
             ) from exc
 
-        if threads:
-            # Paddle's own CPU math threads, separate from the OpenMP vars above.
-            try:
-                paddle.set_num_threads(threads)
-            except Exception:  # noqa: BLE001 - advisory only, never fatal
-                log.debug("paddle.set_num_threads(%s) unavailable", threads)
+        # NOTE: there is deliberately no paddle.set_num_threads() call here.
+        # That API does not exist in Paddle 3.x (verified: hasattr is False),
+        # so it silently did nothing. Inference threads are controlled by the
+        # predictor's own `cpu_threads` argument, set below.
 
         predictor = None
         try:
@@ -262,6 +281,11 @@ def _load_backend() -> Callable[[bytes], Sequence[Any]]:
             if model_dir:
                 kwargs["model_dir"] = model_dir
             kwargs["device"] = dev
+            if threads:
+                # LayoutDetection's own inference-thread count, default 10.
+                # Independent of the OpenMP vars above; without this the
+                # predictor spawns 10 threads regardless of them.
+                kwargs["cpu_threads"] = threads
             predictor = LayoutDetection(**kwargs)
             backend_name = f"paddleocr.LayoutDetection:{model_name}"
         except Exception as exc:  # pragma: no cover - env dependent
@@ -270,7 +294,7 @@ def _load_backend() -> Callable[[bytes], Sequence[Any]]:
                 f"on device {dev!r}: {exc}"
             ) from exc
 
-        def _predict(image_bytes: bytes) -> Sequence[Any]:
+        def _predict(image_bytes: bytes, threshold: float) -> Sequence[Any]:
             import io
 
             import numpy as np
@@ -278,8 +302,12 @@ def _load_backend() -> Callable[[bytes], Sequence[Any]]:
 
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             arr = np.asarray(img)
-            # threshold is applied by _filter_tables so one code path owns it
-            results = predictor.predict(arr)
+            # The threshold MUST be pushed into predict(). PaddleX otherwise
+            # applies the model's own `draw_threshold` (0.5 in this model's
+            # inference.yml) and silently discards every box below it, so a
+            # configured 0.25 would never widen recall — only a client-side
+            # filter above 0.5 would have had any effect.
+            results = predictor.predict(arr, threshold=threshold)
             out: list[Any] = []
             for res in results or []:
                 payload = res
@@ -398,7 +426,7 @@ def detect_tables(image_bytes: bytes, *, threshold: float | None = None) -> list
     backend = _load_backend()
     thr = score_threshold() if threshold is None else float(threshold)
     try:
-        raw = backend(image_bytes)
+        raw = backend(image_bytes, thr)
     except Exception as exc:  # noqa: BLE001 - surface as a typed failure
         raise TableDetectorUnavailable(f"PicoDet inference failed: {exc}") from exc
     return _filter_tables(raw, thr)
