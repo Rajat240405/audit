@@ -252,11 +252,37 @@ def _page_text(page) -> str:
     return "\n".join(head + rows + tail) + "\n"
 
 
-def extract_pdf_text(data: bytes, enable_ocr: bool = True) -> str | None:
+#: ``mode="dots_only"`` — every page goes straight to DOTS OCR. No PicoDet,
+#: no table detection, no Tesseract, no legacy strategy, no fallback. Used by
+#: the INCOIS tender ("budget") collection, where DOTS was chosen on
+#: extraction quality and the alternatives were explicitly rejected.
+MODE_AUTO = "auto"
+MODE_DOTS_ONLY = "dots_only"
+
+
+def extract_pdf_text(
+    data: bytes,
+    enable_ocr: bool = True,
+    *,
+    mode: str = MODE_AUTO,
+) -> str | None:
     """Extract whole-document text with multi-page, borderless, bordered, and scanned tables.
 
     Raises DependencyMissingError if PyMuPDF or required OCR is unavailable.
+
+    ``mode`` selects the per-page strategy and is keyword-only with an
+    ``auto`` default, so the public seam every existing caller uses
+    (``extract_pdf_text(data, enable_ocr)``) is unchanged:
+
+    * ``auto``      — the existing behaviour, including the opt-in
+      PicoDet -> DOTS table routing.
+    * ``dots_only`` — DOTS OCR for every page, exclusively. Deliberately
+      bypasses PicoDet, ``find_tables()``, Tesseract and the legacy
+      strategies, and has NO fallback: a failure raises so the caller can
+      record it rather than committing degraded text.
     """
+    if mode not in (MODE_AUTO, MODE_DOTS_ONLY):
+        raise ValueError(f"unknown extraction mode {mode!r}")
     fitz = _import_fitz()
     try:
         doc = fitz.open(stream=data, filetype="pdf")
@@ -266,7 +292,10 @@ def extract_pdf_text(data: bytes, enable_ocr: bool = True) -> str | None:
     try:
         page_payloads = []
         for page_idx, page in enumerate(doc):
-            payload = _extract_page_payload(page, page_idx + 1, enable_ocr=enable_ocr)
+            if mode == MODE_DOTS_ONLY:
+                payload = _extract_page_payload_dots_only(page, page_idx + 1)
+            else:
+                payload = _extract_page_payload(page, page_idx + 1, enable_ocr=enable_ocr)
             page_payloads.append(payload)
 
         stitched_chunks = _stitch_multipage_payloads(page_payloads)
@@ -400,6 +429,35 @@ def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[
     # Strategy 4: Baseline-merged prose
     content = _render_merged(lines)
     return {"page_num": page_num, "type": "prose", "content": content, "tables": []}
+
+
+def _extract_page_payload_dots_only(page, page_num: int) -> dict[str, Any]:
+    """DOTS OCR for one page, exclusively — the INCOIS tender ("budget") route.
+
+    Differs from :func:`_extract_page_payload_dots` in three ways, all of them
+    required by the tender collection's contract:
+
+    * **No detector.** PicoDet is never consulted, so there is no
+      detector-fired-but-no-table case; ``detector_found_table=False`` keeps
+      the corresponding validator rule from firing on a page that is
+      legitimately prose.
+    * **No native-text comparison.** ``native_char_count=0`` because ~92% of
+      these PDFs are image-only scans with no text layer at all; comparing
+      DOTS output against a zero-length native layer would be meaningless.
+    * **No fallback.** Tesseract and the legacy strategies are not reachable
+      from here. DOTS failures propagate so ingestion can record a failure,
+      rather than quietly substituting the lower-quality extraction this
+      category exists to avoid.
+    """
+    from src.data import dots_client
+
+    content = dots_client.get_client().page_to_text(
+        page,
+        page_num,
+        native_char_count=0,
+        detector_found_table=False,
+    )
+    return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
 
 
 def _extract_page_payload_dots(page, page_num: int, lines: list[dict], native_char_count: int) -> dict[str, Any]:

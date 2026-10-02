@@ -6,6 +6,9 @@ Sections (each maps to a page that lists PDFs):
   general  /site/general_reports.jsp   -> documents/Reports/Others/Report_*
   research /site/research_pub.jsp      -> documents/Reports/ResearchPublications/RP_*
   tech     /site/technical_report.jsp  -> documents/Reports/TechnicalReports/TR_*
+  budget   /site/tenders.jsp           -> documents/Tenders/tender_*   (TENDER docs;
+           "budget" is an internal category name only, and the collection is
+           APPEND-ONLY because tenders.jsp is a rolling window)
 
 (RTI disclosures and News PDFs are intentionally excluded — procedural/low
 value for the audit corpus.)
@@ -38,6 +41,13 @@ from pathlib import Path
 
 import httpx
 
+from src.data.tender_scope import (
+    BUDGET_LABEL,
+    TENDER_URL_PATTERN,
+    TENDERS_PAGE,
+    canonical_tender_filename,
+)
+
 BASE = "https://incois.gov.in"
 
 SECTIONS: dict[str, dict] = {
@@ -60,6 +70,27 @@ SECTIONS: dict[str, dict] = {
         "page": "/site/technical_report.jsp",
         "pat": r"/documents/Reports/TechnicalReports/[^\"']+\.pdf",
         "label": "TechnicalReports",
+    },
+    # INCOIS tender documents. "budget" is an INTERNAL CATEGORY NAME ONLY —
+    # these are tender notices (NIT/RFP/EoI), not budget records.
+    #
+    # Two things make this section behave differently from the four above,
+    # both deliberate:
+    #
+    #  * The pattern is narrow (tender_<digits>.pdf) instead of the usual
+    #    [^"']+ wildcard, because /documents/Tenders/ also holds Corrigendum/,
+    #    PreBid/ and logos/ which are explicitly out of scope. See
+    #    src/data/tender_scope.
+    #  * tenders.jsp is a ROLLING WINDOW, not a back-catalogue: it lists only
+    #    tenders whose last date has not passed. Everything else on the site
+    #    lists its full history. Collection is therefore APPEND-ONLY —
+    #    disappearance from the page must never remove a local file. That
+    #    falls out of download_pdf (which only ever writes) plus the fact that
+    #    nothing in this module deletes, and is pinned by tests.
+    "budget": {
+        "page": TENDERS_PAGE,
+        "pat": TENDER_URL_PATTERN,
+        "label": BUDGET_LABEL,
     },
 }
 
@@ -141,6 +172,20 @@ def main() -> None:
             total_urls = len(urls)
             print(f"[{sec}] {total_urls} PDFs -> {out_dir}")
 
+            # Budget/tender only: index what is already on disk by CANONICAL
+            # name. The initial corpus is seeded partly by hand, and a manually
+            # supplied copy routinely carries a browser/Drive duplicate suffix
+            # ("tender_20260908191745 (1).pdf"). Matching on the raw filename
+            # would treat that as absent and download a second copy of the same
+            # tender. Keyed on the canonical stem, the hand-supplied file wins
+            # and the download is skipped.
+            existing_canon: dict[str, Path] = {}
+            if sec == BUDGET_LABEL:
+                for p in out_dir.glob("*.pdf"):
+                    canon = canonical_tender_filename(p.name)
+                    if canon:
+                        existing_canon.setdefault(canon, p)
+
             d = s = f = 0
             for i, url in enumerate(urls, 1):
                 fname = url.split("/")[-1].split("?")[0]
@@ -148,6 +193,14 @@ def main() -> None:
                 if not fname.lower().endswith(".pdf"):
                     fname += ".pdf"
                 dest = out_dir / fname
+                if sec == BUDGET_LABEL:
+                    canon = canonical_tender_filename(fname)
+                    already = existing_canon.get(canon) if canon else None
+                    if already is not None and already.stat().st_size > 10_000:
+                        s += 1
+                        print(f"  [{i}/{total_urls}] skipped (already held as "
+                              f"{already.name}) {fname}")
+                        continue
                 status, detail = download_pdf(client, url, dest)
                 if status == "downloaded":
                     d += 1

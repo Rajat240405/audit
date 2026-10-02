@@ -191,6 +191,7 @@ _BUILTIN_SOURCES: dict[str, dict] = {
             "incois_reports/Others",
             "incois_reports/TechnicalReports",
             "incois_reports/ResearchPublications",
+            "incois_reports/budget",
             "scanned_ocr",
         ],
         "description": "Legacy flat INCOIS crawler layout (+ scanned OCR).",

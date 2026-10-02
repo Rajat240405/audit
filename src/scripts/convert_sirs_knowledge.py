@@ -34,6 +34,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.data.tender_scope import is_budget_path
 from src.models.qa_record import QARecord, QARecordMetadata
 
 
@@ -474,6 +475,69 @@ def _convert_dfg_pdf(path: Path, out: list[QARecord], seen: set[str], *,
     return 0
 
 
+def _convert_budget_tender_pdf(path: Path, out: list[QARecord], seen: set[str],
+                               doc_type: str = "tender", *, org=None, source=None,
+                               ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
+    """Convert one INCOIS tender PDF using DOTS OCR exclusively.
+
+    "budget" is an internal category name; these are tender documents.
+
+    Failure policy (requirement 5): no fallback to PicoDet routing, the
+    generic table pipeline, TATR or Tesseract. A DOTS failure returns 0 —
+    the same "no record produced" outcome every other extraction failure in
+    this module has — after logging the reason. Returning 0 rather than an
+    empty record is what keeps a failed extraction out of the corpus while
+    leaving any previously ingested row untouched.
+    """
+    from src.data.pdf_table_extract import MODE_DOTS_ONLY, extract_pdf_text
+
+    try:
+        data = path.read_bytes()
+    except Exception as e:  # noqa: BLE001
+        print(f"  [skip tender] {path.name}: unreadable ({e})")
+        return 0
+
+    try:
+        text = extract_pdf_text(data, enable_ocr=False, mode=MODE_DOTS_ONLY)
+    except Exception as e:  # noqa: BLE001
+        # DotsUnavailable / DotsInvalidOutput / transport errors all land here.
+        # Loud, diagnosable, and NOT a silent empty success.
+        print(f"  [fail tender] {path.name}: DOTS extraction failed "
+              f"({type(e).__name__}: {str(e)[:160]}) — no record written, "
+              f"will retry next run")
+        return 0
+
+    if not text or not text.strip():
+        print(f"  [fail tender] {path.name}: DOTS returned no text — no record written")
+        return 0
+
+    _srec = _sibling_record_json(path)
+    _title, _title_source = _resolve_doc_title(path, _srec)
+    _date, _date_source = _resolve_doc_date(path, text, _srec)
+    _label = _title or path.stem
+    rec = _make_record(
+        f"Document: {_label}",
+        text,
+        subject=_label,
+        source_url=str(path),
+        date=_date,
+        document_type=doc_type,
+        title_source=_title_source,
+        date_source=_date_source,
+        qa_id=None,
+        pre_cleaned=False,
+        org=org, source=source, ministry=ministry, default_ministry=default_ministry,
+    )
+    # Content-hash identity: a manually supplied copy and a scraped copy of the
+    # same tender collapse to one question_id, so the dedup requirement holds
+    # even when the two arrive under different filenames.
+    if rec and rec.question_id not in seen:
+        seen.add(rec.question_id)
+        out.append(rec)
+        return 1
+    return 0
+
+
 def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
                       doc_type: str = "document", *, org=None, source=None,
                       ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
@@ -486,6 +550,22 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
         return _convert_dfg_pdf(path, out, seen, srec=_srec0, org=org,
                                 source=source, ministry=ministry,
                                 default_ministry=default_ministry)
+
+    # INCOIS tender ("budget") family: DOTS OCR only.
+    #
+    # Placed ahead of the INCOIS V2 / generic branches on purpose — those would
+    # otherwise claim these files (org == incois) and run enhanced_core_text,
+    # _extract_text_subprocess or Tesseract. DOTS was selected for tender
+    # documents on extraction quality and the alternatives were explicitly
+    # rejected, so there is deliberately NO fallback here: if DOTS fails the
+    # document is skipped and reported, exactly like any other extraction
+    # failure in this function, and the next run retries it. It must never
+    # produce an empty-but-successful record.
+    if is_budget_path(path):
+        return _convert_budget_tender_pdf(
+            path, out, seen, doc_type=doc_type, org=org, source=source,
+            ministry=ministry, default_ministry=default_ministry,
+        )
 
     # MoES (non-DfG) family: the validated V2 core extraction engine first,
     # legacy extraction as the byte-identical fallback. Strictly after the DfG
