@@ -47,7 +47,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, NamedTuple, Sequence
 
 __all__ = [
@@ -889,6 +889,41 @@ class DotsClient:
 
 _client: DotsClient | None = None
 _client_lock = threading.Lock()
+_fallback_client: DotsClient | None = None
+_fallback_lock = threading.Lock()
+
+#: Prompt used for the ONE per-page retry after the normal prompt fails.
+#: Already present in ``PROMPTS`` — a plain-text transcription prompt with no
+#: layout JSON contract, so it degrades gracefully on the pages that defeat
+#: the layout prompt (endless repetition, truncation, unparseable JSON).
+FALLBACK_PROMPT_MODE = "prompt_ocr"
+
+
+def get_fallback_client(cfg: DotsConfig | None = None) -> DotsClient:
+    """Client for the single per-page fallback attempt (``prompt_ocr``).
+
+    Same endpoint, same transport, same ``_post_chat`` — therefore the SAME
+    process-wide DOTS semaphore. A fallback retry consumes a normal DOTS slot
+    and can never bypass the global concurrency limit.
+
+    Cached: one extra instance per process, not one per page. ``expects_json``
+    is False for this prompt mode, so the validator automatically skips the
+    JSON/layout rules and ``page_to_text`` returns the plain ``[pN] line``
+    form that the rest of the pipeline already consumes.
+    """
+    global _fallback_client
+    if cfg is not None:
+        return DotsClient(replace(cfg, prompt_mode=FALLBACK_PROMPT_MODE))
+    if _fallback_client is None:
+        with _fallback_lock:
+            if _fallback_client is None:
+                # Built from the environment, not from get_client(): the
+                # fallback must stay available even when the primary client
+                # has been swapped out (tests, alternate configs).
+                _fallback_client = DotsClient(
+                    replace(DotsConfig.from_env(),
+                            prompt_mode=FALLBACK_PROMPT_MODE))
+    return _fallback_client
 
 
 def get_client(cfg: DotsConfig | None = None) -> DotsClient:
@@ -908,3 +943,5 @@ def reset_client() -> None:
     global _client
     with _client_lock:
         _client = None
+    global _fallback_client
+    _fallback_client = None

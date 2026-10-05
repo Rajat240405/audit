@@ -250,7 +250,15 @@ def qa_content_hash(rec) -> str:
     _meta = d.get("metadata")
     if isinstance(_meta, dict):
         for _k in ("question_text_source", "answer_text_source",
-                   "text_selection_reason"):
+                   "text_selection_reason",
+                   # Human-correction guard: same rule, same reason. Added
+                   # after the corpus was built, so dumping them as null
+                   # would re-hash all ~2.6k rows and force a full GraphRAG
+                   # re-extraction for a change that touched no text. When a
+                   # human DOES set them the record was genuinely edited, so
+                   # they belong in the hash then.
+                   "manual_override", "manual_override_at",
+                   "manual_override_note"):
             if _meta.get(_k) is None:
                 _meta.pop(_k, None)
     blob = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -536,6 +544,7 @@ def ingest_folder(folder: str, move_processed: bool = False,
     # seed seen with existing corpus ids
     # (and, for the OCR-cost guard, the newest scraped_at per source_url)
     _ingested_ts: dict[str, float] = {}
+    _manual_override_urls: set[str] = set()
     if CORPUS.exists():
         for line in open(CORPUS, encoding="utf-8"):
             line = line.strip()
@@ -545,8 +554,16 @@ def ingest_folder(folder: str, move_processed: bool = False,
                 r = json.loads(line)
                 if r.get("question_id"):
                     seen.add(r["question_id"])
+                _m = r.get("metadata") or {}
+                # Human-correction guard: collected ALWAYS, independently of
+                # _skip_unchanged, because the protection must hold even when
+                # the OCR-cost guard is disabled.
+                if _m.get("manual_override") is True:
+                    _u = _m.get("source_url")
+                    if _u:
+                        _manual_override_urls.add(_u)
                 if _skip_unchanged:
-                    url = (r.get("metadata") or {}).get("source_url")
+                    url = _m.get("source_url")
                     ts = _parse_ts(r.get("scraped_at"))
                     if url and ts is not None:
                         prev = _ingested_ts.get(url)
@@ -578,6 +595,19 @@ def ingest_folder(folder: str, move_processed: bool = False,
         # touched since its row was written is NOT converted again. This is
         # what stops the nightly run from re-OCRing every scanned PDF (5–14
         # min each) only to discard the text at the id-dedup check below.
+        # Human-correction guard. Checked BEFORE the mtime guard: a manually
+        # corrected record is protected even when the PDF has a newer mtime
+        # and would normally be eligible for re-ingestion. Skipping here also
+        # means no DOTS/OCR work is spent on a file whose record we are not
+        # allowed to replace. Clearing metadata.manual_override hands the
+        # file back to automatic ingestion on the next run.
+        if str(f) in _manual_override_urls:
+            unchanged += 1
+            log(f"  [manual-override] preserving manually corrected record "
+                f"for {f.name}")
+            log(f"  [source changed] automatic replacement suppressed "
+                f"({f.name})")
+            continue
         if _skip_unchanged:
             ts = _ingested_ts.get(str(f))
             if ts is not None:

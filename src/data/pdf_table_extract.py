@@ -439,6 +439,24 @@ def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[
     return {"page_num": page_num, "type": "prose", "content": content, "tables": []}
 
 
+#: Written into the extracted text when BOTH the normal DOTS prompt and the
+#: single ``prompt_ocr`` fallback fail for a page. Never silently drop a page:
+#: downstream RAG users must be able to see that the page existed, that
+#: extraction failed, and that content is missing. No content is invented.
+DOTS_PAGE_SKIPPED_REASON = "extraction_failed"
+DOTS_PAGE_SKIPPED_TOKEN = "[DOTS_PAGE_SKIPPED: " + DOTS_PAGE_SKIPPED_REASON + "]"
+
+
+def page_skipped_marker(page_num: int) -> str:
+    """``[p25] [DOTS_PAGE_SKIPPED: extraction_failed]``
+
+    Uses the existing ``[pN] `` page-prefix convention that
+    ``DotsClient.page_to_text`` already emits for plain-text pages, so the
+    marker aggregates into the document exactly like any other page.
+    """
+    return f"[p{page_num}] {DOTS_PAGE_SKIPPED_TOKEN}"
+
+
 def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[str, Any]]:
     """Run DOTS over every page of *doc* with bounded PAGE-level concurrency.
 
@@ -463,6 +481,7 @@ def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[
     ``workers == 1`` takes a plain sequential loop: no pool, no futures.
     """
     from src.data import dots_client
+    from src.data.dots_client import DotsInvalidOutput, DotsUnavailable
     from src.utils.concurrency import dots_concurrency, dots_executor
 
     total = doc.page_count
@@ -472,6 +491,10 @@ def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[
     client = dots_client.get_client()
     label = doc_label or "pdf"
     workers = min(dots_concurrency(), total)
+
+    # Page-level fault tolerance bookkeeping (guarded by done_lock).
+    skipped_pages: list[int] = []
+    fallback_pages: list[int] = []
 
     # Progress logging: every page for short documents, ~10 updates for long
     # ones. Keeps the "page 3/11 completed" trace without spamming a 300-page
@@ -493,15 +516,55 @@ def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[
         return client.page_image(doc[page_index])
 
     def _infer(page_index: int, png: bytes) -> str:
-        content = client.page_to_text(
-            None,
-            page_index + 1,
-            native_char_count=0,
-            detector_found_table=False,
-            image_bytes=png,
-        )
-        _note_done(page_index + 1)
-        return content
+        """Extract ONE page: normal prompt -> one prompt_ocr retry -> skip.
+
+        Page-level fault tolerance. A page that defeats both attempts becomes
+        an explicit skip marker instead of killing the document. Only
+        document-level problems (unreadable PDF, every page failing) still
+        fail the whole document.
+        """
+        page_num = page_index + 1
+        try:
+            content = client.page_to_text(
+                None, page_num, native_char_count=0,
+                detector_found_table=False, image_bytes=png,
+            )
+            _note_done(page_num)
+            return content
+        except (DotsUnavailable, DotsInvalidOutput, RuntimeError) as first_exc:
+            log.warning("[DOTS] FAILED: %s page %d (%s: %s)",
+                        label, page_num, type(first_exc).__name__,
+                        str(first_exc)[:200])
+
+        # Exactly ONE fallback attempt, through the same client stack and
+        # therefore the same global DOTS semaphore.
+        log.warning("[DOTS] RETRY prompt_ocr: %s page %d", label, page_num)
+        try:
+            fb = dots_client.get_fallback_client()
+            content = fb.page_to_text(
+                None, page_num, native_char_count=0,
+                detector_found_table=False, image_bytes=png,
+            )
+            if content and content.strip():
+                log.warning("[DOTS] RETRY OK (prompt_ocr): %s page %d", label, page_num)
+                with done_lock:
+                    fallback_pages.append(page_num)
+                _note_done(page_num)
+                return content
+            raise DotsInvalidOutput(
+                f"prompt_ocr returned empty output on page {page_num}",
+                rule="empty_output", detail="fallback produced no text")
+        except (DotsUnavailable, DotsInvalidOutput, RuntimeError) as second_exc:
+            log.warning("[DOTS] RETRY FAILED: %s page %d (%s: %s)",
+                        label, page_num, type(second_exc).__name__,
+                        str(second_exc)[:200])
+
+        # No second retry. The page becomes an explicit, visible gap.
+        log.error("[DOTS] PAGE SKIPPED: %s page %d", label, page_num)
+        with done_lock:
+            skipped_pages.append(page_num)
+        _note_done(page_num)
+        return page_skipped_marker(page_num)
 
     results: list[str | None] = [None] * total
 
@@ -540,6 +603,27 @@ def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[
         if errors:
             # Lowest page number wins so the failure is reproducible.
             raise errors[min(errors)]
+
+    # ── end-of-document visibility ──────────────────────────────────────
+    if fallback_pages:
+        log.warning("[DOTS] %s: %d page(s) recovered via prompt_ocr: %s",
+                    label, len(fallback_pages), sorted(fallback_pages))
+    if skipped_pages:
+        log.error("[DOTS] %s: %d of %d page(s) SKIPPED (extraction failed): %s",
+                  label, len(skipped_pages), total, sorted(skipped_pages))
+        # Every page failing is a document-level fault (endpoint down, model
+        # unloaded, auth wrong), not N independent page faults. Writing a
+        # record made only of skip markers would bank a permanent empty
+        # document that the append-only corpus never retries, so this stays a
+        # hard failure and the next run picks the file up again.
+        if len(skipped_pages) == total:
+            raise DotsUnavailable(
+                f"all {total} page(s) failed DOTS extraction for {label} "
+                f"(normal prompt and prompt_ocr fallback) — treating as a "
+                f"document-level failure, not {total} skipped pages")
+    else:
+        log.info("[DOTS] %s: %d/%d page(s) extracted, 0 skipped",
+                 label, total, total)
 
     return [
         {"page_num": i + 1, "type": DOTS_PAYLOAD_TYPE, "content": results[i], "tables": []}

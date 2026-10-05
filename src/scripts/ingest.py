@@ -718,6 +718,7 @@ def _replace_corpus_rows(replacements: dict[str, QARecord],
     out_lines: list[str] = []
     replaced: set[str] = set()
     dropped: set[str] = set()
+    protected: set[str] = set()
     for line in corpus.open(encoding="utf-8"):
         s = line.strip()
         if not s:
@@ -734,11 +735,26 @@ def _replace_corpus_rows(replacements: dict[str, QARecord],
             dropped.add(rid)
             continue
         if rid in replacements:
+            # Human-correction guard (second line of defence; ingest_folder
+            # already refuses to re-extract these files). A manually
+            # corrected row is never overwritten by an automatic
+            # replacement, however the replacement was produced.
+            try:
+                _m = json.loads(s).get("metadata") or {}
+            except Exception:  # noqa: BLE001
+                _m = {}
+            if _m.get("manual_override") is True:
+                print(f"  [manual-override] preserving manually corrected "
+                      f"record for {_m.get('source_url') or rid}")
+                print("  [source changed] automatic replacement suppressed")
+                out_lines.append(line.rstrip("\n"))
+                protected.add(rid)
+                continue
             out_lines.append(replacements[rid].model_dump_json())
             replaced.add(rid)
         else:
             out_lines.append(line.rstrip("\n"))
-    for rid in sorted(set(replacements) - replaced):
+    for rid in sorted(set(replacements) - replaced - protected):
         out_lines.append(replacements[rid].model_dump_json())
         replaced.add(rid)
     write_text_atomic(corpus, "\n".join(out_lines) + "\n")

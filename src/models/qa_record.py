@@ -281,6 +281,33 @@ class QARecordMetadata(BaseModel):
         examples=["legacy/dpi200"],
     )
 
+    # ── Human-correction guard ───────────────────────────────────────────
+    # These MUST be declared here. The model ignores unknown keys, so a flag
+    # hand-written into corpus_reports.jsonl would be silently discarded the
+    # next time the row was parsed — and the protection would never engage.
+    manual_override: bool | None = Field(
+        default=None,
+        description="True when a human has manually corrected this record. "
+                    "Automatic ingestion must not overwrite or replace it, "
+                    "even when the source document changes and would "
+                    "otherwise be eligible for re-extraction. Clearing the "
+                    "flag (remove it or set false) hands the record back to "
+                    "automatic ingestion. None/absent for untouched records.",
+        examples=[True],
+    )
+    manual_override_at: str | None = Field(
+        default=None,
+        description="ISO-8601 timestamp of the manual correction. "
+                    "Informational only — the guard keys on manual_override.",
+        examples=["2026-10-05T11:30:00Z"],
+    )
+    manual_override_note: str | None = Field(
+        default=None,
+        description="Free-text reason for the manual correction, e.g. which "
+                    "OCR-extracted fact was wrong and what it was corrected to.",
+        examples=["corrected EMD amount mis-OCRed as 50,000 (actual 5,00,000)"],
+    )
+
 
 class QARecord(BaseModel):
     """
