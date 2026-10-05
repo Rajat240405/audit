@@ -502,7 +502,8 @@ def _convert_dots_only_pdf(path: Path, out: list[QARecord], seen: set[str],
         return 0
 
     try:
-        text = extract_pdf_text(data, enable_ocr=False, mode=MODE_DOTS_ONLY)
+        text = extract_pdf_text(data, enable_ocr=False, mode=MODE_DOTS_ONLY,
+                                doc_label=path.name)
     except Exception as e:  # noqa: BLE001
         # DotsUnavailable / DotsInvalidOutput / transport errors all land here.
         # Loud, diagnosable, and NOT a silent empty success.

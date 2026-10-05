@@ -32,6 +32,7 @@ from src.scraping.http import CrawlHttpClient, HttpApiError, HttpTransportError
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
 from src.scraping.rs.client import RsClient
 from src.scraping.rs.documents import plan_slots, process_slot
+from src.utils.concurrency import bounded_map, rs_document_workers
 from src.scraping.rs.normalize import build_record, sort_key, utcnow_iso
 from src.utils.atomic_io import write_bytes_atomic
 
@@ -304,6 +305,39 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
     failed_slots: list[dict[str, Any]] = []
     fallback_wanted = ctx.policy.get("extract_fallback", True)
 
+    # ── Phase 1: download document slots with bounded concurrency ──────────
+    # Concurrency unit = ONE DOCUMENT SLOT (record x language). Downloading,
+    # magic-sniffing, classifying and atomic staging happen here in parallel;
+    # every shared-state mutation (report counters, doc_manifest,
+    # failed_slots, backfill carry-forward, answer fallback) stays in the
+    # sequential loop below in the original order, so the manifest and
+    # qa.jsonl are byte-identical no matter what order workers finish in.
+    slot_results: dict[tuple[str, str], Any] = {}
+    if ctx.opts.fetch_documents:
+        pending: list[tuple[str, Any, Any]] = []
+        for rec, raw in pairs:
+            rid = rec["question_id"]
+            qslno = rec["metadata"]["qslno"]
+            for slot in plan_slots(raw):
+                carried = _prior_failed_entry(old_manifest, rid, slot.lang)
+                if carried and not ctx.opts.retry_failed:
+                    continue
+                pending.append((rid, qslno, slot))
+
+        if pending:
+            workers = min(rs_document_workers(), len(pending))
+
+            def _fetch_one(task: tuple[str, Any, Any]):
+                _rid, t_qslno, t_slot = task
+                return process_slot(ctx.http, t_slot, session_dir, t_qslno)
+
+            print(f"  [rs] fetching {len(pending)} document slot(s) "
+                  f"with {workers} worker(s)", flush=True)
+            fetched = bounded_map(_fetch_one, pending, workers,
+                                  thread_name_prefix="rs-slot")
+            for (t_rid, _qslno, t_slot), res in zip(pending, fetched):
+                slot_results[(t_rid, t_slot.lang)] = res
+
     for rec, raw in pairs:
         meta = rec["metadata"]
         rid = rec["question_id"]
@@ -322,7 +356,8 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
                                                     "cause": carried["cause"]}
                     continue
 
-                result, body, written = process_slot(ctx.http, slot, session_dir, qslno)
+                # Prefetched in phase 1 (same slot set, same arguments).
+                result, body, written = slot_results[(rid, slot.lang)]
                 facts = result.facts
                 backfilled: dict[str, Any] | None = None
                 if facts.doc_class in ("broken", "missing"):

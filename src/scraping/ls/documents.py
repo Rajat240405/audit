@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import threading
 import re
 import time
 from dataclasses import dataclass, field
@@ -173,17 +174,65 @@ def strip_random_suffix(url: str) -> str | None:
 
 class UrlCache:
     """Per-session URL → (facts, body, rel_path) — one fetch, one stored
-    document, N record references (grouped-answer annexes)."""
+    document, N record references (grouped-answer annexes).
+
+    Thread-safe and SINGLE-FLIGHT. With concurrent slot workers a plain
+    check-then-fetch would let two workers miss the same URL simultaneously
+    and both download it, breaking the "one URL = one fetch = one stored
+    document" contract. :meth:`claim` makes exactly one worker the fetcher;
+    any other worker asking for the same URL blocks until the fetcher calls
+    :meth:`put` (or :meth:`abandon`) and then reuses its result.
+
+    Sequential callers are unaffected: with one thread nothing ever blocks.
+    """
 
     def __init__(self) -> None:
         self._hits: dict[str, tuple[DocFacts, bytes | None, str | None, dict[str, Any]]] = {}
+        self._lock = threading.Lock()
+        self._inflight: dict[str, threading.Event] = {}
 
     def get(self, url: str) -> tuple[DocFacts, bytes | None, str | None, dict[str, Any]] | None:
-        return self._hits.get(url)
+        with self._lock:
+            return self._hits.get(url)
 
     def put(self, url: str, facts: DocFacts, body: bytes | None,
             rel_path: str | None, extra: dict[str, Any]) -> None:
-        self._hits[url] = (facts, body, rel_path, dict(extra))
+        with self._lock:
+            self._hits[url] = (facts, body, rel_path, dict(extra))
+            ev = self._inflight.pop(url, None)
+        if ev is not None:
+            ev.set()
+
+    def abandon(self, url: str) -> None:
+        """Release waiters after a failed fetch (they will retry themselves)."""
+        with self._lock:
+            ev = self._inflight.pop(url, None)
+        if ev is not None:
+            ev.set()
+
+    def claim(self, url: str):
+        """Return ``(hit, owned)``.
+
+        ``hit``   — the cached entry when one exists (possibly after waiting
+                    for the in-flight fetcher), else None.
+        ``owned`` — True when THIS caller must perform the fetch and is
+                    responsible for calling :meth:`put` or :meth:`abandon`.
+        """
+        while True:
+            with self._lock:
+                hit = self._hits.get(url)
+                if hit is not None:
+                    return hit, False
+                ev = self._inflight.get(url)
+                if ev is None:
+                    self._inflight[url] = threading.Event()
+                    return None, True
+            ev.wait()
+            # Loop: the fetcher either populated the entry or abandoned it.
+            with self._lock:
+                if url not in self._hits and url not in self._inflight:
+                    self._inflight[url] = threading.Event()
+                    return None, True
 
 
 def _fetch_annex(http: CrawlHttpClient, url: str, *,
@@ -259,70 +308,80 @@ def process_slot(
 
     # one fetch per URL per session — grouped-answer annexes resolve to the
     # same stored file for every referencing record
-    cached = cache.get(url) if cache is not None and url else None
-    if cached is not None:
-        facts, body, rel_path, extra = cached
+    use_cache = cache is not None and bool(url)
+    owned = False
+    if use_cache:
+        cached, owned = cache.claim(url)
+        if cached is not None:
+            facts, body, rel_path, extra = cached
+            return SlotOutcome(
+                SlotResult(key=key, lang=slot.lang, url=url, facts=facts,
+                           path=rel_path, extra=dict(extra)),
+                body, False, dict(extra),
+            )
+
+    _claim_resolved = False
+    try:
+        extra: dict[str, Any] = {}
+        if slot.kind == "dspace-handle":
+            body, status, extra = _fetch_dspace(http, url)
+        elif slot.kind == "annex":
+            body, status, extra = _fetch_annex(http, url, suffix_retry=suffix_retry)
+        else:  # "other" — unrecognized shape; still GET it once (bytes decide)
+            try:
+                resp = http.get(url)
+                body, status = resp.body, resp.status
+            except HttpTransportError:
+                body, status = None, None
+
+        if extra.get("resolve_error"):
+            # handle could not be resolved to any bitstream — no document fetch
+            # ever happened; the resolution error IS the slot's cause
+            facts = DocFacts(
+                "broken", "unknown", None, 0,
+                cause=str(extra["resolve_error"]),
+                note="dspace handle resolved to no document bitstream "
+                     "(REST ladder and HTML fallback both exhausted)",
+            )
+        elif status is None:
+            facts = classify_document(None, http_status=None, transport_failed=True)
+        else:
+            facts = classify_document(body or b"", http_status=status)
+        rel_path: str | None = None
+        written = False
+
+        if facts.doc_class in ("good", "partial"):
+            key_base = document_key(url, slot.kind, slot.lang, record_id)
+            ext = format_extension(facts.format)
+            docs_dir = session_dir / DOCUMENTS_DIRNAME
+            staging_dir = session_dir / STAGING_DIRNAME
+            _mkdir_with_retry(staging_dir)
+            staging = staging_dir / f"{key_base}.part"
+            dest = docs_dir / f"{key_base}.{ext}"
+
+            if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == facts.sha256:
+                rel_path = f"{DOCUMENTS_DIRNAME}/{dest.name}"   # adopt — never rewrite
+                _cleanup_staging(staging)
+            else:
+                staging.write_bytes(body)
+                _mkdir_with_retry(docs_dir)
+                write_bytes_atomic(dest, staging.read_bytes())
+                _cleanup_staging(staging)
+                rel_path = f"{DOCUMENTS_DIRNAME}/{dest.name}"
+                written = True
+
+        if use_cache and owned:
+            cache.put(url, facts, body, rel_path, extra)
+            _claim_resolved = True
         return SlotOutcome(
             SlotResult(key=key, lang=slot.lang, url=url, facts=facts,
                        path=rel_path, extra=dict(extra)),
-            body, False, dict(extra),
+            body, written, extra,
         )
-
-    extra: dict[str, Any] = {}
-    if slot.kind == "dspace-handle":
-        body, status, extra = _fetch_dspace(http, url)
-    elif slot.kind == "annex":
-        body, status, extra = _fetch_annex(http, url, suffix_retry=suffix_retry)
-    else:  # "other" — unrecognized shape; still GET it once (bytes decide)
-        try:
-            resp = http.get(url)
-            body, status = resp.body, resp.status
-        except HttpTransportError:
-            body, status = None, None
-
-    if extra.get("resolve_error"):
-        # handle could not be resolved to any bitstream — no document fetch
-        # ever happened; the resolution error IS the slot's cause
-        facts = DocFacts(
-            "broken", "unknown", None, 0,
-            cause=str(extra["resolve_error"]),
-            note="dspace handle resolved to no document bitstream "
-                 "(REST ladder and HTML fallback both exhausted)",
-        )
-    elif status is None:
-        facts = classify_document(None, http_status=None, transport_failed=True)
-    else:
-        facts = classify_document(body or b"", http_status=status)
-    rel_path: str | None = None
-    written = False
-
-    if facts.doc_class in ("good", "partial"):
-        key_base = document_key(url, slot.kind, slot.lang, record_id)
-        ext = format_extension(facts.format)
-        docs_dir = session_dir / DOCUMENTS_DIRNAME
-        staging_dir = session_dir / STAGING_DIRNAME
-        _mkdir_with_retry(staging_dir)
-        staging = staging_dir / f"{key_base}.part"
-        dest = docs_dir / f"{key_base}.{ext}"
-
-        if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == facts.sha256:
-            rel_path = f"{DOCUMENTS_DIRNAME}/{dest.name}"   # adopt — never rewrite
-            _cleanup_staging(staging)
-        else:
-            staging.write_bytes(body)
-            _mkdir_with_retry(docs_dir)
-            write_bytes_atomic(dest, staging.read_bytes())
-            _cleanup_staging(staging)
-            rel_path = f"{DOCUMENTS_DIRNAME}/{dest.name}"
-            written = True
-
-    if cache is not None and url:
-        cache.put(url, facts, body, rel_path, extra)
-    return SlotOutcome(
-        SlotResult(key=key, lang=slot.lang, url=url, facts=facts,
-                   path=rel_path, extra=dict(extra)),
-        body, written, extra,
-    )
+    finally:
+        # Never leave a single-flight waiter blocked on a crashed fetch.
+        if use_cache and owned and not _claim_resolved:
+            cache.abandon(url)
 
 
 def _cleanup_staging(staging: Path) -> None:

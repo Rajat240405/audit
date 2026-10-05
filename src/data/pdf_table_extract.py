@@ -31,11 +31,15 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import math
 import os
 import re
+import threading
 from statistics import median
 from typing import Any, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 _fitz_enabled = True
 
@@ -265,6 +269,7 @@ def extract_pdf_text(
     enable_ocr: bool = True,
     *,
     mode: str = MODE_AUTO,
+    doc_label: str | None = None,
 ) -> str | None:
     """Extract whole-document text with multi-page, borderless, bordered, and scanned tables.
 
@@ -279,7 +284,10 @@ def extract_pdf_text(
     * ``dots_only`` — DOTS OCR for every page, exclusively. Deliberately
       bypasses PicoDet, ``find_tables()``, Tesseract and the legacy
       strategies, and has NO fallback: a failure raises so the caller can
-      record it rather than committing degraded text.
+      record it rather than committing degraded text. Pages are processed
+      with bounded concurrency (see :func:`_extract_dots_only_pages`).
+
+    ``doc_label`` is used only for progress logging.
     """
     if mode not in (MODE_AUTO, MODE_DOTS_ONLY):
         raise ValueError(f"unknown extraction mode {mode!r}")
@@ -290,13 +298,13 @@ def extract_pdf_text(
         raise RuntimeError(f"Corrupted or unreadable PDF stream: {exc}") from exc
 
     try:
-        page_payloads = []
-        for page_idx, page in enumerate(doc):
-            if mode == MODE_DOTS_ONLY:
-                payload = _extract_page_payload_dots_only(page, page_idx + 1)
-            else:
+        if mode == MODE_DOTS_ONLY:
+            page_payloads = _extract_dots_only_pages(doc, doc_label=doc_label)
+        else:
+            page_payloads = []
+            for page_idx, page in enumerate(doc):
                 payload = _extract_page_payload(page, page_idx + 1, enable_ocr=enable_ocr)
-            page_payloads.append(payload)
+                page_payloads.append(payload)
 
         stitched_chunks = _stitch_multipage_payloads(page_payloads)
         res = "\n\n".join(c for c in stitched_chunks if c.strip())
@@ -429,6 +437,114 @@ def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[
     # Strategy 4: Baseline-merged prose
     content = _render_merged(lines)
     return {"page_num": page_num, "type": "prose", "content": content, "tables": []}
+
+
+def _extract_dots_only_pages(doc, *, doc_label: str | None = None) -> list[dict[str, Any]]:
+    """Run DOTS over every page of *doc* with bounded PAGE-level concurrency.
+
+    Concurrency model — the unit of work is a PAGE, not a document. Pages are
+    submitted to the process-wide DOTS pool, so whichever worker frees up
+    first takes the next page; at most ``DOTS_CONCURRENCY`` DOTS requests are
+    ever in flight, enforced globally in ``DotsClient._post_chat``.
+
+    PyMuPDF safety: ``fitz.Document``/``Page`` objects are NOT shared with
+    workers. Every page is rasterised to PNG bytes on THIS thread and only the
+    immutable bytes cross the thread boundary, so no two threads ever touch
+    the same Document. Rendering is interleaved with submission under a
+    bounded window (``workers + 1`` outstanding pages), which keeps peak
+    memory to a handful of page images instead of the whole document.
+
+    Determinism: workers complete out of order, but results are stored by page
+    index and returned in page order, so the assembled text — and therefore
+    the record id, content hash and dedup behaviour — is identical to the
+    sequential path. If several pages fail, the LOWEST page number's exception
+    is the one raised, so a failing document fails the same way every run.
+
+    ``workers == 1`` takes a plain sequential loop: no pool, no futures.
+    """
+    from src.data import dots_client
+    from src.utils.concurrency import dots_concurrency, dots_executor
+
+    total = doc.page_count
+    if total == 0:
+        return []
+
+    client = dots_client.get_client()
+    label = doc_label or "pdf"
+    workers = min(dots_concurrency(), total)
+
+    # Progress logging: every page for short documents, ~10 updates for long
+    # ones. Keeps the "page 3/11 completed" trace without spamming a 300-page
+    # job with 300 lines.
+    step = 1 if total <= 25 else max(1, total // 10)
+    done = 0
+    done_lock = threading.Lock()
+
+    def _note_done(page_num: int) -> None:
+        nonlocal done
+        with done_lock:
+            done += 1
+            n = done
+        if n % step == 0 or n == total:
+            log.info("[%s] page %d/%d completed", label, n, total)
+
+    def _render(page_index: int) -> bytes:
+        """Rasterise one page on the calling thread (never inside a worker)."""
+        return client.page_image(doc[page_index])
+
+    def _infer(page_index: int, png: bytes) -> str:
+        content = client.page_to_text(
+            None,
+            page_index + 1,
+            native_char_count=0,
+            detector_found_table=False,
+            image_bytes=png,
+        )
+        _note_done(page_index + 1)
+        return content
+
+    results: list[str | None] = [None] * total
+
+    if workers <= 1:
+        for i in range(total):
+            results[i] = _infer(i, _render(i))
+    else:
+        pool = dots_executor()
+        window = threading.Semaphore(workers + 1)   # bounds rendered-but-unsent pages
+        errors: dict[int, BaseException] = {}
+        futures: dict[Any, int] = {}
+
+        def _task(idx: int, png: bytes) -> str:
+            try:
+                return _infer(idx, png)
+            finally:
+                window.release()
+
+        try:
+            for i in range(total):
+                window.acquire()
+                try:
+                    png = _render(i)            # main thread only — fitz is safe here
+                except BaseException:
+                    window.release()
+                    raise
+                futures[pool.submit(_task, i, png)] = i
+            for fut, idx in futures.items():
+                try:
+                    results[idx] = fut.result()
+                except BaseException as exc:    # noqa: BLE001 - re-raised below
+                    errors[idx] = exc
+        finally:
+            for fut in futures:
+                fut.cancel()
+        if errors:
+            # Lowest page number wins so the failure is reproducible.
+            raise errors[min(errors)]
+
+    return [
+        {"page_num": i + 1, "type": DOTS_PAYLOAD_TYPE, "content": results[i], "tables": []}
+        for i in range(total)
+    ]
 
 
 def _extract_page_payload_dots_only(page, page_num: int) -> dict[str, Any]:

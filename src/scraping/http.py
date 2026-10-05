@@ -14,6 +14,7 @@ Rules frozen from live validation (2026-08-23):
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -70,6 +71,8 @@ class CrawlHttpClient:
             transport=transport,
         )
         self.request_count = 0
+        # Concurrent slot workers share one client; keep the counter exact.
+        self._count_lock = threading.Lock()
 
     def _pace(self) -> None:
         if self.delay > 0:
@@ -81,7 +84,8 @@ class CrawlHttpClient:
         for attempt in range(self.retries + 1):
             try:
                 resp = self._client.get(url)
-                self.request_count += 1
+                with self._count_lock:
+                    self.request_count += 1
                 self._pace()
                 return HttpResponse(
                     url=str(resp.url),

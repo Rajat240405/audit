@@ -66,6 +66,7 @@ from src.scraping.ls.config import (
 )
 from src.scraping.ls.discovery import Inventory, dedupe_rows
 from src.scraping.ls.documents import UrlCache, plan_slots, process_slot
+from src.utils.concurrency import bounded_map, ls_document_workers
 from src.scraping.ls.extract import extract_qa
 from src.scraping.ls.normalize import build_record, sort_key, utcnow_iso
 from src.scraping.ls.text_selection import (
@@ -417,6 +418,44 @@ def crawl_session(
     fallback_wanted = ctx.policy.get("extract_fallback", True)
     suffix_retry = ctx.policy.get("annex_suffix_retry", True)
 
+    # ── Phase 1: fetch document slots with bounded concurrency ──────────────
+    # The concurrency unit is ONE DOCUMENT SLOT (record x language) — an
+    # independent network+stage operation. Everything that mutates shared
+    # state (report counters, doc_manifest, failed_slots, record metadata,
+    # answer arbitration) stays in the sequential phase below, in the original
+    # order, so output is byte-identical regardless of completion order.
+    #
+    # Only slots that would actually have been fetched are submitted: a
+    # carried-forward failure with retry_failed=False is skipped here exactly
+    # as it is skipped below.
+    slot_outcomes: dict[tuple[str, str], Any] = {}
+    if ctx.opts.fetch_documents:
+        pending: list[tuple[str, Any, Any]] = []
+        for rec, q in pairs:
+            rid = rec["question_id"]
+            for slot in plan_slots(q):
+                carried = _prior_failed_entry(old_manifest, rid, slot.lang)
+                if carried and not ctx.opts.retry_failed:
+                    continue
+                pending.append((rid, q, slot))
+
+        if pending:
+            workers = min(ls_document_workers(), len(pending))
+
+            def _fetch_one(task: tuple[str, Any, Any]):
+                t_rid, t_q, t_slot = task
+                return process_slot(
+                    ctx.http, t_q, t_slot, session_dir, t_rid,
+                    suffix_retry=suffix_retry, cache=cache,
+                )
+
+            print(f"  [ls] fetching {len(pending)} document slot(s) "
+                  f"with {workers} worker(s)", flush=True)
+            fetched = bounded_map(_fetch_one, pending, workers,
+                                  thread_name_prefix="ls-slot")
+            for (t_rid, _q, t_slot), outcome in zip(pending, fetched):
+                slot_outcomes[(t_rid, t_slot.lang)] = outcome
+
     for rec, q in pairs:
         meta = rec["metadata"]
         rid = rec["question_id"]
@@ -441,10 +480,8 @@ def crawl_session(
                     }
                     continue
 
-                outcome = process_slot(
-                    ctx.http, q, slot, session_dir, rid,
-                    suffix_retry=suffix_retry, cache=cache,
-                )
+                # Prefetched in phase 1 (same slot set, same arguments).
+                outcome = slot_outcomes[(rid, slot.lang)]
                 facts = outcome.result.facts
                 report.docs[facts.doc_class] += 1
                 if outcome.written:

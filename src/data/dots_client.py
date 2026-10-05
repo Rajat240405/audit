@@ -746,7 +746,21 @@ class DotsClient:
     # -- inference -----------------------------------------------------------
 
     def _post_chat(self, image_b64: str) -> tuple[str, str]:
-        """POST one page image. Returns ``(content, finish_reason)``."""
+        """POST one page image, holding one global DOTS slot.
+
+        This is the single chokepoint for DOTS inference, so the invariant
+        "total in-flight DOTS requests <= DOTS_CONCURRENCY" holds no matter
+        which pipeline initiated the request — tender, LS and RS cannot each
+        open their own pool. The slot covers the whole call including retries,
+        because a retry is still an in-flight request to the server.
+        """
+        from src.utils.concurrency import dots_slot
+
+        with dots_slot():
+            return self._post_chat_unlimited(image_b64)
+
+    def _post_chat_unlimited(self, image_b64: str) -> tuple[str, str]:
+        """The unthrottled POST. Call only via :meth:`_post_chat`."""
         import requests
 
         url = f"{self._require_base_url()}/chat/completions"
