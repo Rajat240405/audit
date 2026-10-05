@@ -48,7 +48,7 @@ from src.scripts.convert_sirs_knowledge import (
     convert_pdf_file,
     _DEFAULT_MINISTRY,
 )
-from src.data.tender_scope import BUDGET_DOC_TYPE, is_budget_path
+from src.data.incois_routing import document_type_for, uses_dots_only
 from src.scripts.detect_doc_type import detect_doc_type, readable_type
 
 # Project-root / APP_* paths (never CWD). Same convention as the server.
@@ -174,13 +174,18 @@ def convert_one_detected(path: Path, out: list, seen: set[str], move_after: bool
     # PDF / TXT / MD — smart type detection (category hint from the source
     # registry path, e.g. moes/incois/annual_reports/ -> annual_report, sits
     # below content but above legacy folder/filename heuristics).
-    # INCOIS tender ("budget") files skip the peek entirely. The peek falls
-    # back to Tesseract on scanned PDFs, and ~92% of tenders are image-only
-    # scans — so peeking would run a non-DOTS OCR over this category purely to
-    # guess a type we already know. Category is fixed, so no detection needed.
-    if is_budget_path(path):
+    # DOTS-only INCOIS folders skip the peek entirely. The peek falls back to
+    # Tesseract on scanned PDFs, and these folders are predominantly image-only
+    # scans — so peeking would run a non-DOTS OCR engine over exactly the
+    # documents we routed to DOTS to avoid it. Type comes from the routing
+    # config when it specifies one (budget -> tender), otherwise from the
+    # normal detector working on the path alone.
+    if uses_dots_only(path):
         text_peek = ""
-        doc_type = BUDGET_DOC_TYPE
+        doc_type = document_type_for(path) or detect_doc_type(
+            path, "",
+            category_hint=(meta_context or {}).get("doc_type_hint"),
+        )
     else:
         text_peek = _peek_text(path) if path.suffix.lower() in (".pdf", ".txt", ".md") else ""
         doc_type = detect_doc_type(

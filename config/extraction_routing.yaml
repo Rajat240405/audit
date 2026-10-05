@@ -1,0 +1,46 @@
+# Extraction routing for INCOIS folders — DATA, not code.
+#
+# Consumed by src/data/incois_routing.py. Changing which folders use which
+# extractor is an edit HERE, never a new Python condition.
+#
+# ── The rule ────────────────────────────────────────────────────────────────
+# Every folder under data/incois_reports/ uses the DOTS-OCR-ONLY extraction
+# pipeline, EXCEPT the crawler-managed official report folders listed in
+# `legacy_extraction_folders`, which keep their existing extraction behaviour
+# byte-for-byte.
+#
+# The default is deliberately DOTS-only (deny-list, not allow-list): a new
+# manually curated folder — internal-docs, contracts, circulars, anything —
+# inherits DOTS-only automatically with NO edit to this file and NO code
+# change. You only touch this file to *opt a folder out*.
+#
+# Rationale: the four official folders are machine-published report PDFs with
+# reliable text layers. Manually curated folders are scanned, table-dense
+# office documents (the tender corpus measured 92% image-only), which is
+# exactly the case DOTS was selected for.
+#
+# NOTE: this file controls EXTRACTION ONLY. A new folder must still be
+# registered under `sources.incois.folders` in config/sources.yaml to be
+# ingested at all — that registration is also what puts it in the existing
+# daily cron (the scheduled incois job ingests the whole source).
+
+version: 1
+
+incois:
+  # Parent directory, relative to the data root, whose children are classified.
+  root: incois_reports
+
+  # Folders that KEEP the existing (non-DOTS) extraction path.
+  # These are the four official crawler sections — see SECTIONS in
+  # src/scripts/crawl_incois_reports.py. Matching is case-insensitive.
+  legacy_extraction_folders:
+    - AnnualReports
+    - Others
+    - ResearchPublications
+    - TechnicalReports
+
+  # Optional per-folder document_type overrides. Folders not listed here fall
+  # through to the normal detect_doc_type() heuristics.
+  # "budget" is an INTERNAL CATEGORY NAME ONLY — the documents are tenders.
+  document_types:
+    budget: tender

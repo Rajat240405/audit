@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.data.tender_scope import is_budget_path
+from src.data.incois_routing import uses_dots_only
 from src.models.qa_record import QARecord, QARecordMetadata
 
 
@@ -475,26 +475,30 @@ def _convert_dfg_pdf(path: Path, out: list[QARecord], seen: set[str], *,
     return 0
 
 
-def _convert_budget_tender_pdf(path: Path, out: list[QARecord], seen: set[str],
-                               doc_type: str = "tender", *, org=None, source=None,
-                               ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
-    """Convert one INCOIS tender PDF using DOTS OCR exclusively.
+def _convert_dots_only_pdf(path: Path, out: list[QARecord], seen: set[str],
+                           doc_type: str = "document", *, org=None, source=None,
+                           ministry=None, default_ministry=_DEFAULT_MINISTRY) -> int:
+    """Convert one manually curated INCOIS PDF using DOTS OCR exclusively.
 
-    "budget" is an internal category name; these are tender documents.
+    Applies to every folder under data/incois_reports/ except the four
+    official crawler-managed report folders — budget/ (tender documents,
+    internal category name) and any future manual folder alike. The caller
+    decides via incois_routing.uses_dots_only(); this function never
+    inspects folder names itself.
 
-    Failure policy (requirement 5): no fallback to PicoDet routing, the
-    generic table pipeline, TATR or Tesseract. A DOTS failure returns 0 —
-    the same "no record produced" outcome every other extraction failure in
-    this module has — after logging the reason. Returning 0 rather than an
-    empty record is what keeps a failed extraction out of the corpus while
-    leaving any previously ingested row untouched.
+    Failure policy: no fallback to PicoDet routing, the generic table
+    pipeline, TATR or Tesseract. A DOTS failure returns 0 — the same "no
+    record produced" outcome every other extraction failure in this module
+    has — after logging the reason. Returning 0 rather than an empty record
+    is what keeps a failed extraction out of the corpus while leaving any
+    previously ingested row untouched.
     """
     from src.data.pdf_table_extract import MODE_DOTS_ONLY, extract_pdf_text
 
     try:
         data = path.read_bytes()
     except Exception as e:  # noqa: BLE001
-        print(f"  [skip tender] {path.name}: unreadable ({e})")
+        print(f"  [skip dots] {path.name}: unreadable ({e})")
         return 0
 
     try:
@@ -502,13 +506,13 @@ def _convert_budget_tender_pdf(path: Path, out: list[QARecord], seen: set[str],
     except Exception as e:  # noqa: BLE001
         # DotsUnavailable / DotsInvalidOutput / transport errors all land here.
         # Loud, diagnosable, and NOT a silent empty success.
-        print(f"  [fail tender] {path.name}: DOTS extraction failed "
+        print(f"  [fail dots] {path.name}: DOTS extraction failed "
               f"({type(e).__name__}: {str(e)[:160]}) — no record written, "
               f"will retry next run")
         return 0
 
     if not text or not text.strip():
-        print(f"  [fail tender] {path.name}: DOTS returned no text — no record written")
+        print(f"  [fail dots] {path.name}: DOTS returned no text — no record written")
         return 0
 
     _srec = _sibling_record_json(path)
@@ -528,9 +532,9 @@ def _convert_budget_tender_pdf(path: Path, out: list[QARecord], seen: set[str],
         pre_cleaned=False,
         org=org, source=source, ministry=ministry, default_ministry=default_ministry,
     )
-    # Content-hash identity: a manually supplied copy and a scraped copy of the
-    # same tender collapse to one question_id, so the dedup requirement holds
-    # even when the two arrive under different filenames.
+    # Content-hash identity: two copies of the same document collapse to one
+    # question_id, so the dedup requirement holds even when the copies arrive
+    # under different filenames.
     if rec and rec.question_id not in seen:
         seen.add(rec.question_id)
         out.append(rec)
@@ -551,18 +555,24 @@ def convert_pdf_file(path: Path, out: list[QARecord], seen: set[str],
                                 source=source, ministry=ministry,
                                 default_ministry=default_ministry)
 
-    # INCOIS tender ("budget") family: DOTS OCR only.
+    # Manually curated INCOIS folders: DOTS OCR only.
+    #
+    # The rule is path classification, not a folder name list in code — every
+    # folder under data/incois_reports/ routes here EXCEPT the four official
+    # crawler-managed report folders. A new manual folder therefore inherits
+    # DOTS-only automatically; see src/data/incois_routing.py and
+    # config/extraction_routing.yaml.
     #
     # Placed ahead of the INCOIS V2 / generic branches on purpose — those would
     # otherwise claim these files (org == incois) and run enhanced_core_text,
-    # _extract_text_subprocess or Tesseract. DOTS was selected for tender
+    # _extract_text_subprocess or Tesseract. DOTS was selected for these
     # documents on extraction quality and the alternatives were explicitly
     # rejected, so there is deliberately NO fallback here: if DOTS fails the
     # document is skipped and reported, exactly like any other extraction
     # failure in this function, and the next run retries it. It must never
     # produce an empty-but-successful record.
-    if is_budget_path(path):
-        return _convert_budget_tender_pdf(
+    if uses_dots_only(path):
+        return _convert_dots_only_pdf(
             path, out, seen, doc_type=doc_type, org=org, source=source,
             ministry=ministry, default_ministry=default_ministry,
         )
