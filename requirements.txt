@@ -81,7 +81,7 @@ pytesseract>=0.3.10
 # cv2 variant to this headless one AFTER installing paddleocr, and asserts at
 # build time that the result does not link libGL. Declaring it here does not
 # by itself win the race against the transitive pull; install order does.
-opencv-contrib-python-headless>=4.10.0
+opencv-contrib-python==5.0.0.93
 
 # torch is required by sentence-transformers (and imported directly by the
 # cross-encoder reranker). Install the lightweight CPU build first per

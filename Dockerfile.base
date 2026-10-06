@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
         libgomp1 \
+        libglib2.0-0 \
+        libgl1 \
         tesseract-ocr \
         tesseract-ocr-eng \
         tesseract-ocr-hin \
@@ -86,26 +88,30 @@ RUN pip install \
         "paddleocr==3.7.0"
 
 # ── cv2 normalisation (MUST stay after paddleocr) ────────────────────────
-# paddleocr/paddlex depend on `opencv-contrib-python`, the GUI build, whose
-# cv2 .so links libGL.so.1, libglib-2.0.so.0, libGLdispatch.so.0, libGLX.so.0.
-# python:3.12-slim-bookworm ships none of them, so importing cv2 would fail
-# with "ImportError: libGL.so.1: cannot open shared object file". Every cv2
-# variant installs into the same `cv2` package, so the last install wins:
-# uninstall them all, then install only the headless contrib build.
-# The alternative (apt-get install libgl1 libglib2.0-0) drags ~100 MB of
-# X/GL into a headless server image; this way no GL dependency exists.
-RUN pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless \
- && pip install --no-cache-dir "opencv-contrib-python-headless>=4.10.0"
+# PaddleOCR/PaddleX expect the `opencv-contrib-python` distribution.
+# We intentionally install the full contrib package here because
+# PaddleX 3.7.x checks for that distribution when constructing its
+# PDFReaderBackend.
+#
+# Keep this AFTER paddleocr installation because paddleocr pulls its own
+# OpenCV variant transitively. All OpenCV variants share the same `cv2`
+# package, so remove every variant first, then install exactly one package.
+#
+# Full opencv-contrib-python requires the basic GL/Glib runtime libraries
+# installed above (`libgl1`, `libglib2.0-0`).
+RUN pip uninstall -y opencv-python opencv-contrib-python \
+                    opencv-python-headless opencv-contrib-python-headless \
+ && pip install --no-cache-dir "opencv-contrib-python==5.0.0.93"
 
 # Fail the BUILD, not the first PDF of the nightly run, if the above did not
 # hold: imports must succeed, paddle must be the pinned version, and the cv2
 # shared object must not link libGL.
-RUN python -c "import glob, subprocess, sys, cv2, paddle, paddleocr; \
+# Fail the BUILD, not the first PDF of the run, if the core runtime is wrong.
+RUN python -c "import cv2, paddle, paddleocr, importlib.metadata as md; \
 assert paddle.__version__ == '3.2.2', 'paddle must be 3.2.2, got ' + paddle.__version__; \
-so = glob.glob(cv2.__path__[0] + '/cv2*.so')[0]; \
-out = subprocess.run(['ldd', so], capture_output=True, text=True).stdout; \
-sys.exit('FATAL: cv2 links libGL (GUI build leaked in): ' + so) if 'libGL.so' in out else None; \
-print('OK  cv2', cv2.__version__, 'headless | paddle', paddle.__version__, '| paddleocr', paddleocr.__version__)"
+assert paddleocr.__version__ == '3.7.0', 'paddleocr must be 3.7.0, got ' + paddleocr.__version__; \
+assert md.version('opencv-contrib-python') == '5.0.0.93', 'opencv-contrib-python must be 5.0.0.93'; \
+print('OK cv2', cv2.__version__, '| paddle', paddle.__version__, '| paddleocr', paddleocr.__version__, '| opencv-contrib-python', md.version('opencv-contrib-python'))"
 
 RUN mkdir -p /data /storage/hybrid_rag /storage/graphrag /models /models/hf-cache \
              /models/paddlex-cache
