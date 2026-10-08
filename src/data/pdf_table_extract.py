@@ -108,6 +108,15 @@ DOTS_PAYLOAD_TYPE = "dots_table"
 #: extraction-decision change rather than a silent one.
 _DEFAULT_DPI = 200
 
+#: Per-call extraction strategy. Defined here (above
+#: current_extractor_version) because the version string is mode-aware.
+MODE_AUTO = "auto"
+MODE_DOTS_ONLY = "dots_only"
+#: The INCOIS/MoES V2 enhanced core extraction engine (src/data/v2). It has its
+#: own page routing, OCR, table and figure extraction and imports neither the
+#: DOTS client nor PicoDet — verified: 0 references in src/data/v2.
+MODE_INCOIS_V2 = "incois_v2"
+
 
 def dots_routing_enabled() -> bool:
     """Is PicoDet -> DOTS routing switched on?
@@ -118,11 +127,21 @@ def dots_routing_enabled() -> bool:
     return (os.environ.get("DOTS_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def current_extractor_version() -> str:
+def current_extractor_version(mode: str = MODE_AUTO) -> str:
     """Identifier for the extraction *decisions* currently in force.
 
-    Shape: ``dots-<version>/picodet-<version>/dpi<value>``, or
-    ``legacy/dpi<value>`` when routing is off.
+    The version must describe the pipeline that ACTUALLY RAN, per document —
+    not the globally configured one. Three families:
+
+    * ``dots_only``  -> ``dots-<version>/dots_only/dpi<value>``
+      DOTS is called directly for every page. PicoDet never runs, so naming it
+      here would be false provenance, and a PicoDet threshold change would
+      otherwise invalidate documents PicoDet never touched.
+      Deliberately independent of ``DOTS_ENABLED``: the dots-only route is
+      selected by path (see ``incois_routing``), not by the routing flag, so
+      its version must not flip when that flag is toggled.
+    * ``auto`` + routing on  -> ``dots-<version>/picodet-<version>/dpi<value>``
+    * ``auto`` + routing off -> ``legacy/dpi<value>``
 
     This is extraction-decision metadata, NOT semantic content. It is stored on
     the record (``metadata.extractor_version``) purely so a changed extractor
@@ -130,6 +149,19 @@ def current_extractor_version() -> str:
     version bump alone never marks a record as changed.
     """
     dpi = (os.environ.get("DOTS_RENDER_DPI") or "").strip() or str(_DEFAULT_DPI)
+    if mode == MODE_INCOIS_V2:
+        # The V2 engine never touches DOTS or PicoDet, so neither may appear
+        # here and neither DOTS_ENABLED nor the PicoDet threshold may change
+        # this string — toggling them must not re-extract a V2 document.
+        try:
+            from src.data.v2 import __version__ as _v2ver
+        except Exception:  # noqa: BLE001
+            _v2ver = "unknown"
+        return f"incois_v2@{_v2ver}"
+    if mode == MODE_DOTS_ONLY:
+        from src.data import dots_client
+
+        return f"{dots_client.dots_version()}/dots_only/dpi{dpi}"
     if not dots_routing_enabled():
         return f"legacy/dpi{dpi}"
     from src.data import dots_client, table_detect
@@ -256,12 +288,6 @@ def _page_text(page) -> str:
     return "\n".join(head + rows + tail) + "\n"
 
 
-#: ``mode="dots_only"`` — every page goes straight to DOTS OCR. No PicoDet,
-#: no table detection, no Tesseract, no legacy strategy, no fallback. Used by
-#: the INCOIS tender ("budget") collection, where DOTS was chosen on
-#: extraction quality and the alternatives were explicitly rejected.
-MODE_AUTO = "auto"
-MODE_DOTS_ONLY = "dots_only"
 
 
 def extract_pdf_text(

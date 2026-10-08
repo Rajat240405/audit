@@ -381,6 +381,28 @@ def session_dir_of(root: Path, lok: int, ses: int) -> Path:
     return root / f"lok-{lok}" / f"session-{ses}"
 
 
+
+def _stamp_extractor_version(meta: dict) -> None:
+    """Record WHICH extractor produced a document-extracted answer.
+
+    Without this the corpus has no provenance for LS/RS rows, so a cron run
+    using a weaker extractor (e.g. DOTS_ENABLED=false -> legacy) cannot be
+    distinguished from a genuine content change and silently overwrites the
+    richer text. Only stamped for document-extracted answers: an inline answer
+    did not come from an extractor.
+    """
+    if (meta or {}).get("answer_source") != "document-extract":
+        return
+    try:
+        from src.data.pdf_table_extract import MODE_AUTO, current_extractor_version
+
+        ver = current_extractor_version(MODE_AUTO)
+        if ver:
+            meta["extractor_version"] = ver
+    except Exception:  # noqa: BLE001 - provenance must never break a crawl
+        pass
+
+
 def crawl_session(
     ctx: CrawlContext, inv: Inventory, ses: int, rows: list
 ) -> SessionReport:
@@ -451,9 +473,12 @@ def crawl_session(
 
             print(f"  [ls] fetching {len(pending)} document slot(s) "
                   f"with {workers} worker(s)", flush=True)
-            fetched = bounded_map(_fetch_one, pending, workers,
-                                  thread_name_prefix="ls-slot")
-            for (t_rid, _q, t_slot), outcome in zip(pending, fetched):
+            # Named *_slots deliberately: a bare `fetched` collides with the
+            # inventory variable of the same name in the RS pipeline, which
+            # caused a production manifest crash. Keep the names distinct.
+            fetched_slots = bounded_map(_fetch_one, pending, workers,
+                                        thread_name_prefix="ls-slot")
+            for (t_rid, _q, t_slot), outcome in zip(pending, fetched_slots):
                 slot_outcomes[(t_rid, t_slot.lang)] = outcome
 
     for rec, q in pairs:
@@ -517,6 +542,7 @@ def crawl_session(
             rec, inline_q, inline_a, eng_facts, eng_body, fallback_wanted,
             documents_enabled=bool(ctx.opts.fetch_documents),
         )
+        _stamp_extractor_version(meta)
         if cause is not None:
             report.attention.append(
                 {"id": rid, "reason": f"no usable answer ({cause})"}

@@ -265,6 +265,149 @@ def qa_content_hash(rec) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+#: Orgs whose converter branch runs the V2 enhanced core engine
+#: (convert_pdf_file -> enhanced_core_text for incois; _convert_moes_pdf for
+#: MoES). Both import neither DOTS nor PicoDet.
+_V2_ORGS = frozenset({"incois", "moes_hq"})
+_MODE_V2 = "incois_v2"
+
+
+def _v2_core_active() -> bool:
+    """Is the V2 enhanced core extraction path actually switched on?
+
+    Mirrors the real gate in ``enhanced_core_text``:
+    ``load_v2_config().core_extraction_active`` (``enhanced_extraction and
+    page_routing``, default on). Reading the config imports nothing heavy.
+    """
+    try:
+        from src.data.v2.config import load_v2_config
+
+        return bool(load_v2_config().core_extraction_active)
+    except Exception:  # noqa: BLE001 - a bad/absent config means "not V2"
+        return False
+
+
+def _extraction_mode_for(path=None, org=None, answer_source=None) -> str:
+    """Which extraction family will/did actually process this document.
+
+    Resolved from the REAL call graph, not from DOTS_ENABLED:
+
+    1. ``uses_dots_only(path)``      -> DOTS-only (manual INCOIS folders)
+    2. ``answer_source`` says V2     -> V2 (authoritative: it records what ran)
+    3. org is a V2 org and V2 is on  -> V2 (expected path, pre-extraction)
+    4. otherwise                     -> auto (PicoDet->DOTS, or legacy)
+
+    Rule 2 beats rule 3 because ``enhanced_core_text`` falls back to the auto
+    path when V2 declines (disabled / not-extracted / too-short), and the
+    record's ``answer_source`` is the only thing that knows which happened.
+    """
+    from src.data.pdf_table_extract import (
+        MODE_AUTO, MODE_DOTS_ONLY, MODE_INCOIS_V2,
+    )
+
+    if path is not None:
+        try:
+            from src.data.incois_routing import uses_dots_only
+
+            if uses_dots_only(path):
+                return MODE_DOTS_ONLY
+        except Exception:  # noqa: BLE001 - routing must never break ingest
+            pass
+    if answer_source in ("incois_v2_core", "moes_v2_core"):
+        return MODE_INCOIS_V2
+    if org in _V2_ORGS and _v2_core_active():
+        return MODE_INCOIS_V2
+    return MODE_AUTO
+
+
+def _current_extractor_version(path=None, org=None, answer_source=None) -> str:
+    """Extractor version describing the pipeline that actually handles *path*.
+
+    Per-document, never global. Three failure modes this prevents:
+
+    * a DOTS-only document stamped with PicoDet it never ran (and then
+      invalidated by an unrelated PicoDet threshold change);
+    * an official INCOIS/MoES V2 document stamped ``dots-.../picodet-...``
+      when V2 — which imports neither — is what actually extracted it, so that
+      merely toggling ``DOTS_ENABLED`` would re-OCR the whole corpus;
+    * a version that flips with ``DOTS_ENABLED`` for routes that do not
+      consult it.
+
+    Families are decided by the existing abstractions (``incois_routing`` for
+    DOTS-only, the V2 config gate for V2) — never a folder list duplicated here.
+    """
+    try:
+        from src.data.pdf_table_extract import current_extractor_version
+
+        mode = _extraction_mode_for(path, org, answer_source)
+        return current_extractor_version(mode) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def source_sha256_of(path) -> str | None:
+    """sha256 of the source file's bytes, or None when unreadable.
+
+    This — not mtime — is the authoritative "did the input change?" signal.
+    mtime is kept only as a cheap prefilter: rsync without -t, a restore from
+    backup, a touch or a re-download all move mtime while the bytes are
+    identical, and each of those would otherwise pay for a full DOTS pass.
+    """
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def record_has_skipped_pages(rec) -> bool:
+    """True when a record carries DOTS skipped-page markers.
+
+    Read from the record text rather than a new metadata field so the check
+    works retroactively on rows written before this existed — no migration
+    needed. A record damaged by a transient DOTS outage must stay retryable
+    even though its source bytes never changed; otherwise source-hash gating
+    would freeze the damage permanently.
+    """
+    try:
+        from src.data.pdf_table_extract import DOTS_PAGE_SKIPPED_TOKEN
+    except Exception:  # noqa: BLE001
+        DOTS_PAGE_SKIPPED_TOKEN = "[DOTS_PAGE_SKIPPED:"
+    if isinstance(rec, dict):
+        text = rec.get("answer_text") or ""
+    else:
+        text = getattr(rec, "answer_text", "") or ""
+    return DOTS_PAGE_SKIPPED_TOKEN in text
+
+
+def _force_reextract_enabled() -> bool:
+    """INGEST_FORCE_REEXTRACT=1 bypasses the source-hash gate (manual reprocess)."""
+    import os
+
+    return (os.environ.get("INGEST_FORCE_REEXTRACT", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _accept_drift_enabled() -> bool:
+    """INGEST_ACCEPT_DRIFT=1 lets a drifted re-extraction replace the stored row.
+
+    Off by default: with identical source bytes a differing extraction is
+    model/extractor drift, and silently overwriting a good row with a drifted
+    one is how extraction quality degrades unnoticed.
+    """
+    import os
+
+    return (os.environ.get("INGEST_ACCEPT_DRIFT", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def needs_reextraction(
     existing_rec,
     source_bytes: bytes | None = None,
@@ -545,6 +688,10 @@ def ingest_folder(folder: str, move_processed: bool = False,
     # (and, for the OCR-cost guard, the newest scraped_at per source_url)
     _ingested_ts: dict[str, float] = {}
     _manual_override_urls: set[str] = set()
+    _prior_source: dict[str, tuple[str, str]] = {}   # url -> (sha256, extractor_version)
+    _prior_skipped: set[str] = set()                 # urls whose row has skip markers
+    _src_same: set[str] = set()                      # extracted anyway, bytes identical
+    drift = 0
     if CORPUS.exists():
         for line in open(CORPUS, encoding="utf-8"):
             line = line.strip()
@@ -562,6 +709,15 @@ def ingest_folder(folder: str, move_processed: bool = False,
                     _u = _m.get("source_url")
                     if _u:
                         _manual_override_urls.add(_u)
+                # Source-hash change detection: remember the provenance of the
+                # stored row so an unchanged file can skip extraction outright.
+                _su = _m.get("source_url")
+                if _su:
+                    _sh = _m.get("source_sha256")
+                    if _sh:
+                        _prior_source[_su] = (_sh, _m.get("extractor_version") or "")
+                    if record_has_skipped_pages(r):
+                        _prior_skipped.add(_su)
                 if _skip_unchanged:
                     url = _m.get("source_url")
                     ts = _parse_ts(r.get("scraped_at"))
@@ -608,8 +764,12 @@ def ingest_folder(folder: str, move_processed: bool = False,
             log(f"  [source changed] automatic replacement suppressed "
                 f"({f.name})")
             continue
-        if _skip_unchanged:
-            ts = _ingested_ts.get(str(f))
+        _url_f = str(f)
+        _forced = _force_reextract_enabled()
+
+        # ── Stage 1: cheap mtime prefilter (performance hint only) ──────────
+        if _skip_unchanged and not _forced:
+            ts = _ingested_ts.get(_url_f)
             if ts is not None:
                 try:
                     if f.stat().st_mtime <= ts:
@@ -618,9 +778,97 @@ def ingest_folder(folder: str, move_processed: bool = False,
                         continue
                 except OSError:  # file vanished mid-scan
                     pass
+
+        # ── Stage 2: source-hash authority ──────────────────────────────────
+        # mtime moved (or the prefilter is off) — that is a hint, not evidence.
+        # Hash the bytes: identical source + identical extractor means there is
+        # nothing to extract, so DOTS is never called, no row is written, no
+        # index work is scheduled and GraphRAG stays idle.
+        _prior = _prior_source.get(_url_f)
+        if _prior:
+            _cur_sha = source_sha256_of(f)
+            if _cur_sha is not None and _cur_sha == _prior[0]:
+                # Recorded even under --force: a forced re-extraction of
+                # identical bytes is exactly when the drift rule must apply.
+                _src_same.add(_url_f)
+                _org_ctx = (meta_context or {}).get("org")
+                _cur_ver = _current_extractor_version(f, _org_ctx)
+                # A V2-eligible document legitimately carries EITHER the V2
+                # version (V2 ran) or the auto version (V2 declined and the
+                # legacy/auto fallback ran). Treat both as a match so a
+                # persistently-falling-back document is not re-extracted
+                # every single night.
+                _accepted = {_cur_ver}
+                if _extraction_mode_for(f, _org_ctx) == _MODE_V2:
+                    _accepted.add(_current_extractor_version(f))
+                if _forced:
+                    log(f"  FORCED re-extract {f.name} (source unchanged)")
+                elif _url_f in _prior_skipped:
+                    # Transient-failure repair: a row carrying skipped-page
+                    # markers must stay retryable even though the bytes never
+                    # changed, or a DOTS outage freezes bad OCR forever.
+                    log(f"  RETRY {f.name} (previous extraction has skipped "
+                        f"pages; source unchanged)")
+                elif _cur_ver and _prior[1] and _prior[1] not in _accepted:
+                    log(f"  re-extract {f.name} (extractor {_prior[1]} -> {_cur_ver})")
+                elif _forced:
+                    pass
+                else:
+                    unchanged += 1
+                    log(f"  skip {f.name} (source unchanged: sha256 match)")
+                    continue
+            elif _cur_sha is not None and not _forced:
+                log(f"  SOURCE CHANGED {f.name} (sha256 {_prior[0][:12]} -> "
+                    f"{_cur_sha[:12]})")
         try:
             before = len(out)
             n = convert_one_detected(f, out, seen, move_processed, meta_context)
+
+            # Stamp extraction provenance so the NEXT run can short-circuit.
+            # Both fields are dropped unconditionally by qa_content_hash, so
+            # stamping them cannot mark any record as changed.
+            if n > 0:
+                _stamp_sha = source_sha256_of(f)
+                _org_stamp = (meta_context or {}).get("org")
+                for _rec in out[before:]:
+                    _meta = getattr(_rec, "metadata", None)
+                    if _meta is None:
+                        continue
+                    if _stamp_sha and not getattr(_meta, "source_sha256", None):
+                        _meta.source_sha256 = _stamp_sha
+                    if not getattr(_meta, "extractor_version", None):
+                        # answer_source records which engine really ran, so the
+                        # stamp reflects reality even when V2 fell back.
+                        _ver = _current_extractor_version(
+                            f, _org_stamp, getattr(_meta, "answer_source", None))
+                        if _ver:
+                            _meta.extractor_version = _ver
+
+            # ── Drift rule ─────────────────────────────────────────────────
+            # Identical source bytes but a different extraction is model/
+            # extractor drift, NOT a document change. Replacing the stored row
+            # on drift is how a good extraction silently degrades, so the
+            # default is to keep what we have: changed stays 0, no stale-url
+            # purge, no index action, nothing for GraphRAG.
+            if (n > 0 and seen_hashes is not None and _url_f in _src_same
+                    and not _accept_drift_enabled()):
+                _drifted = False
+                for _rec in out[before:]:
+                    _md = getattr(_rec, "metadata", None)
+                    _u = getattr(_md, "source_url", None) or _url_f
+                    _old = seen_hashes.get(_u)
+                    if _old is not None and _old != qa_content_hash(_rec):
+                        _drifted = True
+                        break
+                if _drifted:
+                    del out[before:]
+                    drift += 1
+                    log(f"  [drift] {f.name}: extracted differently from "
+                        f"IDENTICAL source bytes — existing corpus row "
+                        f"preserved, no index/GraphRAG work "
+                        f"(set INGEST_ACCEPT_DRIFT=1 to accept)")
+                    continue
+
             if n > 0:
                 ok += 1
                 # log the ACTUAL record type(s) added by this file
@@ -709,9 +957,13 @@ def ingest_folder(folder: str, move_processed: bool = False,
         # the new version a different id — replacement is url-keyed here)
         _purge_stale_url_rows(_stale_urls, _new_hashes)
 
+    if drift:
+        log(f"[ingest_folder] {drift} file(s) showed extraction drift with "
+            f"identical source bytes — corpus rows preserved, no index work")
+
     return {"files": len(files), "added": len(out), "failed": fail,
             "changed": changed, "unchanged": unchanged, "types": types_used,
-            "skipped_language": skipped_language}
+            "skipped_language": skipped_language, "drift": drift}
 
 
 def _index_exists() -> bool:

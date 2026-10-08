@@ -686,6 +686,18 @@ class DotsClient:
         return headers
 
     def _require_base_url(self) -> str:
+        base = (self.cfg.base_url or "").rstrip("/")
+        if base.endswith("/models") or base.endswith("/chat/completions"):
+            # Misconfiguration seen on HPC 2026-10-07:
+            #   DOTS_BASE_URL=http://host:18500/v1/models
+            # The client appends /models and /chat/completions itself, so this
+            # yields .../v1/models/chat/completions -> 404 on every page. Fail
+            # loudly at the first call instead of degrading silently.
+            raise DotsUnavailable(
+                f"DOTS_BASE_URL must be the API ROOT (e.g. http://host:18500/v1), "
+                f"not an endpoint path — got {self.cfg.base_url!r}. The client "
+                f"appends '/models' and '/chat/completions' itself."
+            )
         if not self.cfg.base_url:
             raise DotsUnavailable(
                 "DOTS_BASE_URL is not set. The extraction app reaches DOTS over an "

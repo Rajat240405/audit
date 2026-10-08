@@ -388,5 +388,5 @@ def _cleanup_staging(staging: Path) -> None:
     with contextlib.suppress(FileNotFoundError):
         staging.unlink()
     # leaves the tree clean when the last .part is gone
-    with contextlib.suppress(OSError):
-        staging.parent.rmdir()
+    # .staging intentionally left in place — see the RS note: removing a
+    # directory that concurrent workers may be creating races their mkdir.

@@ -835,6 +835,68 @@ def _current_extractor_version() -> str:
         return ""
 
 
+# ── Extractor downgrade guard (records path) ────────────────────────────────
+# Incident 2026-10-07: the nightly cron ran with DOTS_ENABLED=false, so the LS
+# crawler re-extracted with the legacy route. The text differed from the DOTS
+# text, qa_content_hash differed, and 768 good rows were replaced in place.
+#
+# The source-hash/extractor-version gate added earlier lives in
+# ``ingest_folder`` and therefore NEVER runs for LS/RS, which are
+# ``kind: records`` sources merged by ``merge_record_dirs``. This guard closes
+# that gap on the records path.
+
+_EXTRACTOR_RANK_PREFIXES = (
+    ("dots-", 2),        # PicoDet->DOTS or DOTS-only: richest
+    ("incois_v2@", 1),   # V2 enhanced core engine
+    ("legacy/", 0),      # legacy extractor
+)
+
+
+def _extractor_rank(version: str | None) -> int:
+    """Coarse capability rank of an extractor_version string.
+
+    Unknown/absent ranks 0: a record with no provenance cannot be proven
+    richer than anything, so it never blocks a replacement. Equal ranks always
+    allow replacement, so ordinary re-crawls are unaffected.
+    """
+    v = (version or "").strip()
+    for prefix, rank in _EXTRACTOR_RANK_PREFIXES:
+        if v.startswith(prefix):
+            return rank
+    return 0
+
+
+def _allow_extractor_downgrade() -> bool:
+    """INGEST_ALLOW_EXTRACTOR_DOWNGRADE=1 permits a deliberate downgrade."""
+    return (os.environ.get("INGEST_ALLOW_EXTRACTOR_DOWNGRADE", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _seed_stored_extractor_versions() -> dict[str, str]:
+    """question_id -> stored metadata.extractor_version, from the corpus."""
+    out: dict[str, str] = {}
+    corpus = corpus_path()
+    if not corpus.exists():
+        return out
+    try:
+        for line in corpus.open(encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            qid = row.get("question_id")
+            ver = (row.get("metadata") or {}).get("extractor_version")
+            if qid and ver:
+                out[qid] = ver
+    except OSError:
+        pass
+    return out
+
+
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                       source: str | None = None, recursive: bool = False,
                       seen_hashes: dict[str, str] | None = None,
@@ -873,6 +935,8 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
     Returns ``(added, changed)`` — the legacy int return grew a second
     element with the detection; both are plain counts.
     """
+    _stored_versions = _seed_stored_extractor_versions()
+    _downgraded = 0
     added = 0
     changed = 0
     skipped = 0
@@ -913,6 +977,23 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                     elif seen_hashes is not None:
                         h = _qa_content_hash(rec)
                         if seen_hashes.get(rec.question_id) != h:
+                            # Downgrade guard: never let a poorer extractor
+                            # overwrite a richer one. A cron run with
+                            # DOTS_ENABLED=false must not replace DOTS output
+                            # with legacy text just because the text differs.
+                            _in_ver = getattr(rec.metadata, "extractor_version", None)
+                            _st_ver = _stored_versions.get(rec.question_id)
+                            if (_extractor_rank(_in_ver) < _extractor_rank(_st_ver)
+                                    and not _allow_extractor_downgrade()):
+                                _downgraded += 1
+                                _note("unchanged", rec.question_id)
+                                if _downgraded <= 5:
+                                    _engine.log(
+                                        f"  [downgrade-blocked] {rec.question_id}: "
+                                        f"incoming {_in_ver or 'unstamped'} is weaker "
+                                        f"than stored {_st_ver} — corpus row preserved"
+                                    )
+                                continue
                             handled.add(rec.question_id)
                             seen_hashes[rec.question_id] = h
                             changed += 1
@@ -926,6 +1007,12 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                             _note("unchanged", rec.question_id)
             except OSError as e:
                 _engine.log(f"  [warn] {f}: {e}")
+    if _downgraded:
+        _engine.log(
+            f"  [downgrade-blocked] {_downgraded} record(s) kept: the incoming "
+            f"extraction was produced by a weaker extractor than the stored row "
+            f"(set INGEST_ALLOW_EXTRACTOR_DOWNGRADE=1 to override)"
+        )
     if skipped:
         # Honest residual accounting (audit principle): rows failing QARecord
         # validation (e.g. RS records whose official answer document is still

@@ -101,7 +101,10 @@ def _cleanup_staging(staging: Path) -> None:
         staging.unlink()
     except FileNotFoundError:
         pass
-    try:
-        staging.parent.rmdir()  # leaves tree clean when the last .part is gone
-    except OSError:
-        pass
+    # NOTE: the shared .staging directory is deliberately NOT removed here.
+    # With concurrent slot workers, removing it races another worker's
+    # mkdir(parents=True, exist_ok=True): CPython re-raises FileExistsError
+    # when the directory disappears between the failed mkdir and its
+    # is_dir() re-check. That crashed the 2026-10-07 RS crawl
+    # (FileExistsError: .../session-188/.staging) and aborted ingest for the
+    # whole source. An empty .staging dir is harmless; it is reused next run.

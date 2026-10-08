@@ -262,6 +262,28 @@ def _facts_from_manifest_entry(entry: dict[str, Any]) -> DocFacts:
     )
 
 
+
+def _stamp_extractor_version(meta: dict) -> None:
+    """Record WHICH extractor produced a document-extracted answer.
+
+    Without this the corpus has no provenance for LS/RS rows, so a cron run
+    using a weaker extractor (e.g. DOTS_ENABLED=false -> legacy) cannot be
+    distinguished from a genuine content change and silently overwrites the
+    richer text. Only stamped for document-extracted answers: an inline answer
+    did not come from an extractor.
+    """
+    if (meta or {}).get("answer_source") != "document-extract":
+        return
+    try:
+        from src.data.pdf_table_extract import MODE_AUTO, current_extractor_version
+
+        ver = current_extractor_version(MODE_AUTO)
+        if ver:
+            meta["extractor_version"] = ver
+    except Exception:  # noqa: BLE001 - provenance must never break a crawl
+        pass
+
+
 def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
     report = SessionReport(session=ses)
 
@@ -333,9 +355,13 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
 
             print(f"  [rs] fetching {len(pending)} document slot(s) "
                   f"with {workers} worker(s)", flush=True)
-            fetched = bounded_map(_fetch_one, pending, workers,
-                                  thread_name_prefix="rs-slot")
-            for (t_rid, _qslno, t_slot), res in zip(pending, fetched):
+            # NOT `fetched` — that name holds the session INVENTORY
+            # (list of (ministry_cfg, rows) 2-tuples) and is read again when
+            # the manifest is built. Rebinding it here replaced it with
+            # (SlotResult, body, written) 3-tuples and crashed the manifest.
+            fetched_slots = bounded_map(_fetch_one, pending, workers,
+                                        thread_name_prefix="rs-slot")
+            for (t_rid, _qslno, t_slot), res in zip(pending, fetched_slots):
                 slot_results[(t_rid, t_slot.lang)] = res
 
     for rec, raw in pairs:
@@ -405,6 +431,7 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
                     and facts.doc_class in ("good", "partial")
                 ):
                     apply_answer_fallback(meta, rec, facts, body, fallback_wanted)
+                    _stamp_extractor_version(meta)
         elif not rec["answer_text"]:
             meta["answer_source"] = "unavailable"
             meta["answer_unavailable_cause"] = "documents-disabled"
