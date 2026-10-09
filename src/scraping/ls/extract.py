@@ -58,15 +58,30 @@ def extract_qa(body: bytes, doc_format: str) -> tuple[tuple[str, str] | None, Re
         return None, "unsupported"
         
     if doc_format == "pdf":
+        # Incremental processing: identical bytes + identical extractor version
+        # => reuse the validated text instead of re-running PicoDet -> DOTS.
+        # Misses, failures and EXTRACTION_FORCE_REPROCESS all fall through to a
+        # normal extraction; the cache is never a correctness dependency.
+        from src.scraping import extraction_cache as _xc
+
+        cached = _xc.lookup(body)
+        if cached is not None:
+            return split_question_answer(cached), None
+
         try:
             text = extract_pdf_text(body, enable_ocr=True)
         except DependencyMissingError as exc:
+            _xc.record_failure(body, f"dependency_unavailable: {exc}")
             return None, f"dependency_unavailable: {exc}"
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            _xc.record_failure(body, f"parser_failure: {type(exc).__name__}")
             return None, "parser_failure"
-            
+
         if text is None or not text.strip():
+            _xc.record_failure(body, "scanned")
             return None, "scanned"
+        # Validated output only — committed before the caller can use it.
+        _xc.record_success(body, text)
     elif doc_format == "docx":
         text = _docx_text(body)
         if text is None:

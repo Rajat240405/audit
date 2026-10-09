@@ -897,6 +897,75 @@ def _seed_stored_extractor_versions() -> dict[str, str]:
     return out
 
 
+# ── Answer-quality downgrade guard (records path, all houses) ───────────────
+# Incident 2026-10-08: RS rows lost annexures when a short inline answer
+# replaced a document-extracted one. The extractor-rank guard below did NOT
+# stop it: both sides were unstamped (rank 0 == rank 0 is not "lower"), so the
+# replacement was accepted. Rank compares the EXTRACTOR; this compares the
+# ANSWER. Both are needed.
+#
+# Defence in depth: the primary fix is in the RS crawler's staging merge
+# (rs/pipeline.guard_staged_answer). This second gate also protects rows that
+# were already staged poorly, and covers every `kind: records` source.
+
+def _allow_answer_downgrade() -> bool:
+    """INGEST_ALLOW_ANSWER_DOWNGRADE=1 permits a deliberate replacement."""
+    return (os.environ.get("INGEST_ALLOW_ANSWER_DOWNGRADE", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _seed_stored_answers() -> dict[str, tuple[str | None, str]]:
+    """question_id -> (metadata.answer_source, answer_text) from the corpus."""
+    out: dict[str, tuple[str | None, str]] = {}
+    corpus = corpus_path()
+    if not corpus.exists():
+        return out
+    try:
+        for line in corpus.open(encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            qid = row.get("question_id")
+            if qid:
+                out[qid] = ((row.get("metadata") or {}).get("answer_source"),
+                            row.get("answer_text") or "")
+    except OSError:
+        pass
+    return out
+
+
+def _is_answer_downgrade(rec, stored: tuple[str | None, str] | None) -> str | None:
+    """Reason string when *rec* would materially worsen the stored answer.
+
+    Only fires when the STORED answer is document-extracted and the incoming
+    one is not. A fresh document extraction is never blocked here — that case
+    is handled structurally in the crawler's staging guard.
+    """
+    if stored is None:
+        return None
+    stored_source, stored_text = stored
+    if stored_source != "document-extract":
+        return None
+    incoming_source = getattr(getattr(rec, "metadata", None), "answer_source", None)
+    if incoming_source == "document-extract":
+        return None
+    try:
+        from src.scraping.ls.text_selection import is_richer, measure
+    except Exception:  # noqa: BLE001 - never block ingest on a helper import
+        return None
+    incoming_text = getattr(rec, "answer_text", "") or ""
+    if not is_richer(stored_text, incoming_text):
+        return None
+    return (f"stored document-extract ({measure(stored_text).chars} chars) is richer "
+            f"than incoming {incoming_source or 'unstamped'} "
+            f"({measure(incoming_text).chars} chars)")
+
+
 def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                       source: str | None = None, recursive: bool = False,
                       seen_hashes: dict[str, str] | None = None,
@@ -936,7 +1005,9 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
     element with the detection; both are plain counts.
     """
     _stored_versions = _seed_stored_extractor_versions()
+    _stored_answers = _seed_stored_answers()
     _downgraded = 0
+    _answer_downgrades = 0
     added = 0
     changed = 0
     skipped = 0
@@ -977,6 +1048,19 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                     elif seen_hashes is not None:
                         h = _qa_content_hash(rec)
                         if seen_hashes.get(rec.question_id) != h:
+                            # Answer-quality guard: a short inline answer
+                            # must not replace a rich document-extracted one.
+                            _adg = _is_answer_downgrade(
+                                rec, _stored_answers.get(rec.question_id))
+                            if _adg and not _allow_answer_downgrade():
+                                _answer_downgrades += 1
+                                _note("unchanged", rec.question_id)
+                                if _answer_downgrades <= 5:
+                                    _engine.log(
+                                        f"  [answer-downgrade-blocked] "
+                                        f"{rec.question_id}: {_adg} — corpus row preserved"
+                                    )
+                                continue
                             # Downgrade guard: never let a poorer extractor
                             # overwrite a richer one. A cron run with
                             # DOTS_ENABLED=false must not replace DOTS output
@@ -1007,6 +1091,12 @@ def merge_record_dirs(dirs: list[str], out: list[QARecord], seen: set[str],
                             _note("unchanged", rec.question_id)
             except OSError as e:
                 _engine.log(f"  [warn] {f}: {e}")
+    if _answer_downgrades:
+        _engine.log(
+            f"  [answer-downgrade-blocked] {_answer_downgrades} record(s) kept: the "
+            f"incoming answer was materially poorer than the stored "
+            f"document-extracted one (set INGEST_ALLOW_ANSWER_DOWNGRADE=1 to override)"
+        )
     if _downgraded:
         _engine.log(
             f"  [downgrade-blocked] {_downgraded} record(s) kept: the incoming "

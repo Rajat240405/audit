@@ -21,6 +21,8 @@ eParlib back-fill stub and never abort anything.
 
 from __future__ import annotations
 
+
+import os
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +34,7 @@ from src.scraping.http import CrawlHttpClient, HttpApiError, HttpTransportError
 from src.scraping.manifest import load_manifest, manifests_equal, write_manifest
 from src.scraping.rs.client import RsClient
 from src.scraping.rs.documents import plan_slots, process_slot
+from src.scraping.ls.text_selection import is_richer, measure, structural_signals
 from src.utils.concurrency import bounded_map, rs_document_workers
 from src.scraping.rs.normalize import build_record, sort_key, utcnow_iso
 from src.utils.atomic_io import write_bytes_atomic
@@ -180,7 +183,17 @@ def apply_answer_fallback(
         meta["answer_source"] = "unavailable"
         meta["answer_unavailable_cause"] = "legacy-format-not-extracted"
     else:
-        text = _extract_answer_fallback(body) if body else None
+        from src.scraping import extraction_cache as _xc
+
+        text = None
+        if body:
+            text = _xc.lookup(body)                     # unchanged PDF -> skip OCR
+            if text is None:
+                text = _extract_answer_fallback(body)
+                if text and text.strip():
+                    _xc.record_success(body, text)      # validated only
+                else:
+                    _xc.record_failure(body, "extract-failed")
         if text:
             rec["answer_text"] = text
             meta["answer_source"] = "document-extract"
@@ -282,6 +295,78 @@ def _stamp_extractor_version(meta: dict) -> None:
             meta["extractor_version"] = ver
     except Exception:  # noqa: BLE001 - provenance must never break a crawl
         pass
+
+
+
+# ── staged-answer guard (RS mirror of the LS reconciliation) ────────────────
+# Incident 2026-10-08: four RS records (rs-239-2088, rs-242-0015, rs-246-0513,
+# rs-251-1312) lost their annexures when the nightly cron replaced a
+# document-extracted answer with a much shorter inline one.
+#
+# Mechanism: the RS ladder is inline-first — ``apply_answer_fallback`` runs
+# ONLY when ``rec["answer_text"]`` is empty (see the REC-P1 block below), so
+# once upstream starts returning ``ans_text`` the official English PDF is
+# downloaded but never parsed. ``merge_by_id`` then overwrote the richer
+# staged row on byte difference.
+#
+# This is the SAME failure LS already suffered and fixed — see the
+# ``src/scraping/ls/text_selection`` module docstring ("649 records silently
+# switched from PDF-derived to API-derived text and lost annexure tables").
+# The LS reconciliation was documented as "LS-local" and never ported here.
+#
+# The text metrics below are house-agnostic (numeric tokens, annexure markers,
+# sub-part labels); they live under ``ls/`` for historical reasons only.
+GUARD_ANSWER_DOWNGRADE = True
+
+
+def _allow_answer_downgrade() -> bool:
+    """RS_ALLOW_ANSWER_DOWNGRADE=1 lets an operator force the replacement."""
+    return (os.environ.get("RS_ALLOW_ANSWER_DOWNGRADE", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def guard_staged_answer(new_row: dict[str, Any],
+                        old_row: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep an already-staged richer document answer over a poorer new one.
+
+    Fires only when the OLD staged row is ``document-extract``. A fresh
+    document-extracted answer normally wins (the legitimate-improvement path);
+    it is retained only on a STRUCTURAL regression — lost numerics, annexure
+    markers or sub-parts — never on length or whitespace alone, which shift
+    with re-pagination.
+
+    Only ``answer_text`` is guarded: ``question_text`` and unrelated metadata
+    updates pass through, matching the LS behaviour.
+    """
+    if not GUARD_ANSWER_DOWNGRADE or _allow_answer_downgrade():
+        return new_row
+    if not old_row:
+        return new_row
+    old_meta = old_row.get("metadata") or {}
+    if old_meta.get("answer_source") != "document-extract":
+        return new_row
+    new_meta = new_row.setdefault("metadata", {})
+
+    if new_meta.get("answer_source") == "document-extract":
+        lost = structural_signals(measure(old_row.get("answer_text")),
+                                  measure(new_row.get("answer_text")))
+        if not lost:
+            return new_row
+        reason = "staged-document-retained:extraction-regression:" + ",".join(lost)
+    elif is_richer(old_row.get("answer_text"), new_row.get("answer_text")):
+        reason = "staged-document-retained"
+    else:
+        return new_row
+
+    new_row["answer_text"] = old_row["answer_text"]
+    new_meta["answer_source"] = "document-extract"
+    new_meta["answer_text_source"] = "document-extract"
+    new_meta["text_selection_reason"] = reason
+    new_meta.pop("answer_unavailable_cause", None)
+    if old_meta.get("extractor_version"):
+        new_meta["extractor_version"] = old_meta["extractor_version"]
+    return new_row
 
 
 def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
@@ -446,9 +531,14 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
 
     # 5a. emit qa.jsonl (merge by id; write only on byte difference)
     existing_rows = rec_utils.load_jsonl(session_dir / QA_JSONL)
+    # RS-local reconciliation: a poorer inline re-crawl must not overwrite a
+    # richer already-staged document answer (see guard_staged_answer).
+    staged_by_id = {r.get("question_id"): r for r in existing_rows}
+    new_rows = [guard_staged_answer(rec, staged_by_id.get(rec["question_id"]))
+                for rec, _ in pairs]
     merged, stats = rec_utils.merge_by_id(
         existing_rows,
-        [rec for rec, _ in pairs],
+        new_rows,
         key=lambda r: r["question_id"],
         sort_key=sort_key,
     )
