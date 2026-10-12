@@ -3,7 +3,7 @@ import { useChatStream } from "@/hooks/useChatStream";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import { restoreSession } from "@/lib/sessionTransitions";
+import { restoreActiveSessionOnLoad, restoreSession } from "@/lib/sessionTransitions";
 import { useAppStore } from "@/store/useAppStore";
 import { requestsGraph } from "@/lib/retrievalMode";
 import { useActivityStore } from "@/store/useActivityStore";
@@ -37,6 +37,11 @@ type TabKey = (typeof TABS)[number]["key"];
  */
 export function Workspace() {
   const { send, stop, running } = useChatStream();
+  // Re-open the chat that was active before a reload / return to the page (once
+  // per load). Creates nothing: a fresh chat only comes from "New session".
+  useEffect(() => {
+    restoreActiveSessionOnLoad();
+  }, []);
   // Tab state is LOCAL (useState) so it always works even if the actions
   // store is a stale copy; we mirror the local tab + a setter into the store
   // as an optional bridge for the Model Activity panel's "Go to canvas".

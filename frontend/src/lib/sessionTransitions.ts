@@ -1,49 +1,40 @@
 /**
  * Session state transitions.
  *
- * A session's state is spread across four stores by design:
+ * A session's state is spread across stores by design:
  *
  *   useSessionStore   conversation (messages, active id)   — persisted
- *   useDraftStore     canvas content + sources + grounding — per session
- *   useActivityStore  live model activity + error          — per session
- *   usePipelineStore  retrieval stage trace                — per session
+ *   useDraftStore     canvas content + sources + grounding — projection
+ *   useActivityStore  live model activity + error          — projection
+ *   usePipelineStore  retrieval stage trace                — projection
+ *   useChatRunStore   the in-flight answer, if any         — lib/chatRun.ts
  *
- * Creating a session previously only touched useSessionStore, so the canvas,
- * sources (which carry the GraphRAG provenance the Graph tab renders) and
- * activity of the PREVIOUS session survived into the new one. Restoring a
- * history item did clear/replace them, which is why the bug only showed on
- * the "open old session -> New Session" path.
+ * The three projection stores show ONE chat at a time. A running answer keeps
+ * writing to its own message after the user switches away (lib/chatRun.ts).
+ * Switching re-binds those stores to whichever chat is opened, and re-attaches
+ * the live run if that chat is the one still generating.
  *
- * Both transitions live here so the two "+" call sites (Sidebar and
- * HistoryPanel) can never drift apart again.
+ * Both "+" call sites (Sidebar and HistoryPanel) and the history "open" path go
+ * through here, so the transitions cannot drift apart.
  *
  * Global state is deliberately untouched: provider/model selection lives in
  * useAppStore, saved knowledge is server-side, and neither is referenced here.
  */
 import { useActivityStore } from "@/store/useActivityStore";
 import { useDraftStore } from "@/store/useDraftStore";
-import { useEditStore } from "@/store/useEditStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { clearAnswerScopedPanels } from "@/lib/answerScope";
+import { attachActiveRunIfAny, getActiveRun, stopActiveRun } from "@/lib/chatRun";
 
-/**
- * Close every ANSWER-specific transient panel.
- *
- * Shared by the new-query path and the session transitions so Query-N UI can
- * never attach to Query-N+1 (e.g. clicking Investigate on a Query-1 fact while
- * Query 2's answer is on screen).
- */
-export function clearAnswerScopedPanels(): void {
-  useDraftStore.getState().clearAnswerScopedUi();
-  useEditStore.setState({ pendingEdit: null, editing: false, editingLabel: null });
-}
+export { clearAnswerScopedPanels } from "@/lib/answerScope";
 
-/** Clear every per-session store. Does NOT touch app/provider settings. */
+/** Clear every per-session projection. Does NOT touch app/provider settings. */
 export function clearSessionScopedState(): void {
   const draft = useDraftStore.getState();
   draft.reset();
-  // reset() intentionally leaves the binding alone (it is also used mid-stream),
-  // so unbind explicitly: a new session owns no message yet.
+  // reset() intentionally leaves the binding alone, so unbind explicitly: the
+  // canvas is not showing any message until the next bind.
   draft.bindMessage(null, null);
 
   // Activity: back to idle, not "retrieving" — nothing is running yet.
@@ -61,14 +52,14 @@ export function clearSessionScopedState(): void {
   usePipelineStore.getState().reset();
 
   // Answer-specific transient panels: Cross-Verified Facts, its inline
-  // investigations, and the Edit-with-AI Original-vs-Edited comparison.
-  // These belong to ONE answer and must never survive into another.
+  // investigations, the Edit-with-AI comparison, and any in-flight edit.
   clearAnswerScopedPanels();
 }
 
 /**
  * Start a genuinely clean session: new conversation + empty canvas, sources,
- * graph and activity. Returns the new session id.
+ * graph and activity. A run still generating in another chat keeps going.
+ * Returns the new session id.
  */
 export function startNewSession(): string {
   const sessions = useSessionStore.getState();
@@ -79,14 +70,16 @@ export function startNewSession(): string {
 }
 
 /**
- * Open an existing session and restore its canvas from the last assistant
- * message. Per-session state is cleared first so nothing leaks across from the
- * session being left.
+ * Open an existing session. If it is the chat whose answer is still
+ * generating, the live state is re-attached. Otherwise the canvas loads the
+ * last answer. Per-session state is cleared first, so nothing leaks across.
  */
 export function restoreSession(id: string): void {
   const sessions = useSessionStore.getState();
   sessions.setActive(id);
   clearSessionScopedState();
+
+  if (attachActiveRunIfAny(id)) return;
 
   const session = useSessionStore.getState().sessions.find((s) => s.id === id);
   const last = session
@@ -97,4 +90,28 @@ export function restoreSession(id: string): void {
   const draft = useDraftStore.getState();
   draft.setDraft(last.content || "", last.sources ?? []);
   draft.bindMessage(session?.id ?? null, last.id ?? null);
+}
+
+/**
+ * Delete a session. If it is still generating, that run is stopped first. If
+ * the canvas shows it, the canvas is cleared.
+ */
+export function deleteSessionSafely(id: string): void {
+  if (getActiveRun()?.sessionId === id) stopActiveRun();
+  const wasBound = useDraftStore.getState().activeSessionId === id;
+  useSessionStore.getState().deleteSession(id);
+  if (wasBound) clearSessionScopedState();
+}
+
+let loadRestored = false;
+
+/**
+ * Once per page load: re-open the session that was active before a reload or
+ * a return to the page, if it still exists. Never creates a session.
+ */
+export function restoreActiveSessionOnLoad(): void {
+  if (loadRestored) return;
+  loadRestored = true;
+  const id = useSessionStore.getState().activeSessionId;
+  if (id && !getActiveRun()) restoreSession(id);
 }

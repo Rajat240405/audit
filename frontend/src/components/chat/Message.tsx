@@ -8,6 +8,7 @@ import { SaveKnowledgeModal } from "@/components/chat/SaveKnowledgeModal";
 import { useSessionStore } from "@/store/useSessionStore";
 import { useDraftStore } from "@/store/useDraftStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
+import { markdownComponents } from "@/components/common/markdownComponents";
 
 /** Message card in the left assistant column (matches the Stitch design). */
 export function Message({ message }: { message: ChatMessage }) {
@@ -45,8 +46,14 @@ export function Message({ message }: { message: ChatMessage }) {
 
   // Streamed tokens win over the phase label: the moment real answer text
   // arrives, "Generating answer…" disappears and the answer takes its place.
+  // The live text is the freshest copy; the stored content is only a partial
+  // snapshot (written about once a second) until the answer settles.
   const liveBody = isLive ? streamingText : "";
-  const body = message.content || liveBody;
+  const body = liveBody || message.content;
+  // Only a settled answer can be saved to Knowledge. Stopped, interrupted and
+  // error answers keep their partial text, but are not complete.
+  const complete = !message.status || message.status === "done";
+  const generatingElsewhere = message.status === "streaming" && !isLive;
 
   if (isUser) {
     return (
@@ -68,18 +75,7 @@ export function Message({ message }: { message: ChatMessage }) {
       >
         {body ? (
           <div className="md-body text-sm text-foreground/90">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                // Keep wide tables from overflowing the message card: wrap each
-                // table in its own horizontally-scrollable container.
-                table: ({ children }) => (
-                  <div className="overflow-x-auto">
-                    <table>{children}</table>
-                  </div>
-                ),
-              }}
-            >
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
               {body}
             </ReactMarkdown>
           </div>
@@ -93,6 +89,12 @@ export function Message({ message }: { message: ChatMessage }) {
           </p>
         ) : (
           <p className="text-sm text-muted">…</p>
+        )}
+        {generatingElsewhere && (
+          <p className="mt-2 flex items-center gap-2 text-[11px] text-muted">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+            Still generating in the background — open this chat to follow it.
+          </p>
         )}
       </div>
 
@@ -126,8 +128,14 @@ export function Message({ message }: { message: ChatMessage }) {
           className="rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] text-foreground/70 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="save-knowledge-btn"
           onClick={() => setSaveOpen(true)}
-          disabled={!question}
-          title={question ? "Save this answer to shared Knowledge" : "No user question found for this answer"}
+          disabled={!question || !complete}
+          title={
+            !complete
+              ? "Only a finished answer can be saved to Knowledge"
+              : question
+                ? "Save this answer to shared Knowledge"
+                : "No user question found for this answer"
+          }
         >
           Save to Knowledge
         </button>

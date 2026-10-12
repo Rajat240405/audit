@@ -91,10 +91,23 @@ export interface Session {
   messages: ChatMessage[];
 }
 
+/**
+ * Lifecycle of an assistant answer. `undefined` (legacy messages) means the
+ * answer is complete.
+ *  - streaming:   a live run is writing this message (persisted partial text)
+ *  - done:        completed normally (and verified or not yet verified)
+ *  - stopped:     the user pressed Stop; the partial text is kept
+ *  - error:       the backend reported an error; partial text is kept
+ *  - interrupted: the stream or page ended before `done` (or a reload found
+ *                 a message still marked streaming)
+ */
+export type MessageStatus = "streaming" | "done" | "stopped" | "error" | "interrupted";
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  status?: MessageStatus;
   sources?: SourceItem[];
   trace?: RetrievalTrace;
   meta?: GenerationMeta;

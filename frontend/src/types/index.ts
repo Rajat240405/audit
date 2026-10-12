@@ -8,6 +8,7 @@ export type {
   PipelineStage,
   Session,
   ChatMessage,
+  MessageStatus,
   GroundingClaim,
   InvestigationResult,
   KnowledgeSource,

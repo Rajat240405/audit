@@ -2,8 +2,6 @@
 // All browser code talks to relative /api URLs (Vite dev server proxies to
 // the backend; production builds are served by FastAPI itself).
 
-import { once } from "@/utils/once";
-
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -56,7 +54,13 @@ export interface StreamHandlers {
     ambiguous: boolean;
   }) => void;
   onError?: (message: string) => void;
-  onDone?: () => void;
+  /**
+   * Exactly once per stream. `complete` is true only when the backend sent its
+   * explicit `done` event. `false` means the connection ended or failed first,
+   * so the answer may be truncated. Abort never calls this (the caller that
+   * aborted owns the cleanup).
+   */
+  onDone?: (complete: boolean) => void;
 }
 
 /**
@@ -73,9 +77,12 @@ export function consumeSSE(
   // event AND closes the stream — naive handlers ran onDone for both, so
   // Deep mode launched the post-verify request twice (wasted LLM, duplicate
   // toasts/races). Whichever fires first wins; the rest no-op.
-  const finish = once(() => {
-    handlers.onDone?.();
-  });
+  let finished = false;
+  const finish = (complete: boolean) => {
+    if (finished) return;
+    finished = true;
+    handlers.onDone?.(complete);
+  };
   fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -86,7 +93,7 @@ export function consumeSSE(
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
         handlers.onError?.(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-        finish();
+        finish(false);
         return;
       }
       const reader = res.body.getReader();
@@ -163,7 +170,7 @@ export function consumeSSE(
             handlers.onError?.(String(ev.message ?? "Unknown error"));
             break;
           case "done":
-            finish();
+            finish(true);
             break;
         }
       };
@@ -190,11 +197,11 @@ export function consumeSSE(
       }
       if (buffer.trim()) processLine(buffer);
       dispatchEvent(); // flush any trailing event (no final blank line)
-      finish();
+      finish(false); // reached only when no explicit `done` arrived first
     })
     .catch((err) => {
       if ((err as Error).name === "AbortError") return;
       handlers.onError?.(err instanceof Error ? err.message : String(err));
-      finish();
+      finish(false);
     });
 }

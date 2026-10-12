@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from src.generation.client import LLMResponse
+from src.generation.context_overflow import describe_http_error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1001,6 +1002,26 @@ def _drain_inline_thinking(
         out = out[close_i + len(_THINK_CLOSE):]
 
 
+def _raise_for_provider_status(resp: httpx.Response, where: str) -> None:
+    """``raise_for_status()`` that keeps the error body for classification.
+
+    A streamed response's body is unread until ``read()``. On an error status the
+    body is loaded before the ``HTTPStatusError`` leaves this function, so callers
+    can inspect ``exc.response.text`` (context-overflow classification). Success
+    responses are never read here, so a healthy stream is not consumed early.
+    Logs a truncated, prompt-free summary only.
+    """
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        try:
+            resp.read()
+        except Exception:  # noqa: BLE001 - keep the HTTP error; body stays unavailable
+            pass
+        print(f"[provider] {where} request rejected — {describe_http_error(resp)}")
+        raise
+
+
 class OpenAICompatibleProvider(BaseProvider):
     """Inference adapter for ANY OpenAI-compatible server (vLLM, Ollama /v1,
     llama.cpp, LM Studio, TGI, LiteLLM…).
@@ -1121,7 +1142,7 @@ class OpenAICompatibleProvider(BaseProvider):
         try:
             with httpx.Client(timeout=timeout_seconds) as client:
                 resp = client.post(self._completions_url(base_url), json=body)
-                resp.raise_for_status()
+                _raise_for_provider_status(resp, "generate")
                 data = resp.json()
         except Exception as e:  # noqa: BLE001 - surface to caller as LLM error
             raise RuntimeError(f"OpenAI-compatible generate failed: {e}") from e
@@ -1189,7 +1210,7 @@ class OpenAICompatibleProvider(BaseProvider):
         saw_reasoning_channel = False
         with httpx.Client(timeout=timeout_seconds) as client:
             with client.stream("POST", self._completions_url(base_url), json=body) as resp:
-                resp.raise_for_status()
+                _raise_for_provider_status(resp, "stream")
                 answered = False
                 for line in resp.iter_lines():
                     if not line or not line.startswith("data:"):

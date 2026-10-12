@@ -1,5 +1,6 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "@/components/common/markdownComponents";
 import remarkGfm from "remark-gfm";
 import { useDraftStore } from "@/store/useDraftStore";
 import { FactVerificationPanel } from "./FactVerificationPanel";
@@ -158,13 +159,7 @@ export function DraftCanvas() {
             <div ref={streamRef} className="md-body text-[15px] leading-relaxed text-foreground">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                components={{
-                  table: ({ children }) => (
-                    <div className="overflow-x-auto">
-                      <table>{children}</table>
-                    </div>
-                  ),
-                }}
+                components={markdownComponents}
               >
                 {display}
               </ReactMarkdown>
@@ -205,13 +200,7 @@ export function DraftCanvas() {
                 <div className="md-body text-[13px] leading-relaxed text-foreground/80">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
-                    components={{
-                      table: ({ children }) => (
-                        <div className="overflow-x-auto">
-                          <table>{children}</table>
-                        </div>
-                      ),
-                    }}
+                    components={markdownComponents}
                   >
                     {pendingEdit.original}
                   </ReactMarkdown>
@@ -233,13 +222,7 @@ export function DraftCanvas() {
                 <div className="md-body text-[13px] leading-relaxed text-foreground/80">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
-                    components={{
-                      table: ({ children }) => (
-                        <div className="overflow-x-auto">
-                          <table>{children}</table>
-                        </div>
-                      ),
-                    }}
+                    components={markdownComponents}
                   >
                     {pendingEdit.revised}
                   </ReactMarkdown>

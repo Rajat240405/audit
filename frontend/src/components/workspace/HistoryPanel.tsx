@@ -1,6 +1,6 @@
 import { History, MessagesSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import { useSessionStore } from "@/store/useSessionStore";
-import { startNewSession } from "@/lib/sessionTransitions";
+import { deleteSessionSafely, startNewSession } from "@/lib/sessionTransitions";
 import { formatDate } from "@/utils/formatters";
 import { cn } from "@/utils/cn";
 
@@ -15,7 +15,6 @@ export function HistoryPanel({ onOpen }: { onOpen?: () => void }) {
   const activeId = useSessionStore((s) => s.activeSessionId);
   const setActive = useSessionStore((s) => s.setActive);
   const renameSession = useSessionStore((s) => s.renameSession);
-  const deleteSession = useSessionStore((s) => s.deleteSession);
 
   const open = (id: string) => {
     setActive(id);
@@ -29,7 +28,7 @@ export function HistoryPanel({ onOpen }: { onOpen?: () => void }) {
 
   const remove = (id: string) => {
     if (!window.confirm("Delete this session? This cannot be undone.")) return;
-    deleteSession(id);
+    deleteSessionSafely(id);
   };
 
   const newSession = () => {

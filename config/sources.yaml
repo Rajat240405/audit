@@ -146,7 +146,9 @@ sources:
       - incois_reports/Others
       - incois_reports/TechnicalReports
       - incois_reports/ResearchPublications
-      - incois_reports/budget                 # TENDER documents (internal category name);
+      - incois_reports/budget
+      - incois_reports/legal_affairs_pdfs
+      - incois_reports/Internal_files                 # TENDER documents (internal category name);
                                               # extracted with DOTS OCR only, append-only
       - scanned_ocr                           # ocr_pdfs.py output (scanned PDFs -> .txt)
     description: >

@@ -44,6 +44,7 @@ import httpx
 from rich.console import Console
 
 from src.generation.client import LLMClient
+from src.generation.context_overflow import find_http_status_error, is_context_overflow_error
 from src.generation.request_scope import scoped_attr
 from src.retrieval.result import RetrievedResult
 from src.generation.registry import model_registry
@@ -66,6 +67,24 @@ from src.generation.evidence import (  # noqa: F401  (re-exports)
 )
 
 console = Console()
+
+# Context-overflow recovery (provider HTTP 400 naming a context/token limit).
+# Each step rebuilds evidence through the existing prepare_context() allocator.
+# At most these retries run per request, so there is no retry loop.
+OVERFLOW_RETRY_STEPS: tuple[dict, ...] = (
+    {"pool_override": 3, "budget_override": 4000},
+    {"pool_override": 2, "budget_override": AGGRESSIVE_HEAL_TOKENS},
+)
+
+# Shown when every overflow retry is rejected. Deliberately free of traceback
+# and provider internals; it tells the user how to recover.
+CONTEXT_TOO_LARGE_MESSAGE = (
+    "### ⚠️ Context Too Large\n\n"
+    "The retrieved context for this question was too large for the model's "
+    "context window, even after automatic reduction, so no answer was generated.\n\n"
+    "**Suggestion**: Please ask a shorter or more specific question, for example "
+    "by naming one scheme, ministry, year, or document."
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt Templates
@@ -217,6 +236,11 @@ class GenerationResult:
 # Answer Generator
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_http_413(exc: BaseException | None) -> bool:
+    err = find_http_status_error(exc)
+    return err is not None and err.response.status_code == 413
+
+
 class AnswerGenerator:
     """
     Grounded answer generation using adaptive context budgeting.
@@ -367,6 +391,19 @@ class AnswerGenerator:
             raw_response=response.raw_response,
         )
 
+    def _context_too_large_result(self, prompt) -> GenerationResult:
+        """Graceful end state after context-overflow retries are exhausted."""
+        return GenerationResult(
+            answer=CONTEXT_TOO_LARGE_MESSAGE,
+            model=self.llm_client.model,
+            sources_used=[],
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            generation_latency_ms=0.0,
+            prompt=prompt,
+        )
+
     def _graceful_context_fail_result(self, source_ids, prompt) -> GenerationResult:
         return GenerationResult(
             answer=(
@@ -389,6 +426,51 @@ class AnswerGenerator:
     # ─────────────────────────────────────────────────────────────────────
     # Task-3 budgeted generate (plan attached)
     # ─────────────────────────────────────────────────────────────────────
+    def _heal_413_nonstream(self, question, retrieved_results, source_ids) -> GenerationResult:
+        """Existing HTTP 413 self-heal (unchanged behaviour): one aggressive rebuild."""
+        console.print("[bold yellow]⚠️ HTTP 413 — retrying with aggressive budget-conform rebuild...[/bold yellow]")
+        heal_prompt, heal_ids, hdiag = self.prepare_context(
+            question,
+            retrieved_results,
+            pool_override=AGGRESSIVE_HEAL_POOL,
+            budget_override=AGGRESSIVE_HEAL_TOKENS,
+        )
+        console.print(
+            f"[bold yellow]Retry pool={hdiag['pool']} admitted={hdiag['admitted']} "
+            f"prompt≈{hdiag['prompt_est_tokens']} tok.[/bold yellow]"
+        )
+        try:
+            start_time = time.monotonic()
+            response = self.llm_client.generate(prompt=heal_prompt, system=self.system_prompt)
+            latency_ms = (time.monotonic() - start_time) * 1000
+            return self._generation_result(response, heal_ids, latency_ms, heal_prompt)
+        except Exception as retry_err:  # noqa: BLE001
+            console.print(f"[bold red]❌ Self-healing retry failed: {retry_err}[/bold red]")
+            return self._graceful_context_fail_result(source_ids, heal_prompt)
+
+    def _recover_overflow_nonstream(self, question, retrieved_results) -> GenerationResult:
+        """Context-overflow recovery: at most len(OVERFLOW_RETRY_STEPS) smaller rebuilds."""
+        last_prompt = ""
+        for attempt, step in enumerate(OVERFLOW_RETRY_STEPS, start=1):
+            prompt, ids, diag = self.prepare_context(question, retrieved_results, **step)
+            last_prompt = prompt
+            console.print(
+                f"[bold yellow]⚠️ Context overflow — retry {attempt}/{len(OVERFLOW_RETRY_STEPS)} "
+                f"pool={step['pool_override']} budget={step['budget_override']} tok "
+                f"admitted={diag['admitted']} prompt≈{diag['prompt_est_tokens']} tok.[/bold yellow]"
+            )
+            try:
+                start_time = time.monotonic()
+                response = self.llm_client.generate(prompt=prompt, system=self.system_prompt)
+                latency_ms = (time.monotonic() - start_time) * 1000
+                return self._generation_result(response, ids, latency_ms, prompt)
+            except Exception as retry_err:  # noqa: BLE001
+                if not (is_context_overflow_error(retry_err) or _is_http_413(retry_err)):
+                    raise  # unrelated failure: surface it, do not mask as overflow
+                console.print("[bold yellow]Retry still exceeds the provider context limit.[/bold yellow]")
+        console.print("[bold red]❌ Context overflow persisted after all retries.[/bold red]")
+        return self._context_too_large_result(last_prompt)
+
     def _generate_budgeted(
         self,
         question: str,
@@ -415,29 +497,14 @@ class AnswerGenerator:
             response = self.llm_client.generate(prompt=user_prompt, system=self.system_prompt)
             latency_ms = (time.monotonic() - start_time) * 1000
             return self._generation_result(response, source_ids, latency_ms, user_prompt)
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != 413:
-                raise
-            # Budget-conform self-heal: same allocator, aggressive budget.
-            console.print("[bold yellow]⚠️ HTTP 413 — retrying with aggressive budget-conform rebuild...[/bold yellow]")
-            heal_prompt, heal_ids, hdiag = self.prepare_context(
-                question,
-                retrieved_results,
-                pool_override=AGGRESSIVE_HEAL_POOL,
-                budget_override=AGGRESSIVE_HEAL_TOKENS,
-            )
-            console.print(
-                f"[bold yellow]Retry pool={hdiag['pool']} admitted={hdiag['admitted']} "
-                f"prompt≈{hdiag['prompt_est_tokens']} tok.[/bold yellow]"
-            )
-            try:
-                start_time = time.monotonic()
-                response = self.llm_client.generate(prompt=heal_prompt, system=self.system_prompt)
-                latency_ms = (time.monotonic() - start_time) * 1000
-                return self._generation_result(response, heal_ids, latency_ms, heal_prompt)
-            except Exception as retry_err:  # noqa: BLE001
-                console.print(f"[bold red]❌ Self-healing retry failed: {retry_err}[/bold red]")
-                return self._graceful_context_fail_result(source_ids, heal_prompt)
+        except Exception as first_err:  # noqa: BLE001
+            if _is_http_413(first_err):
+                # Existing one-shot aggressive heal. The provider wraps HTTP
+                # errors in RuntimeError, so the status is read from __cause__.
+                return self._heal_413_nonstream(question, retrieved_results, source_ids)
+            if is_context_overflow_error(first_err):
+                return self._recover_overflow_nonstream(question, retrieved_results)
+            raise
 
     def generate(
         self,
@@ -605,14 +672,25 @@ class AnswerGenerator:
 
         start_time = time.monotonic()
         full_text: list[str] = []
+        # Output guard. ``emitted`` turns True the moment any user-visible event
+        # (tokens, reasoning, answer_start) is yielded. From then on this request
+        # never restarts generation and never replays a prompt: HTTP 413 recovery,
+        # the empty-output think retry and context-overflow retries are all
+        # allowed only while it is still False.
+        emitted = False
+        context_failed = False
+        retried_413 = False
+        overflow_steps_used = 0
+        # Fast mode resilience: some Ollama/qwen3 builds IGNORE think:false
+        # and spend the whole token budget on reasoning, leaving content
+        # EMPTY. We detect that (0 visible tokens from a think=false run)
+        # and retry once with thinking ON so the user always gets an answer.
+        think_disabled = getattr(self.llm_client, "think", None) is False
+        empty_retried = False
         try:
-            retried_413 = False
-            # Fast mode resilience: some Ollama/qwen3 builds IGNORE think:false
-            # and spend the whole token budget on reasoning, leaving content
-            # EMPTY. We detect that (0 visible tokens from a think=false run)
-            # and retry once with thinking ON so the user always gets an answer.
-            think_disabled = getattr(self.llm_client, "think", None) is False
-            empty_retried = False
+            # Internal event (never sent to the browser): the evidence the next
+            # attempt uses. The server keeps the sources panel in sync with it.
+            yield {"type": "attempt", "sources_used": list(source_ids)}
             while True:
                 try:
                     saw_token = False
@@ -625,6 +703,7 @@ class AnswerGenerator:
                                 text = chunk.get("text", "")
                                 saw_token = True
                                 full_text.append(text)
+                                emitted = True
                                 yield {"type": "tokens", "text": text}
                             elif ev_type == "reasoning":
                                 # Application-boundary think-gate (invariant):
@@ -637,25 +716,30 @@ class AnswerGenerator:
                                 # the provider flag. Plan-less consumers keep
                                 # legacy behavior (no plan → not gated).
                                 if self.plan is None or self.plan.thinking:
+                                    emitted = True
                                     yield {"type": "reasoning", "text": chunk.get("text", "")}
                             elif ev_type == "answer_start":
+                                emitted = True
                                 yield {"type": "answer_start"}
                             elif ev_type == "done":
                                 break
                         else:
                             saw_token = True
                             full_text.append(chunk)
+                            emitted = True
                             yield {"type": "tokens", "text": chunk}
-                    if not saw_token and think_disabled and not empty_retried:
+                    if not saw_token and think_disabled and not empty_retried and not emitted:
                         empty_retried = True
                         self.llm_client.think = True
                         full_text.clear()
                         print("[gen] think=false gave no answer — retrying with thinking ON")
                         continue
                     break
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 413 and not retried_413:
-                        console.print("[bold yellow]⚠️ HTTP 413 during stream — aggressive budget-conform rebuild...[/bold yellow]")
+                except Exception as e:  # noqa: BLE001
+                    # Existing HTTP 413 self-heal: one aggressive rebuild, and
+                    # only before any output reached the client.
+                    if _is_http_413(e) and not retried_413 and not emitted:
+                        console.print("[bold yellow]⚠️ HTTP 413 before output — aggressive budget-conform rebuild...[/bold yellow]")
                         retried_413 = True
                         stream_prompt, source_ids, _ = self.prepare_context(
                             question,
@@ -663,10 +747,37 @@ class AnswerGenerator:
                             pool_override=AGGRESSIVE_HEAL_POOL,
                             budget_override=AGGRESSIVE_HEAL_TOKENS,
                         )
+                        yield {"type": "attempt", "sources_used": list(source_ids)}
                         continue
-                    raise  # re-raise other HTTP errors or second 413
+                    if not emitted and is_context_overflow_error(e):
+                        if overflow_steps_used < len(OVERFLOW_RETRY_STEPS):
+                            step = OVERFLOW_RETRY_STEPS[overflow_steps_used]
+                            overflow_steps_used += 1
+                            console.print(
+                                f"[bold yellow]⚠️ Context overflow before any output — retry "
+                                f"{overflow_steps_used}/{len(OVERFLOW_RETRY_STEPS)} "
+                                f"pool={step['pool_override']} budget={step['budget_override']} tok.[/bold yellow]"
+                            )
+                            stream_prompt, source_ids, _ = self.prepare_context(question, context, **step)
+                            full_text.clear()
+                            yield {"type": "attempt", "sources_used": list(source_ids)}
+                            continue
+                        console.print("[bold red]❌ Context overflow persisted after all retries.[/bold red]")
+                        context_failed = True
+                        break
+                    # Anything else (second 413, unrelated errors, or any failure
+                    # after output started) propagates. Nothing is retried.
+                    raise
         finally:
             latency_ms = (time.monotonic() - start_time) * 1000
+
+        if context_failed:
+            # Graceful, non-empty answer. It cites no evidence, so the sources
+            # panel is synchronised to an empty list before the text is sent.
+            source_ids = []
+            yield {"type": "attempt", "sources_used": []}
+            full_text.append(CONTEXT_TOO_LARGE_MESSAGE)
+            yield {"type": "tokens", "text": CONTEXT_TOO_LARGE_MESSAGE}
 
         text = "".join(full_text)
         prompt_tokens = estimate_tokens(

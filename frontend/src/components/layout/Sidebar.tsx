@@ -1,6 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useSessionStore } from "@/store/useSessionStore";
-import { startNewSession } from "@/lib/sessionTransitions";
+import { deleteSessionSafely, startNewSession } from "@/lib/sessionTransitions";
 import { useFilteredSessions } from "@/hooks/useSessions";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { Message } from "@/components/chat/Message";
@@ -14,13 +14,11 @@ import { ChatInput } from "@/components/chat/ChatInput";
 export function Sidebar() {
   const sessions = useFilteredSessions();
   const activeId = useSessionStore((s) => s.activeSessionId);
-  const deleteSession = useSessionStore((s) => s.deleteSession);
   const renameSession = useSessionStore((s) => s.renameSession);
   const active = sessions.find((s) => s.id === activeId) ?? null;
 
   const send = useChatActionsStore((s) => s.send);
   const stop = useChatActionsStore((s) => s.stop);
-  const running = useChatActionsStore((s) => s.running);
 
   // Shared transition: also clears canvas/sources/graph/activity so a new
   // session never inherits the previous session's draft (see
@@ -62,7 +60,7 @@ export function Sidebar() {
         </button>
         <button
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border text-muted hover:bg-surface-2"
-          onClick={() => activeId && deleteSession(activeId)}
+          onClick={() => activeId && deleteSessionSafely(activeId)}
           title="Delete session"
         >
           <Trash2 className="h-3 w-3" />
@@ -88,7 +86,7 @@ export function Sidebar() {
       </div>
 
       {/* Query input (docked at bottom) */}
-      <ChatInput onSend={(q) => send?.(q)} onStop={() => stop?.()} streaming={running} />
+      <ChatInput onSend={(q) => send?.(q)} onStop={() => stop?.()} />
     </aside>
   );
 }

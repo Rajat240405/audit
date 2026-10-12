@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Send, Square } from "lucide-react";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { useChatRunStore } from "@/lib/chatRun";
 import { cn } from "@/utils/cn";
 
 interface ChatInputProps {
   onSend: (q: string) => void;
+  /** Stops the active answer, wherever it is shown. */
   onStop: () => void;
-  streaming: boolean;
 }
 
 /** Height the audit-query textarea auto-grows to before it scrolls. */
@@ -20,12 +21,16 @@ const TEXTAREA_MAX = 220;
  * button transcribes into the textarea (never auto-submits) so the user can
  * edit before sending.
  */
-export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
+export function ChatInput({ onSend, onStop }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const resetDraft = useDraftStore((s) => s.reset);
   const clearMessages = useSessionStore((s) => s.clearMessages);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  // One run at a time, in any chat. `run` is the active answer, if any.
+  const run = useChatRunStore((s) => s.active);
+  const generatingHere = !!run && run.sessionId === activeSessionId;
+  const busyElsewhere = !!run && !generatingHere;
   const turns = useSessionStore(
     (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.messages.length ?? 0
   );
@@ -121,7 +126,9 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
 
   const submit = () => {
     const q = value.trim();
-    if (!q || streaming) return;
+    // While an answer is generating (here or in another chat) the text stays
+    // in the box, so nothing typed is lost. The hint below explains why.
+    if (!q || run) return;
     setValue("");
     setSpeechError(null);
     onSend(q);
@@ -130,6 +137,9 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
   // Clear the whole conversation memory + reset the draft (the top "clear"
   // link next to "Memory: N turns").
   const clearAll = () => {
+    // Clearing the chat that is still generating would delete the message the
+    // run is writing to. Stop it first.
+    if (generatingHere) return;
     resetDraft();
     if (activeSessionId) clearMessages(activeSessionId);
   };
@@ -155,7 +165,12 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
           <span className="h-2 w-2 rounded-full bg-gray-400" />
           <span>Memory: {turns} turns</span>
         </div>
-        <button className="text-accent hover:underline" onClick={clearAll}>
+        <button
+          className="text-accent hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+          onClick={clearAll}
+          disabled={generatingHere}
+          title={generatingHere ? "Stop the answer before clearing this chat" : "Clear this chat"}
+        >
           clear
         </button>
       </div>
@@ -176,6 +191,14 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
           className="w-full resize-none overflow-y-auto border-none bg-transparent p-0 text-sm text-foreground placeholder:text-muted focus:outline-none"
           style={{ minHeight: "6rem" }}
         />
+
+        {run && (
+          <p role="status" className="mt-1.5 text-[11px] text-muted">
+            {busyElsewhere
+              ? "An answer is still generating in another chat. Stop it, or open that chat to follow it."
+              : "Generating… press Stop to cancel."}
+          </p>
+        )}
 
         {speechError && (
           <p className="mt-1.5 text-[11px] text-danger" role="alert">
@@ -206,18 +229,19 @@ export function ChatInput({ onSend, onStop, streaming }: ChatInputProps) {
             >
               {listening ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
             </button>
-            {streaming ? (
+            {run ? (
               <button
                 onClick={onStop}
                 className="flex h-7 w-7 items-center justify-center rounded-full bg-danger text-white"
-                title="Stop"
+                title={generatingHere ? "Stop" : "Stop the answer in another chat"}
+                aria-label={generatingHere ? "Stop" : "Stop the answer in another chat"}
               >
                 <Square className="h-3.5 w-3.5" />
               </button>
             ) : (
               <button
                 onClick={submit}
-                disabled={!value.trim()}
+                disabled={!value.trim() || !!run}
                 className={cn(
                   "flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background",
                   value.trim() ? "disabled:opacity-40" : "opacity-40"

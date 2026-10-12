@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from src.generation.client import LLMClient, ollama_base_url
 from src.generation.generator import AnswerGenerator
+from src.generation.stream_errors import log_line, user_facing_error
 from src.generation.request_scope import request_scope
 from src.retrieval.evidence_merge import merge_evidence
 from src.retrieval.query_agent import (
@@ -1803,6 +1804,16 @@ def chat_stream(request: ChatStreamRequest):
         t_ret_start = time.perf_counter()
         sources: list[dict] = []
         timings = None
+        # Sources view state. ``admitted_sources`` is the list the evidence was
+        # built from; ``displayed_*`` is what the browser currently shows (None
+        # until the first sources event). Kept in sync with the evidence each
+        # generation attempt actually uses (see _sync_sources below).
+        admitted_sources: list[dict] = []
+        displayed_sources: list[dict] | None = None
+        displayed_ids: list[str] | None = None
+        # True once answer text or reasoning has reached the client. After that
+        # the failure is shown as stopped-early and nothing is retried.
+        output_started = False
 
         # ── AGENT: language understanding (+ routing in AUTO only) ──
         # ONE LLM call, on the SAME client the answer generation uses, so the
@@ -2032,6 +2043,9 @@ def chat_stream(request: ChatStreamRequest):
                 )
                 sources = _filter_to_admitted(sources, admitted, key=lambda s: s["doc_id"])
 
+            admitted_sources = list(sources)
+            displayed_sources = list(sources)
+            displayed_ids = [str(s["doc_id"]) for s in sources]
             yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
 
             trace_payload = None
@@ -2097,12 +2111,34 @@ def chat_stream(request: ChatStreamRequest):
             ]
             # accumulate streamed text for the server-side grounding pass
             streamed_parts: list[str] = []
+
+            def _sync_sources(ids):
+                """Re-send the sources event when the evidence used differs from
+                the displayed list. Keeps admitted order and the original items;
+                ids that were not admitted are ignored (no metadata to show)."""
+                nonlocal displayed_sources, displayed_ids
+                if displayed_ids is None:
+                    return
+                wanted = {str(i) for i in ids or []}
+                shown = [s for s in admitted_sources if str(s["doc_id"]) in wanted]
+                shown_ids = [str(s["doc_id"]) for s in shown]
+                if shown_ids == displayed_ids:
+                    return
+                displayed_sources, displayed_ids = shown, shown_ids
+                print(f"[sources] sync to evidence used by final attempt n={len(shown)}")
+                yield _sse({"type": "sources", "sources": shown, "is_graph": is_graph})
+
             for ev in generator.generate_stream(generation_query, context):
-                if ev["type"] == "tokens":
+                if ev["type"] == "attempt":
+                    # Internal generator event (never a browser event): the
+                    # evidence the next attempt uses. Retries can narrow it.
+                    yield from _sync_sources(ev.get("sources_used"))
+                elif ev["type"] == "tokens":
                     if not _streaming_logged:
                         print("[generation] streaming_started")
                         _streaming_logged = True
                     streamed_parts.append(ev["text"])
+                    output_started = True
                     yield _sse({"type": "tokens", "text": ev["text"]})
                 elif ev["type"] == "reasoning":
                     # Frontend boundary gate (Bug-1 invariant): reasoning may
@@ -2115,10 +2151,14 @@ def chat_stream(request: ChatStreamRequest):
                     # the frontend either way.
                     if plan is None or plan.thinking:
                         # live chain-of-thought — forwarded to the Model Activity panel
+                        output_started = True
                         yield _sse({"type": "reasoning", "text": ev["text"]})
                 elif ev["type"] == "answer_start":
                     yield _sse({"type": "phase", "phase": "generating"})
                 elif ev["type"] == "meta":
+                    # Final evidence check: the answer's sources_used is the
+                    # authority for the sources panel.
+                    yield from _sync_sources(ev.get("sources_used"))
                     # generate_stream yields a FLAT meta event; wrap it for SSE
                     meta = {
                         "model": ev.get("model"),
@@ -2175,12 +2215,17 @@ def chat_stream(request: ChatStreamRequest):
 
         except Exception as e:  # noqa: BLE001 - never let the stream 500
             import traceback
-            print(f"[chat/stream] generation failed: {type(e).__name__}: {e}")
+            # Server log: diagnostics only (type, HTTP status, provider error
+            # fields). No prompt, no document text, no secrets.
+            print(f"[chat/stream] generation failed (output_started={output_started}): {log_line(e)}")
             print(traceback.format_exc(limit=5))
-            if sources:
-                yield _sse({"type": "sources", "sources": sources, "is_graph": is_graph})
+            shown = displayed_sources if displayed_sources is not None else sources
+            if shown:
+                yield _sse({"type": "sources", "sources": shown, "is_graph": is_graph})
             yield _sse({"type": "phase", "phase": "error"})
-            yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
+            # Browser: fixed, safe wording. Says so when partial text was shown.
+            yield _sse({"type": "error",
+                        "message": user_facing_error(e, partial_output=output_started)})
             yield _sse({"type": "done"})
         finally:
             generator.system_prompt = original_system_prompt
@@ -2310,6 +2355,7 @@ def ai_edit(payload: dict):
             f"Return the revised draft in full, markdown formatted."
         )
         prev_think = getattr(llm_client, "think", None)
+        edit_output_started = False
         try:
             # Same provider/model/base_url as chat (ACTIVE_CONFIG / llm_client).
             # Thinking off: edits are rewrites, not Deep-mode reasoning.
@@ -2326,6 +2372,7 @@ def ai_edit(payload: dict):
                 # only the visible tokens to the edit panel.
                 if isinstance(chunk, dict):
                     if chunk.get("type") == "tokens":
+                        edit_output_started = True
                         yield _sse({"type": "tokens", "text": chunk.get("text", "")})
                     elif chunk.get("type") == "done":
                         break
@@ -2334,7 +2381,10 @@ def ai_edit(payload: dict):
             yield _sse({"type": "status", "stage": "edit", "message": "Editing with AI…", "done": True})
             yield _sse({"type": "done"})
         except Exception as e:  # noqa: BLE001
-            yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:300]}"})
+            print(f"[edit] generation failed (output_started={edit_output_started}): {log_line(e)}")
+            yield _sse({"type": "error",
+                        "message": user_facing_error(e, partial_output=edit_output_started,
+                                                     action="edit")})
             yield _sse({"type": "done"})
         finally:
             llm_client.think = prev_think

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { ChatMessage, Session } from "@/types";
+import { recoverPersistedSessions } from "@/lib/answerStatus";
 
 interface SessionState {
   sessions: Session[];
@@ -89,8 +90,9 @@ export const MAX_PERSISTED_SESSIONS = 30;
  *
  *   Failed to execute 'setItem' … 'incois-sessions' exceeded the quota.
  *
- * What is preserved: the conversation itself (role/content/timestamps), titles,
- * pinning and ordering — i.e. everything History needs to restore a session.
+ * What is preserved: the conversation itself (role/content/timestamps/status),
+ * titles, pinning and ordering — i.e. everything History needs to restore a
+ * session. The status is kept so a partial answer stays labelled after reload.
  *
  * What is dropped: `sources`, `trace` and `meta`. These are per-request
  * artefacts of a live answer; the evidence panel, RAG-pipeline trace and
@@ -103,6 +105,7 @@ function persistableMessage(m: ChatMessage): ChatMessage {
     role: m.role,
     content: m.content,
     createdAt: m.createdAt,
+    ...(m.status ? { status: m.status } : {}),
   };
 }
 
@@ -190,26 +193,14 @@ export const useSessionStore = create<SessionState>()(
         })),
         activeSessionId: state.activeSessionId,
       }),
-      // App startup: DO NOT resume the previous chat. Create a fresh empty
-      // session and make it active (old sessions stay in History). Previous
-      // sessions are never auto-loaded.
-      onRehydrateStorage: () => (_state, _error) => {
-        // CRITICAL: zustand v5 merges the persisted state AFTER this callback,
-        // so any setState here is overwritten back to the old active session.
-        // Defer with setTimeout(0) so the fresh session is created AFTER the
-        // merge — old chats stay in History but the active session is empty.
-        setTimeout(() => {
-          const id = makeId();
-          const now = Date.now();
-          useSessionStore.setState((s) => ({
-            sessions: [
-              { id, title: "New session", pinned: false, createdAt: now, updatedAt: now, messages: [] },
-              ...s.sessions,
-            ],
-            activeSessionId: id,
-          }));
-        }, 0);
-      },
+      // Startup / reload: restore the previously active session if it still
+      // exists. No session is created here (explicit "New session" does that),
+      // and any answer that was still streaming is recovered as interrupted
+      // instead of being shown as live. See lib/answerStatus.ts.
+      merge: (persisted, current) => ({
+        ...current,
+        ...recoverPersistedSessions(persisted),
+      }),
     }
   )
 );

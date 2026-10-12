@@ -1,0 +1,21 @@
+diff --git a/src/generation/registry.py b/src/generation/registry.py
+--- a/src/generation/registry.py
++++ b/src/generation/registry.py
+@@ -1189,7 +1189,16 @@ class OpenAICompatibleProvider(BaseProvider):
+         saw_reasoning_channel = False
+         with httpx.Client(timeout=timeout_seconds) as client:
+             with client.stream("POST", self._completions_url(base_url), json=body) as resp:
++                # Diagnostic-only: expose vLLM/OpenAI-compatible error bodies
++                # before raise_for_status() turns them into a generic HTTP error.
++                if resp.is_error:
++                    try:
++                        error_body = resp.read().decode("utf-8", errors="replace")
++                    except Exception as body_exc:  # noqa: BLE001
++                        error_body = f"<failed to read error body: {type(body_exc).__name__}>"
++                    print(
++                        f"[vLLM] HTTP {resp.status_code} error body: "
++                        f"{error_body[:2000]}"
++                    )
+                 resp.raise_for_status()
+                 answered = False
+                 for line in resp.iter_lines():

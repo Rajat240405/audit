@@ -1,393 +1,45 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { streamChat, verifyAnswer } from "@/api/chat";
+import { useCallback, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
-import { showsHybridStages } from "@/lib/retrievalMode";
-import { useDraftStore, deepVerifyBlocksNewQuery } from "@/store/useDraftStore";
-import type { DeepVerifyStatus } from "@/store/useDraftStore";
-import { clearAnswerScopedPanels } from "@/lib/sessionTransitions";
-import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import { useToastStore } from "@/store/useToastStore";
-import { useActivityStore } from "@/store/useActivityStore";
-import { graphStages, hybridStages } from "@/utils/formatters";
-import { expandOrgFilter } from "@/lib/sourceFilter";
-import type { ChatMessage, KnowledgeMatchCard, SourceItem } from "@/types";
+import { usePipelineStore } from "@/store/usePipelineStore";
+import { showsHybridStages } from "@/lib/retrievalMode";
+import { hybridStages, graphStages } from "@/utils/formatters";
+import { getActiveRun, startChatRun, stopActiveRun, useChatRunStore } from "@/lib/chatRun";
 
 /**
- * Drives the full streaming flow: pipeline stages -> sources -> trace ->
- * token-by-token generation -> meta. Coordinates all stores; components stay
- * declarative.
+ * Thin React binding over the run registry (lib/chatRun.ts), which owns the
+ * streaming flow. Components keep a declarative API:
+ *
+ *  - `send(question)` starts a run in the active chat (refused while any run is
+ *    active).
+ *  - `stop()` stops the active run, from any chat.
+ *  - `running` is true when the active run belongs to the chat on screen.
+ *  - `busyElsewhere` is true when a run is generating in a different chat.
  */
 export function useChatStream() {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const run = useChatRunStore((s) => s.active);
   const retrievalMode = useAppStore((s) => s.retrievalMode);
-  const draftStore = useDraftStore;
 
-  const abortRef = useRef<AbortController | null>(null);
-  const [running, setRunning] = useState(false);
+  const running = !!run && run.sessionId === activeSessionId;
+  const busyElsewhere = !!run && !running;
 
-  // In-place edit sync: after an AI edit / verify rewrite, update the active
-  // session's last assistant message so the sidebar matches the canvas.
-  const syncDraftToSession = useCallback((text: string) => {
-    // update the BOUND message (the one the canvas mirrors), not a guessed
-    // "last assistant" — keeps canvas and sidebar exactly in sync.
-    const draft = useDraftStore.getState();
-    const sessions = useSessionStore.getState();
-    const sid = draft.activeSessionId;
-    const mid = draft.activeMessageId;
-    if (sid && mid) {
-      const active = sessions.sessions.find((s) => s.id === sid);
-      const msg = active?.messages.find((m) => m.id === mid);
-      if (msg && msg.content !== text) sessions.updateMessage(sid, mid, { content: text });
-    }
+  const send = useCallback((question: string) => {
+    startChatRun(question);
   }, []);
 
   const stop = useCallback(() => {
-    abortRef.current?.abort();
-    draftStore.getState().cancelStream();
-    usePipelineStore.getState().finish();
-    useActivityStore.getState().setPhase("done");
-    setRunning(false);
-  }, [draftStore]);
+    stopActiveRun();
+  }, []);
 
-  // reset pipeline stages when mode changes
+  // Stage definitions follow the retrieval mode. Skip while a run owns the
+  // pipeline view, so a mode change cannot overwrite a live run's stages.
   useEffect(() => {
+    if (getActiveRun()) return;
     usePipelineStore
       .getState()
       .setStages(showsHybridStages(retrievalMode) ? hybridStages() : graphStages());
   }, [retrievalMode]);
 
-  const send = useCallback(
-    (question: string) => {
-      const app = useAppStore.getState();
-      const sessions = useSessionStore.getState();
-
-      // Deep-mode verification gate: the user explicitly asked to WAIT for the
-      // previous answer's verification, so a new query would supersede (and
-      // silently discard) a result they asked to see. Only an explicit "Wait"
-      // blocks — light verification never sets this state, and Deep with no
-      // choice made stays non-blocking.
-      if (deepVerifyBlocksNewQuery(useDraftStore.getState().deepVerify)) {
-        useToastStore.getState().pushSticky(
-          "info",
-          "Deep verification is still running. Wait for it to finish, or choose “Start anyway” to continue now."
-        );
-        return;
-      }
-
-      let sessionId = sessions.activeSessionId;
-      if (!sessionId) {
-        sessionId = sessions.createSession();
-      }
-      const userMsg: ChatMessage = {
-        id: Math.random().toString(36).slice(2),
-        role: "user",
-        content: question,
-        createdAt: Date.now(),
-      };
-      sessions.addMessage(sessionId, userMsg);
-
-      // prepare a placeholder assistant message we'll update live
-      const assistantId = Math.random().toString(36).slice(2);
-      const assistantMsg: ChatMessage = {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        createdAt: Date.now(),
-      };
-      sessions.addMessage(sessionId, assistantMsg);
-      useDraftStore.getState().bindMessage(sessionId, assistantId);
-
-      const pipeline = usePipelineStore.getState();
-      pipeline.start();
-      pipeline.setStages(showsHybridStages(retrievalMode) ? hybridStages() : graphStages());
-
-      const draft = useDraftStore.getState();
-      draft.startStream();
-      // A genuinely new query: drop the previous answer's transient panels
-      // (Cross-Verified Facts + its investigations, Edit-with-AI comparison).
-      clearAnswerScopedPanels();
-
-      // Model Activity: reset + record the question so the panel shows live
-      // retrieval → thinking → answer data. The panel is NOT auto-opened on
-      // send — it only appears when the user explicitly clicks Activity. Data
-      // collection continues in the background regardless of panel visibility.
-      const activity = useActivityStore.getState();
-      activity.reset();
-      activity.setQuestion(question);
-
-      const abort = new AbortController();
-      abortRef.current = abort;
-      setRunning(true);
-
-      streamChat({
-        message: question,
-        mode: app.mode,
-        // Model-aware clamp at the send site: only send an effort the SELECTED
-        // model declares. `null` means the catalog hasn't resolved yet, so the
-        // stored pick is sent as-is (the backend enforces the ladder anyway);
-        // `[]` means the model has no ladder, so nothing is sent.
-        thinkingEffort:
-          app.modelEfforts === null
-            ? app.thinkingEffort
-            : app.modelEfforts.includes(app.thinkingEffort)
-              ? app.thinkingEffort
-              : undefined,
-        retrievalMode: app.retrievalMode,
-        draftStyle: app.draftStyle,
-        // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)
-        orgs: expandOrgFilter(app.sourceFilter.ministry, app.sourceFilter.orgs),
-        docCategories: app.sourceFilter.docCategories,
-        signal: abort.signal,
-        handlers: {
-          onStatus: (stage, message, done, _count, substage) => {
-            usePipelineStore.getState().markStage(stage, done ? "done" : "running");
-            // Substage events (embed/dense/bm25/rrf/rerank) still drive the RAG
-            // Pipeline tab, but must NOT replace the single left-chat phase
-            // status — otherwise "Retrieving documents…" is immediately
-            // overwritten by "BM25 search".
-            if (!substage) {
-              usePipelineStore.getState().setMessage(message);
-            }
-            // Fallback for backends without explicit phase events: entering
-            // the generate stage means the model is now thinking.
-            if ((stage === "generate" || stage === "generating") && !done) {
-              useActivityStore.getState().setPhase("thinking");
-            }
-          },
-          onSources: (sources) => {
-            const typed = sources as SourceItem[];
-            useDraftStore.getState().setSources(typed);
-            useActivityStore.getState().setSources(typed);
-            sessions.updateMessage(sessionId, assistantId, { sources: typed });
-          },
-          onTrace: (trace) => {
-            useDraftStore.getState().setTrace(trace as never);
-            sessions.updateMessage(sessionId, assistantId, { trace: trace as never });
-          },
-          onReasoning: (text) => {
-            const activity = useActivityStore.getState();
-            if (activity.phase !== "thinking") activity.setPhase("thinking");
-            activity.appendReasoning(text);
-          },
-          onPhase: (phase, model) => {
-            useActivityStore.getState().setPhase(phase as never, model);
-          },
-          onTokens: (text) => {
-            useDraftStore.getState().appendToken(text);
-            const activity = useActivityStore.getState();
-            if (activity.phase === "thinking") activity.setPhase("generating");
-            activity.appendAnswer(text.length);
-          },
-          onMeta: (meta) => {
-            const m = meta as { model?: string };
-            if (m.model) useActivityStore.getState().setModel(m.model);
-            const draft = useDraftStore.getState();
-            draft.commitStream();
-            draft.setLastMeta(meta as Record<string, unknown>);
-            const finalContent = useDraftStore.getState().content;
-            sessions.updateMessage(sessionId, assistantId, {
-              content: finalContent,
-              meta: meta as never,
-            });
-          },
-          onGrounding: (grounding) => {
-            // server-verified grounding overrides the client-side heuristic
-            useDraftStore.setState({
-              grounding: (grounding as Array<{
-                text: string;
-                found: boolean;
-                source?: string;
-              }>).map((g) => ({ text: g.text, found: g.found, source: g.source })),
-            });
-          },
-          onKnowledge: ({ matches, tier }) => {
-            const cards = matches as KnowledgeMatchCard[];
-            if (!cards.length) return; // weak/ambiguous → nothing to compare
-            useDraftStore.getState().setKnowledge(cards, tier);
-          },
-          onFinal: (text, droppedCount, _dropped, judgeRewritten) => {
-            const draft = useDraftStore.getState();
-            if (judgeRewritten && text && text !== draft.content) {
-              // The judge rewrote the answer to remove unsupported claims —
-              // replace the draft with the corrected version.
-              draft.applyEdit(text);
-              syncDraftToSession(text);
-            } else if (text && text !== draft.content && draft.isStreaming) {
-              // no rewrite — just commit the stream if it hasn't committed yet
-              draft.commitStream();
-            }
-            if (droppedCount > 0 || judgeRewritten) {
-              console.info(
-                `[grounding] ${droppedCount} flagged, judge-rewrite=${judgeRewritten}`
-              );
-            }
-            const finalContent = useDraftStore.getState().content || text;
-            sessions.updateMessage(sessionId, assistantId, { content: finalContent });
-          },
-          onError: (message) => {
-            useDraftStore.getState().cancelStream();
-            const content = useDraftStore.getState().content || `⚠️ ${message}`;
-            sessions.updateMessage(sessionId, assistantId, { content });
-            usePipelineStore.getState().finish();
-            useActivityStore.getState().setError(message);
-            setRunning(false);
-          },
-          onDone: () => {
-            const draftState = useDraftStore.getState();
-            // Always settle the assistant message's content at completion so a
-            // partially-streamed or interruption-free run never leaves the
-            // placeholder (empty content, rendered as "…") persisted to the
-            // session/History. Commit any still-pending stream text first.
-            if (draftState.isStreaming) {
-              draftState.commitStream();
-            }
-            // Snapshot the FRESH answer now that it is complete: the knowledge
-            // comparison panel needs a stable "Fresh RAG" side even after the
-            // user picks the saved answer (and the draft content changes).
-            if (useDraftStore.getState().knowledge) {
-              useDraftStore.getState().snapshotKnowledgeFresh();
-            }
-            const content = useDraftStore.getState().content;
-            if (content) {
-              const { sources, trace } = {
-                sources: useDraftStore.getState().sources,
-                trace: useDraftStore.getState().trace,
-              };
-              sessions.updateMessage(sessionId, assistantId, {
-                content,
-                sources,
-                trace: trace ?? undefined,
-              });
-            }
-            usePipelineStore.getState().finish();
-            // phase done — unless an error already moved it to "error"
-            const activity = useActivityStore.getState();
-            if (activity.phase !== "error") activity.setPhase("done");
-            setRunning(false);
-
-            // Non-blocking post-verification: the stream is DONE and the UI is
-            // free. Run grounding/judge/rewrite in the background and apply the
-            // revised text + grounding report when it arrives.
-            const finalContent = useDraftStore.getState().content;
-            const finalSources = useDraftStore.getState().sources;
-            if (finalContent && finalSources.length > 0) {
-              // BUG #1 FIX: snapshot the content when verify is dispatched.
-              // If the user edited the draft (or an AI-toolbar transform ran)
-              // while verify was in flight, do NOT clobber their work — toast
-              // and stage instead.
-              const baselineContent = finalContent;
-              const baselineSources = finalSources;
-              // IDENTITY of the message this verification belongs to. verify is
-              // deliberately NOT cancelled when a new query starts (it has no
-              // AbortSignal), so a late completion from Query N can otherwise
-              // land on Query N+1. Content equality cannot distinguish the two
-              // cases: startStream() clears content/sources, so a new query
-              // ALWAYS looks like "the user edited the draft". The identity is
-              // the only reliable discriminator.
-              const verifySessionId = sessionId;
-              const verifyMessageId = assistantId;
-              const isStillLive = () => {
-                const d = useDraftStore.getState();
-                return (
-                  d.activeSessionId === verifySessionId &&
-                  d.activeMessageId === verifyMessageId
-                );
-              };
-              const isDeep = useAppStore.getState().mode === "deep";
-              // Deep answers surface a "Verifying answer…" state with a
-              // Wait / Start-anyway choice, because a full-depth judge pass can
-              // still rewrite the answer. Light verification stays silent and
-              // non-blocking — it never enters this state.
-              if (isDeep) {
-                useDraftStore
-                  .getState()
-                  .beginDeepVerify(verifySessionId, verifyMessageId);
-              }
-              let verifyStatus: DeepVerifyStatus = "done";
-              verifyAnswer(
-                baselineContent,
-                baselineSources,
-                isDeep ? "full" : "light"
-              )
-                .then((res) => {
-                  // STALE GUARD: a newer query owns the draft/canvas now, so
-                  // discard this result ENTIRELY — no grounding, no canvas, no
-                  // session write, no toast.
-                  if (!isStillLive()) {
-                    console.info(
-                      "[verify] discarded stale result for message",
-                      verifyMessageId
-                    );
-                    return;
-                  }
-                  if (res.error) {
-                    useToastStore.getState().pushSticky("error", `Verification failed: ${res.error}`);
-                    return;
-                  }
-                  const draft = useDraftStore.getState();
-                  const userEdited =
-                    draft.content !== baselineContent ||
-                    draft.sources !== baselineSources;
-                  if (userEdited) {
-                    // User changed the draft during verify — don't overwrite.
-                    useToastStore.getState().pushSticky(
-                      "info",
-                      "Verification produced revisions, but you edited the draft — review the grounding report instead."
-                    );
-                    // still update the grounding report (safe, doesn't touch content)
-                    if (res.grounding && res.grounding.length) {
-                      useDraftStore.setState({
-                        grounding: res.grounding.map((g) => ({
-                          text: g.text, found: g.found, source: g.source,
-                        })),
-                      });
-                    }
-                    return;
-                  }
-                  if (res.text && res.text !== draft.content) {
-                    draft.applyEdit(res.text);
-                    syncDraftToSession(res.text);
-                    useToastStore.getState().pushSticky(
-                      "success",
-                      "✓ Answer verified & cleaned (unsupported claims removed)"
-                    );
-                  }
-                  if (res.grounding && res.grounding.length) {
-                    useDraftStore.setState({
-                      grounding: res.grounding.map((g) => ({
-                        text: g.text, found: g.found, source: g.source,
-                      })),
-                    });
-                  }
-                  sessions.updateMessage(verifySessionId, verifyMessageId, {
-                    content: useDraftStore.getState().content,
-                  });
-                })
-                .catch((err) => {
-                  console.warn("[verify] error:", err);
-                  verifyStatus = "error";
-                  // Same identity gate: a failure from a superseded query must
-                  // not surface a toast over the new one.
-                  if (!isStillLive()) return;
-                  useToastStore.getState().pushSticky("error", "Verification failed unexpectedly");
-                })
-                .finally(() => {
-                  // Identity-gated: if a newer query already superseded this
-                  // answer, settleDeepVerify is a no-op and the new banner is
-                  // left alone.
-                  if (isDeep) {
-                    useDraftStore
-                      .getState()
-                      .settleDeepVerify(verifySessionId, verifyMessageId, verifyStatus);
-                  }
-                });
-            }
-          },
-        },
-      });
-    },
-    [retrievalMode]
-  );
-
-  return { send, stop, running };
+  return { send, stop, running, busyElsewhere };
 }
