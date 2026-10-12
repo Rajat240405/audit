@@ -1,8 +1,11 @@
 """Recognise provider context-overflow rejections (vLLM / OpenAI-compatible).
 
 A request is a context overflow only when the provider answers HTTP 400 AND
-its error body names a context or input-token limit. A bare HTTP 400 is not
-enough: unrelated validation errors must keep failing loudly.
+its error body carries reliable context-limit evidence: the vLLM / OpenAI
+context-limit wording, or the specific ``context_length_exceeded`` code. A bare
+HTTP 400 is not enough, and neither is ``param=input_tokens`` on its own:
+other validation errors can name that parameter too, and they must keep failing
+loudly.
 
 Privacy: the helpers read only the provider's own error fields (message,
 type, param, code) and return at most a short truncated summary for logs.
@@ -17,13 +20,15 @@ import httpx
 
 OVERFLOW_STATUS = 400
 
-# Lower-case substrings that identify a context / input-token rejection.
+# Lower-case substrings that identify a context-limit rejection. Each one is
+# reliable evidence on its own. Deliberately NOT included: the bare parameter
+# name "input_tokens". vLLM reports its overflow with param "input_tokens", but
+# so can unrelated validation errors, and a bare HTTP 400 is never enough.
 # vLLM: "This model's maximum context length is N tokens ... your prompt
-# contains at least M input tokens", reported with param "input_tokens".
+# contains at least M input tokens".
 OVERFLOW_MARKERS: tuple[str, ...] = (
     "maximum context length",
     "prompt contains at least",
-    "input_tokens",
     "context_length_exceeded",
 )
 
