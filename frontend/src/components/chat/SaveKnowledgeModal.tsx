@@ -68,7 +68,7 @@ export function SaveKnowledgeModal({
         sources,
         savedBy: owner,
       });
-      pushToast("success", "Saved to Knowledge ✓ (shared with everyone)");
+      pushToast("success", "Saved to Knowledge (shared with everyone)");
       onOpenChange(false);
     } catch (e) {
       pushToast("error", `Save failed: ${e instanceof Error ? e.message : String(e)}`);

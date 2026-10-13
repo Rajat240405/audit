@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useToastStore } from "@/store/useToastStore";
@@ -73,9 +74,9 @@ export function KnowledgeComparisonPanel() {
         onClick={() => useDraftStore.getState().setKnowledge([], null)}
         title="Dismiss comparison"
         aria-label="Dismiss comparison"
-        className="absolute -top-2 -right-2 z-10 rounded-full border border-border bg-surface px-1.5 text-xs leading-4 text-muted shadow-sm hover:text-foreground"
+        className="absolute -top-2 -right-2 z-10 flex items-center justify-center rounded-full border border-border bg-surface px-1.5 py-0.5 text-muted shadow-sm hover:text-foreground"
       >
-        ✕
+        <X className="h-3 w-3" aria-hidden="true" />
       </button>
       {/* ── Saved Knowledge ─────────────────────────────────────────────── */}
       <div className="flex min-h-0 min-w-0 flex-col rounded-md border border-border bg-surface">
@@ -90,10 +91,10 @@ export function KnowledgeComparisonPanel() {
                 <button
                   data-testid="kn-prev"
                   onClick={() => setPage((p) => (p - 1 + matches.length) % matches.length)}
-                  className="rounded border border-border px-1.5 leading-5 hover:bg-surface-2"
+                  className="flex items-center rounded border border-border px-1.5 py-0.5 hover:bg-surface-2"
                   aria-label="Previous saved answer"
                 >
-                  ◀
+                  <ChevronLeft className="h-3 w-3" aria-hidden="true" />
                 </button>
                 <span data-testid="kn-page">
                   {Math.min(page, matches.length - 1) + 1} of {matches.length}
@@ -101,10 +102,10 @@ export function KnowledgeComparisonPanel() {
                 <button
                   data-testid="kn-next"
                   onClick={() => setPage((p) => (p + 1) % matches.length)}
-                  className="rounded border border-border px-1.5 leading-5 hover:bg-surface-2"
+                  className="flex items-center rounded border border-border px-1.5 py-0.5 hover:bg-surface-2"
                   aria-label="Next saved answer"
                 >
-                  ▶
+                  <ChevronRight className="h-3 w-3" aria-hidden="true" />
                 </button>
               </span>
             )}

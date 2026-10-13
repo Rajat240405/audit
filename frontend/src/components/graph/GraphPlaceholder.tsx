@@ -1,4 +1,4 @@
-import { Share2 } from "lucide-react";
+import { ArrowDown, Share2 } from "lucide-react";
 
 /**
  * Reserved Graph tab — no visualization yet (GraphRAG build is paused).
@@ -17,10 +17,10 @@ export function GraphPlaceholder() {
       </p>
       <div className="mt-2 w-full max-w-[240px] space-y-1 rounded border border-border bg-surface-2 p-2 text-left font-mono text-[10px] text-muted">
         <p>Question</p>
-        <p className="pl-2">↓ Entities</p>
-        <p className="pl-3">↓ Relationships</p>
-        <p className="pl-4">↓ Traversal</p>
-        <p className="pl-5">↓ Generated answer</p>
+        <p className="flex items-center gap-1 pl-2"><ArrowDown className="h-3 w-3 shrink-0" aria-hidden="true" />Entities</p>
+        <p className="flex items-center gap-1 pl-3"><ArrowDown className="h-3 w-3 shrink-0" aria-hidden="true" />Relationships</p>
+        <p className="flex items-center gap-1 pl-4"><ArrowDown className="h-3 w-3 shrink-0" aria-hidden="true" />Traversal</p>
+        <p className="flex items-center gap-1 pl-5"><ArrowDown className="h-3 w-3 shrink-0" aria-hidden="true" />Generated answer</p>
       </div>
     </div>
   );

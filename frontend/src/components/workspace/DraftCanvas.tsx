@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Pencil } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { markdownComponents } from "@/components/common/markdownComponents";
 import remarkGfm from "remark-gfm";
@@ -113,9 +114,9 @@ export function DraftCanvas() {
             {content && !isStreaming && editingText == null && (
               <button
                 onClick={startEdit}
-                className="rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-bold text-foreground shadow-sm hover:bg-surface-2"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-bold text-foreground shadow-sm hover:bg-surface-2"
               >
-                ✏️ Edit
+                <Pencil className="h-3 w-3" aria-hidden="true" />Edit
               </button>
             )}
             <span className="text-[10px] text-muted">

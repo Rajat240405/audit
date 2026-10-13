@@ -20,7 +20,7 @@ import {
   type IngestTargets,
 } from "@/api/model";
 import { useToastStore } from "@/store/useToastStore";
-import { FileUp, FolderTree, RefreshCw, Upload, X } from "lucide-react";
+import { FileUp, FolderTree, Loader2, RefreshCw, Upload, X } from "lucide-react";
 
 /**
  * Settings panel — big ingest-focused card. Operators either drop files into
@@ -320,8 +320,9 @@ export function Settings() {
             Status
           </p>
           {ingest?.running ? (
-            <p className="text-[12px] text-accent">
-              ⏳ Running — converting → embedding (bge-m3) → indexing…
+            <p className="flex items-center gap-1.5 text-[12px] text-accent">
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+              Running — converting → embedding (bge-m3) → indexing…
             </p>
           ) : last ? (
             <div className="space-y-1.5 text-[12px]">

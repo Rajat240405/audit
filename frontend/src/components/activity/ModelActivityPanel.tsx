@@ -1,5 +1,6 @@
 import { useStickyScroll } from "@/hooks/useStickyScroll";
 import {
+  ArrowRight,
   Brain,
   CheckCircle2,
   FileText,
@@ -195,7 +196,7 @@ export function ModelActivityPanel() {
           <section className="flex items-center justify-between gap-3 rounded-md border border-accent/30 bg-accent/5 px-3 py-2">
             <div>
               <p className="text-[11px] font-semibold text-foreground">
-                {phase === "generating" ? "Answer is generating…" : "Answer ready ✓"}
+                {phase === "generating" ? "Answer is generating…" : (<span className="inline-flex items-center gap-1">Answer ready<CheckCircle2 className="h-3 w-3 text-success" aria-hidden="true" /></span>)}
               </p>
               <p className="text-[10px] text-muted">
                 {answerChars.toLocaleString()} characters streamed
@@ -203,9 +204,10 @@ export function ModelActivityPanel() {
             </div>
             <button
               onClick={goToCanvas}
-              className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-[11px] font-bold text-white hover:opacity-90"
+              className="inline-flex shrink-0 items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-[11px] font-bold text-white hover:opacity-90"
             >
-              Go to canvas →
+              Go to canvas
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
             </button>
           </section>
         )}

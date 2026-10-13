@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useChatActionsStore } from "@/store/useChatActionsStore";
 import { useDraftStore } from "@/store/useDraftStore";
@@ -105,7 +106,17 @@ export function Workspace() {
         {/* data-tour: product-tour anchor for "Export" (Copy + Export menu). */}
         <div data-tour="workspace-actions" className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={copy}>
-            {copied ? "Copied ✓" : "Copy"}
+            {copied ? (
+              <>
+                <Check aria-hidden="true" />
+                Copied
+              </>
+            ) : (
+              <>
+                <Copy aria-hidden="true" />
+                Copy
+              </>
+            )}
           </Button>
           <ExportMenu />
         </div>

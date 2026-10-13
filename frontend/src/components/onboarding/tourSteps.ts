@@ -9,9 +9,9 @@
  *   Draft · History · Sources · RAG Pipeline ·
  *   Notes · Graph                                    pages/Workspace.tsx (TABS)
  *   Markdown / DOCX / TXT                            components/workspace/ExportMenu.tsx
- *   Cross-Verify Facts / Formalize / ✏️ Edit         components/workspace/DraftCanvas.tsx
- *   • Bullets ↑ Formal ⊖ Concise + Exec Summary
- *   ✓ Grammar ↔ Prose / Edit with AI                 components/workspace/Toolbar.tsx
+ *   Cross-Verify Facts / Formalize / Edit            components/workspace/DraftCanvas.tsx
+ *   Bullets / Formal / Concise / Exec Summary
+ *   Grammar / Prose / Edit with AI                    components/workspace/Toolbar.tsx
  *   Cross-Verified Facts / grounded / unsupported    components/workspace/FactVerificationPanel.tsx
  *   Retrieving / Thinking / Generating               components/activity/ModelActivityPanel.tsx
  *   Newly processed / Reconciled / changed /
@@ -128,8 +128,8 @@ export const TOUR_STEPS: TourStep[] = [
     id: "ai-editing",
     title: "AI editing",
     body:
-      "The chips restructure the draft in one pass — • Bullets, ↑ Formal, ⊖ Concise, + Exec Summary, ✓ Grammar and " +
-      "↔ Prose — and the instruction box takes anything you type, run with Edit with AI. Nothing is applied " +
+      "The chips restructure the draft in one pass — Bullets, Formal, Concise, Exec Summary, Grammar and " +
+      "Prose — and the instruction box takes anything you type, run with Edit with AI. Nothing is applied " +
       "silently: the result opens in a side-by-side Compare panel where you choose Keep Original or Use Edited. " +
       "Formalize is a one-click shortcut for the formal-register rewrite.",
     when: "Use a chip for a predictable transform, and the instruction box when you need something specific like \"add a recommendations section\".",

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Moon, Sun, Brain, Settings as SettingsIcon, LifeBuoy, BookMarked } from "lucide-react";
+import { Moon, Sun, Brain, Settings as SettingsIcon, LifeBuoy, BookMarked, Diamond } from "lucide-react";
 import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import type { RetrievalMode, ThinkingEffort } from "@/types";
@@ -144,7 +144,7 @@ export function Header() {
   return (
     <header className="flex shrink-0 items-center gap-3 border-b border-border bg-surface px-4 py-2">
       <div className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-wide">
-        <span className="text-accent">◆</span>
+        <Diamond className="h-3.5 w-3.5 fill-current text-accent" aria-hidden="true" />
         <span className="text-sm">INCOIS AUDIT PRO</span>
       </div>
 

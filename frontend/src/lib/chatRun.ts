@@ -420,7 +420,7 @@ function startVerification(run: ChatRun, content: string, sources: SourceItem[])
         draft.applyEdit(res.text);
         useToastStore.getState().pushSticky(
           "success",
-          "✓ Answer verified & cleaned (unsupported claims removed)"
+          "Answer verified & cleaned (unsupported claims removed)"
         );
       }
       if (res.grounding && res.grounding.length) {

@@ -109,7 +109,7 @@ export function useEditDraft() {
     if (p.sessionId && p.messageId) {
       useSessionStore.getState().updateMessage(p.sessionId, p.messageId, { content: p.revised });
     }
-    useToastStore.getState().push("success", `✓ Accepted "${p.label}"`);
+    useToastStore.getState().push("success", `Accepted "${p.label}"`);
     useEditStore.getState().accept();
   }, []);
 
