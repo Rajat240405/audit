@@ -92,6 +92,10 @@ class VerificationAuthority:
                 claim=g["text"], status=status,
                 source_doc_id=g.get("source"), method=method,
                 note=g.get("note", "")))
+        # Factual sentences: deterministic exact containment, report-only.
+        sentence_claims = self._sentence_verdicts(
+            ts.sentence_grounding_report(answer, sources))
+        report.claims.extend(sentence_claims)
 
         # 2) citation filter (informational; frozen behavior)
         _filtered, dropped = ts.apply_citation_filter(answer, sources)
@@ -100,7 +104,7 @@ class VerificationAuthority:
         # 3) LLM judge — full depth only, only claims the regex missed
         if depth == "full" and any(not g.get("found") for g in grounding):
             grounding = self.judge_claims(grounding, sources, client)
-            report.claims = self._claims_from_grounding(grounding)
+            report.claims = self._claims_from_grounding(grounding) + sentence_claims
 
         # 4) rewrite (full depth) — remove judge-rejected claims
         rejected = [
@@ -160,6 +164,10 @@ class VerificationAuthority:
             _filtered, citation_dropped = ts.apply_citation_filter(answer, sources)
             if depth == "full" and grounding and any(not c.get("found") for c in grounding):
                 grounding = self.judge_claims(grounding, sources, client)
+            # Factual sentences are appended AFTER the judge step: they are
+            # verified by exact containment only and are never judged,
+            # rejected or removed.
+            grounding = grounding + ts.sentence_grounding_report(answer, sources)
             rejected_claims = [
                 c["text"] for c in grounding
                 if (not c.get("found"))
@@ -203,7 +211,9 @@ class VerificationAuthority:
                 status = STATUS_REJECTED
             else:
                 status = STATUS_INSUFFICIENT
-            method = "llm_judge" if g.get("note") else "text"
+            note = str(g.get("note", ""))
+            judged = note.startswith(("verified by LLM judge", "rejected by LLM judge"))
+            method = "llm_judge" if judged else "text"
             out.append(ClaimVerdict(
                 claim=g["text"], status=status, source_doc_id=g.get("source"),
                 method=method, note=g.get("note", "")))
@@ -299,7 +309,7 @@ class VerificationAuthority:
                         if s.get("doc_id") == src:
                             stxt = ts.normalize(
                                 f"{s.get('question','')} {s.get('answer','')}")
-                            if ts.claim_supported(c["text"], stxt):
+                            if ts.claim_matches_source(c["text"], stxt):
                                 judge_trusted = True
                             break
                 if supported and not judge_trusted:
@@ -323,6 +333,20 @@ class VerificationAuthority:
             print(f"[llm-judge] failed ({type(e).__name__}: {e}) — using regex verdicts")
             print(traceback.format_exc(limit=3))
             return claims
+
+    @staticmethod
+    def _sentence_verdicts(sentences: list[dict]) -> list[ClaimVerdict]:
+        """Verdicts for factual-sentence checks. Never judged, never rejected."""
+        return [
+            ClaimVerdict(
+                claim=s["text"],
+                status=STATUS_VERIFIED if s["found"] else STATUS_INSUFFICIENT,
+                source_doc_id=s.get("source"),
+                method="text",
+                note=s.get("note", ""),
+            )
+            for s in sentences
+        ]
 
     # Backward-compatibility alias for the pre-WS3 private name. Thin
     # delegation — NOT a second implementation.

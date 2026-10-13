@@ -26,6 +26,9 @@ __all__ = [
     "singularize",
     "claim_candidates",
     "claim_supported",
+    "claim_matches_source",
+    "extract_factual_sentences",
+    "sentence_grounding_report",
     "grounding_report",
     "apply_citation_filter",
     "remove_rejected_sentences",
@@ -231,6 +234,121 @@ def grounding_report(answer: str, sources: list[dict]) -> list[dict]:
                 src = st["doc_id"]
                 break
         report.append({"text": c, "found": found, "source": src})
+    return report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sentence-level factual claims (exact containment only)
+# ─────────────────────────────────────────────────────────────────────────────
+# extract_claims() only sees figures, numbers, quotes, names and acronyms. A
+# factual sentence such as "INCOIS provides early warning services for tsunami
+# ..." therefore contributed only its acronym, so the sentence was never checked.
+# The helpers below check whole sentences by EXACT normalized containment. They
+# do not use alias expansion or singularization, because those would let a
+# source that merely mentions an alias support an unrelated sentence.
+
+SENTENCE_NOT_VERBATIM_NOTE = "not found verbatim in the cited sources (sentence check)"
+
+_MIN_SENTENCE_TOKENS = 6
+_SENTENCE_CITATION_RE = re.compile(r"\[\s*[Ss]ource\s*\d+\s*\]")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*•]|\d+[.)])\s+")
+_NON_STATEMENT_RE = re.compile(r"^\s*(?:#|\||>|```)")
+
+
+def is_sentence_claim(text: str) -> bool:
+    """True for a full sentence, not an entity name, figure or acronym.
+
+    Names written with their abbreviation (``Name (ABBR)``) keep the
+    alias-aware match. Figures and acronyms are far below the token threshold.
+    """
+    t = text.strip()
+    if not t or _NAMED_ABBR_RE.fullmatch(t):
+        return False
+    return len(normalize(t).split()) >= _MIN_SENTENCE_TOKENS
+
+
+def sentence_contained(sentence: str, src_normalized: str) -> bool:
+    """True when the whole sentence appears, word-bounded, in a normalized source."""
+    s = normalize(sentence)
+    return bool(s) and f" {s} " in f" {src_normalized} "
+
+
+def claim_matches_source(claim: str, src_normalized: str) -> bool:
+    """Verbatim gate for judge verdicts.
+
+    Sentence claims need exact containment. Entity and figure claims keep the
+    alias-aware ``claim_supported`` matcher unchanged.
+    """
+    if is_sentence_claim(claim):
+        return sentence_contained(claim, src_normalized)
+    return claim_supported(claim, src_normalized)
+
+
+def _has_fact_token(sentence: str) -> bool:
+    """A figure, an acronym, or a capitalised word after the first word."""
+    if re.search(r"\d", sentence):
+        return True
+    for m in _ACRONYM_RE.finditer(sentence):
+        tok = m.group(0)
+        if tok not in ACRONYM_STOPWORDS and len(tok) >= 3:
+            return True
+    words = re.findall(r"[A-Za-z][A-Za-z'’-]*", sentence)
+    return any(w[0].isupper() for w in words[1:])
+
+
+def extract_factual_sentences(answer: str) -> list[str]:
+    """Declarative sentences that carry a checkable fact.
+
+    A sentence qualifies when it is a statement (not a question, heading, table
+    row or quote block), has at least six words, and contains a fact-bearing
+    token (see ``_has_fact_token``). Citation tokens are removed from the text
+    that is checked. Duplicates are dropped.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"(?<=[.!?])\s+|\n+", answer or ""):
+        s = _LIST_MARKER_RE.sub("", raw.strip())
+        s = _SENTENCE_CITATION_RE.sub("", s)
+        s = s.replace("**", "").replace("__", "").replace("`", "").strip()
+        if not s or _NON_STATEMENT_RE.match(s) or s.endswith("?"):
+            continue
+        if not is_sentence_claim(s) or not _has_fact_token(s):
+            continue
+        key = normalize(s)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def sentence_grounding_report(answer: str, sources: list[dict]) -> list[dict]:
+    """Deterministic check of each factual sentence in the answer.
+
+    Returns [{text, found, source, note}]. A sentence is ``found`` only when its
+    whole text is contained in a cited source. A sentence that is not found is
+    reported as unverified. It is never sent to the LLM judge, rejected, or
+    removed from the answer, because the verbatim gate already fixes what the
+    judge could accept.
+    """
+    if not sources:
+        return []
+    src_texts = [
+        {
+            "doc_id": s["doc_id"],
+            "text": normalize(f"{s.get('question', '')} {s.get('answer', '')}"),
+        }
+        for s in sources
+    ]
+    report: list[dict] = []
+    for sentence in extract_factual_sentences(answer):
+        hit = next((st for st in src_texts if sentence_contained(sentence, st["text"])), None)
+        if hit is not None:
+            report.append({"text": sentence, "found": True,
+                           "source": hit["doc_id"], "note": ""})
+        else:
+            report.append({"text": sentence, "found": False, "source": None,
+                           "note": SENTENCE_NOT_VERBATIM_NOTE})
     return report
 
 
