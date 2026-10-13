@@ -18,6 +18,36 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class MatchedChunk:
+    """One retrieval unit that matched inside a parent document.
+
+    A unit is a long-document chunk (``{parent}_L{n}``), a V2 table/figure
+    child, or a Q/A chunk. ``text`` is the stored chunk text, never a
+    reconstruction. It is ``None`` when the matched unit is the parent row
+    itself, because the parent's text is the assembled evidence in
+    ``RetrievedResult.answer``.
+
+    Scores are the unit's own scores from each system that returned it.
+    ``None`` means that system did not return this unit. ``rerank_score`` is
+    set only on the single candidate the cross-encoder actually scored.
+    These scores are not on a common scale and must not be combined.
+    """
+
+    chunk_id: str
+    parent_doc_id: str
+    #: "parent" | "annexure" | "question" | "answer" | "v2_table" | "v2_figure"
+    unit_type: str
+    text: str | None = None
+    page: int | None = None
+    dense_score: float | None = None
+    bm25_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
+    #: True for the one candidate that the reranker scored for this parent.
+    reranked: bool = False
+
+
+@dataclass
 class RetrievedResult:
     """
     A single retrieved Q&A record with retrieval metadata.
@@ -62,6 +92,26 @@ class RetrievedResult:
     rerank_score: float | None = field(
         default=None,
         metadata={"description": "Cross-encoder rerank score (if applicable)"}
+    )
+
+    # Matched-unit provenance (display only; never sent to the generator).
+    # ``answer`` above is still the assembled parent evidence the model reads.
+    #: The units that matched inside this parent, representative first, capped.
+    matched_chunks: list[MatchedChunk] = field(
+        default_factory=list,
+        metadata={"description": "Matched units inside this parent (display provenance)"}
+    )
+    #: Count of ALL matched units for this parent. May exceed len(matched_chunks).
+    matched_chunk_total: int = field(
+        default=0,
+        metadata={"description": "Number of matched units before the display cap"}
+    )
+    #: Where each summary score came from: "parent" (the parent row itself)
+    #: or "best_chunk" (the highest score among its matched units). Keys are
+    #: "dense", "bm25" and "rrf". A value is None when no score exists.
+    score_sources: dict[str, str | None] = field(
+        default_factory=dict,
+        metadata={"description": "Basis of dense/bm25/rrf summary scores"}
     )
 
     def __repr__(self) -> str:

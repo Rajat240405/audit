@@ -777,6 +777,26 @@ class ChatRequest(ChatStreamRequest):
 
     pass
 
+class MatchedChunkItem(BaseModel):
+    """One retrieval unit that matched inside a source document.
+
+    ``text`` is the stored chunk text. It is ``None`` when the unit is the
+    parent row itself, so the parent evidence in ``SourceItem.answer`` is the
+    only text for it. Scores are that unit's own scores per system.
+    """
+
+    chunk_id: str
+    parent_doc_id: str
+    unit_type: str
+    text: str | None = None
+    page: int | None = None
+    dense_score: float | None = None
+    bm25_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
+    reranked: bool = False
+
+
 class SourceItem(BaseModel):
     doc_id: str
     ministry: str | None = None
@@ -784,6 +804,8 @@ class SourceItem(BaseModel):
     date: str | None = None  # R1: raw record date stamp, when the record carries one
     document_type: str | None = None
     score: float
+    # ``question`` and ``answer`` are the PARENT record. ``answer`` is the
+    # assembled parent evidence (the text the model reads), not the matched chunk.
     question: str
     answer: str
     # Retrieval trace — per-component scores (hybrid path only; None for graph path)
@@ -791,6 +813,11 @@ class SourceItem(BaseModel):
     bm25_score: float | None = None
     rrf_score: float | None = None
     rerank_score: float | None = None
+    # Matched-unit provenance (display only). See MatchedChunkItem.
+    matched_chunks: list[MatchedChunkItem] = []
+    matched_chunk_total: int = 0
+    # "parent" | "best_chunk" | None, per summary score key ("dense"/"bm25"/"rrf")
+    score_sources: dict[str, str | None] = {}
 
 
 class ChatResponse(BaseModel):
@@ -1357,21 +1384,11 @@ def _chat_endpoint_body(request: ChatRequest):
             # evidence is budgeted — metadata already in the index maps.
             _maybe_enrich_deep_neighbors(plan, results)
 
-        # Format Retrieved Results into Source Items
+        # Format Retrieved Results into Source Items. Built by the same
+        # serializer as the streaming path (_to_sources), so the matched-unit
+        # provenance and score_sources fields match across both paths.
         for r in results:
-            sources.append(SourceItem(
-                doc_id=r.doc_id,
-                ministry=r.metadata.get("ministry") or "-",
-                subject=r.metadata.get("subject") or "-",
-                date=r.metadata.get("date"),
-                score=float(r.score),
-                question=r.question,
-                answer=r.answer,
-                dense_score=float(r.dense_score) if r.dense_score is not None else None,
-                bm25_score=float(r.bm25_score) if r.bm25_score is not None else None,
-                rrf_score=float(r.rrf_score) if r.rrf_score is not None else None,
-                rerank_score=float(r.rerank_score) if r.rerank_score is not None else None,
-            ))
+            sources.append(SourceItem(**_to_sources([r])[0]))
 
         # Task 3: the model receives the budget-admitted set (not a fixed
         # count). prepare_context runs ONCE here (pure, no LLM); generate()
@@ -1640,10 +1657,33 @@ def _to_sources(results: list) -> list[dict]:
             "bm25_score": float(r.bm25_score) if r.bm25_score is not None else None,
             "rrf_score": float(r.rrf_score) if r.rrf_score is not None else None,
             "rerank_score": float(r.rerank_score) if r.rerank_score is not None else None,
+            # matched-unit provenance (display only; empty for graph results)
+            "matched_chunks": [_matched_chunk_dict(m) for m in (getattr(r, "matched_chunks", None) or [])],
+            "matched_chunk_total": int(getattr(r, "matched_chunk_total", 0) or 0),
+            "score_sources": dict(getattr(r, "score_sources", None) or {}),
             # graph-traversal provenance (None for hybrid results)
             "graph": (r.metadata or {}).get("graph"),
         })
     return out
+
+
+def _matched_chunk_dict(m) -> dict:
+    """MatchedChunk -> MatchedChunkItem dict. Scores are kept per unit, never combined."""
+    def _f(v):
+        return float(v) if v is not None else None
+
+    return {
+        "chunk_id": m.chunk_id,
+        "parent_doc_id": m.parent_doc_id,
+        "unit_type": m.unit_type,
+        "text": m.text,
+        "page": m.page,
+        "dense_score": _f(m.dense_score),
+        "bm25_score": _f(m.bm25_score),
+        "rrf_score": _f(m.rrf_score),
+        "rerank_score": _f(m.rerank_score),
+        "reranked": bool(m.reranked),
+    }
 
 
 def _sse(obj: dict) -> str:

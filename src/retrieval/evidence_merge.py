@@ -63,7 +63,26 @@ def _fuse(hybrid: RetrievedResult, graph: RetrievedResult) -> RetrievedResult:
         rerank_score=(
             hybrid.rerank_score if hybrid.rerank_score is not None else graph.rerank_score
         ),
+        # Matched-unit provenance is hybrid-only (graph results have none).
+        matched_chunks=list(hybrid.matched_chunks or graph.matched_chunks or []),
+        matched_chunk_total=hybrid.matched_chunk_total or graph.matched_chunk_total,
+        score_sources=_merge_score_sources(hybrid, graph),
     )
+
+
+def _merge_score_sources(hybrid: RetrievedResult, graph: RetrievedResult) -> dict:
+    """Per key, take the basis of whichever side supplied that summary score."""
+    merged: dict = {}
+    for key, h_score, g_score in (
+        ("dense", hybrid.dense_score, graph.dense_score),
+        ("bm25", hybrid.bm25_score, graph.bm25_score),
+        ("rrf", hybrid.rrf_score, graph.rrf_score),
+    ):
+        if h_score is None and g_score is None:
+            continue
+        side = hybrid if h_score is not None else graph
+        merged[key] = (side.score_sources or {}).get(key)
+    return merged
 
 
 def merge_evidence(

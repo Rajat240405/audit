@@ -21,7 +21,12 @@ from src.retrieval.hybrid.embedder import Embedder
 from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.hybrid.bm25_index import BM25Index
 from src.retrieval.hybrid.fusion import RRF
-from src.retrieval.hybrid.reranker import CrossEncoderReranker
+from src.retrieval.hybrid.reranker import CrossEncoderReranker, run_rerank_stage
+from src.retrieval.attribution import (
+    UnitInfo,
+    attribute_parent,
+    first_scores,
+)
 from src.retrieval.result import RetrievedResult
 
 
@@ -67,6 +72,24 @@ class RetrievalTimings:
     #: matching) and no encode happened here. Deliberately excluded from
     #: as_dict() so that keeps its float-only contract for existing consumers.
     embed_reused: bool = False
+
+    # Rerank-stage breakdown (diagnostics). Deliberately excluded from
+    # as_dict(): evaluation and CLI output must not change shape.
+    #: Whole reranking stage: candidate-text preparation + reranker call.
+    #: ``rerank_ms`` carries the same value for existing consumers.
+    rerank_total_ms: float = 0.0
+    #: Building the candidate document texts via ``_rerank_text_for``.
+    candidate_text_prepare_ms: float = 0.0
+    #: Obtaining the loaded CrossEncoder (the first call loads the weights).
+    model_access_ms: float = 0.0
+    #: The CrossEncoder ``predict`` call only.
+    model_predict_ms: float = 0.0
+    #: Number of candidates passed to the reranker.
+    candidate_count: int = 0
+    #: Effective CrossEncoder prediction batch size (RERANK_BATCH_SIZE).
+    rerank_batch_size: int = 0
+    #: "ok" | "failed" | "not_run". Set even when the reranker raises.
+    rerank_status: str = "not_run"
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -540,6 +563,32 @@ class HybridRAGPipeline:
             + assemble_parent_evidence(rec.answer_text or "", query, cand_id)
         )
 
+    def _unit_info(self, unit_id: str) -> UnitInfo | None:
+        """Stored text, type and page of a chunk-level unit (display provenance).
+
+        Same lookup order as ``_parent_id_of``. Returns the chunk's stored
+        ``chunk_text`` as-is, never a reconstruction. Returns ``None`` for
+        parent rows and unknown ids. Page comes from the V2 side table, when
+        present.
+        """
+        chunk = self._chunk_map.get(unit_id)
+        if chunk is None:
+            chunk = self._long_chunk_map.get(unit_id)
+        if chunk is None:
+            chunk = self._v2_chunk_map.get(unit_id)
+        if chunk is None:
+            return None
+        page = (self._v2_chunk_meta.get(unit_id) or {}).get("page")
+        try:
+            page = int(page) if page is not None else None
+        except (TypeError, ValueError):
+            page = None
+        return UnitInfo(
+            text=chunk.chunk_text or "",
+            unit_type=chunk.chunk_type.value,
+            page=page,
+        )
+
     def _parent_id_of(self, unit_id: str) -> str:
         """Parent document id for any retrieval unit: bare doc id, a
         use_chunking Q/A chunk id, or a long-doc ``_L{n}`` chunk id.
@@ -649,6 +698,14 @@ class HybridRAGPipeline:
         if on_stage:
             on_stage("rrf", {"count": len(fused_results)})
 
+        # Score attribution snapshot, taken BEFORE parent collapse. Each map is
+        # keyed by the unit id that the system actually returned (a parent row
+        # or a `_L{n}` / V2 / Q-A chunk id). Parent-level lookups below go
+        # through these maps, so chunk-only matches keep their real scores.
+        rrf_by_unit = first_scores(fused_results)
+        dense_by_unit = first_scores(dense_results)
+        bm25_by_unit = first_scores(bm25_results)
+
         # ── Stage 4.6: collapse duplicate units by parent (#1) ─────────────
         # Parents AND their `_L{n}`/Q/A chunks share one index, so a long
         # document could occupy several top_k reranker slots and the user saw
@@ -663,6 +720,8 @@ class HybridRAGPipeline:
         groups: dict[str, list[tuple[str, float]]] = {}
         for cand_id, score in fused_results:
             groups.setdefault(self._parent_id_of(cand_id), []).append((cand_id, score))
+        # The unit each parent is represented by. Only this unit is reranked.
+        collapse_rep: dict[str, str] = {}
         collapsed: list[tuple[str, float]] = []
         # Chunk-hit provenance rides along even when the canonical parent row
         # becomes the representative — downstream (metadata["chunk_ids"],
@@ -671,6 +730,7 @@ class HybridRAGPipeline:
         for pid, units in groups.items():
             best_id, best_score = units[0]
             rep_id = pid if any(u == pid for u, _ in units) else best_id
+            collapse_rep[pid] = rep_id
             collapsed.append((rep_id, best_score))
             hits = [
                 u for u, _ in units
@@ -689,6 +749,19 @@ class HybridRAGPipeline:
                 f"{len(collapsed)} distinct parents"
             )
         fused_results = collapsed
+
+        def _attribute(parent_id: str, rerank_score: float | None) -> dict:
+            """Score + matched-unit provenance for one parent (display only)."""
+            return attribute_parent(
+                parent_id,
+                groups.get(parent_id) or [],
+                dense=dense_by_unit,
+                bm25=bm25_by_unit,
+                rrf=rrf_by_unit,
+                representative=collapse_rep.get(parent_id),
+                rerank_score=rerank_score,
+                lookup=self._unit_info,
+            )
 
         # ── Stage 4.5: Metadata filters (doc_types / orgs / categories) ──
         # Optional, applied post-RRF pre-rerank. Union WITHIN an axis, AND
@@ -784,20 +857,14 @@ class HybridRAGPipeline:
         # capped at PARENT_EVIDENCE_CAP_TOKENS — the same structural
         # machinery evidence assembly uses, no new mechanism introduced).
         if self.use_reranker and fused_results:
-            t_rerank = time.perf_counter()
-            rerank_texts = {
-                cand_id: self._rerank_text_for(cand_id, query)
-                for cand_id, _s in fused_results
-            }
-
-            reranked_results = self.reranker.rerank(
-                query=query,
-                candidates=fused_results,
-                k=top_k,
-                doc_texts=rerank_texts,
+            final_results = run_rerank_stage(
+                self.reranker,
+                query,
+                fused_results,
+                top_k,
+                self._rerank_text_for,
+                timings,
             )
-            timings.rerank_ms = (time.perf_counter() - t_rerank) * 1000
-            final_results = reranked_results
         else:
             final_results = fused_results[:top_k]
         print(f"CrossEncoder candidates : {len(final_results)}")
@@ -845,11 +912,8 @@ class HybridRAGPipeline:
                 if not a_text:
                     a_text = f"ANSWER: {record.answer_text[:2000]} ... [Truncated to fit context budget]"
 
-                # Find standard scores from systems
-                dense_score = next((s for d_id, s in dense_results if d_id in [c[0] for c in chunks]), None)
-                bm25_score = next((s for d_id, s in bm25_results if d_id in [c[0] for c in chunks]), None)
-                rrf_score = next((s for d_id, s in fused_results if d_id in [c[0] for c in chunks]), None)
-
+                # Scores and matched units come from the unit-level snapshot
+                # (see `_attribute`), not from a parent-id lookup.
                 retrieved.append(RetrievedResult(
                     doc_id=parent_id,
                     question=q_text,
@@ -866,10 +930,8 @@ class HybridRAGPipeline:
                         ),
                         "document_type": record.metadata.document_type,
                     },
-                    dense_score=dense_score,
-                    bm25_score=bm25_score,
-                    rrf_score=rrf_score,
                     rerank_score=highest_score if self.use_reranker else None,
+                    **_attribute(parent_id, highest_score if self.use_reranker else None),
                 ))
         else:
             print(f"Parent aggregation : {len(final_results)}")
@@ -918,10 +980,10 @@ class HybridRAGPipeline:
                     record.answer_text or "", query, pid
                 )
 
-                dense_score = next((s for d_id, s in dense_results if d_id == pid), None)
-                bm25_score = next((s for d_id, s in bm25_results if d_id == pid), None)
-                rrf_score = next((s for d_id, s in fused_results if d_id == pid), None)
-
+                # Scores and matched units are attributed from the unit-level
+                # snapshot. Chunk-only matches keep their own dense/BM25/RRF
+                # scores, and each source states whether its score is the
+                # parent row's or the best matched chunk's.
                 retrieved.append(RetrievedResult(
                     doc_id=pid,
                     question=record.question_text,
@@ -958,10 +1020,8 @@ class HybridRAGPipeline:
                         # subsumed and skips flagged results.
                         **({"evidence_source": "parent_full"} if (g["chunks"] or long_doc) else {}),
                     },
-                    dense_score=dense_score,
-                    bm25_score=bm25_score,
-                    rrf_score=rrf_score,
                     rerank_score=g["score"] if self.use_reranker else None,
+                    **_attribute(pid, g["score"] if self.use_reranker else None),
                 ))
 
         timings.total_ms = (time.perf_counter() - total_start) * 1000

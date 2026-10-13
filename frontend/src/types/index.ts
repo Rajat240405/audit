@@ -1,6 +1,8 @@
 export type { ExecutionMode, ThinkingEffort, RetrievalMode, DraftStyle } from "./api";
 export type {
   SourceItem,
+  MatchedChunk,
+  ScoreBasis,
   GraphAnchor,
   GraphProvenance,
   RetrievalTrace,

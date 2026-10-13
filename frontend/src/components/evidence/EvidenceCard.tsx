@@ -5,6 +5,11 @@ import { cn } from "@/utils/cn";
 import { confidenceLabel, dominantComponent } from "@/utils/formatters";
 import { useDraftStore } from "@/store/useDraftStore";
 import { useDocViewerStore } from "@/store/useDocViewerStore";
+import {
+  matchedTotal,
+  rerankBasis,
+  scoreBasisLabel,
+} from "@/lib/matchedChunks";
 
 export function EvidenceCard({
   source,
@@ -18,13 +23,16 @@ export function EvidenceCard({
   const selectEvidence = useDraftStore((s) => s.selectEvidence);
   const openDoc = useDocViewerStore((s) => s.openDoc);
   const dominant = dominantComponent(source);
+  const total = matchedTotal(source);
 
+  // Each score is shown with its basis. "best_chunk" means the best matched
+  // section's score, not a score computed for the whole document.
   const scores = [
-    source.dense_score != null && ["Dense", `${source.dense_score.toFixed(3)}`],
-    source.bm25_score != null && ["BM25", `${source.bm25_score.toFixed(3)}`],
-    source.rrf_score != null && ["RRF", `${source.rrf_score.toFixed(3)}`],
-    source.rerank_score != null && ["Rerank", `${source.rerank_score.toFixed(3)}`],
-  ].filter(Boolean) as Array<[string, string]>;
+    source.dense_score != null && ["Dense", `${source.dense_score.toFixed(3)}`, source.score_sources?.dense ?? null],
+    source.bm25_score != null && ["BM25", `${source.bm25_score.toFixed(3)}`, source.score_sources?.bm25 ?? null],
+    source.rrf_score != null && ["RRF", `${source.rrf_score.toFixed(3)}`, source.score_sources?.rrf ?? null],
+    source.rerank_score != null && ["Rerank", `${source.rerank_score.toFixed(3)}`, rerankBasis(source)],
+  ].filter(Boolean) as Array<[string, string, ReturnType<typeof rerankBasis>]>;
 
   return (
     <div
@@ -48,10 +56,17 @@ export function EvidenceCard({
         </div>
       </div>
 
+      {total > 0 && (
+        <p className="mt-1.5 text-[10px] text-muted">
+          {total} matched {total === 1 ? "section" : "sections"}
+        </p>
+      )}
+
       <div className="mt-1.5 flex flex-wrap gap-1">
-        {scores.map(([label, val]) => (
+        {scores.map(([label, val, basis]) => (
           <span
             key={label}
+            title={scoreBasisLabel(basis) ? `Score from the ${scoreBasisLabel(basis)}` : undefined}
             className={cn(
               "rounded px-1.5 py-0.5 font-mono text-[9px]",
               dominant === label
@@ -60,6 +75,7 @@ export function EvidenceCard({
             )}
           >
             {label} {val}
+            {basis === "best_chunk" && <span className="ml-1 opacity-70">chunk</span>}
           </span>
         ))}
       </div>

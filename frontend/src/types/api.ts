@@ -50,6 +50,38 @@ export interface SourceItem {
   rerank_score: number | null;
   /** GraphRAG traversal provenance — only on graph-mode results. */
   graph?: GraphProvenance | null;
+  /**
+   * Matched retrieval units inside this document (display provenance). Absent
+   * on older payloads, graph results and fallbacks. Entries are capped on the
+   * server; `matched_chunk_total` is the real count.
+   */
+  matched_chunks?: MatchedChunk[];
+  matched_chunk_total?: number;
+  /**
+   * Basis of each summary score: "parent" = the parent row's own score;
+   * "best_chunk" = the best score among its matched units. Null/absent means
+   * no score. Scores from different systems are never comparable.
+   */
+  score_sources?: Partial<Record<"dense" | "bm25" | "rrf", ScoreBasis | null>>;
+}
+
+export type ScoreBasis = "parent" | "best_chunk";
+
+/** One retrieval unit that matched inside a document. */
+export interface MatchedChunk {
+  chunk_id: string;
+  parent_doc_id: string;
+  /** e.g. "annexure", "question", "answer", "v2_table", "v2_figure", "parent". */
+  unit_type: string;
+  /** Stored chunk text. Null for the parent row itself. */
+  text: string | null;
+  page?: number | null;
+  dense_score: number | null;
+  bm25_score: number | null;
+  rrf_score: number | null;
+  rerank_score: number | null;
+  /** True for the one unit the reranker scored for this document. */
+  reranked: boolean;
 }
 
 export interface RetrievalTrace {

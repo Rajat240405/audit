@@ -36,6 +36,7 @@ Nogueira et al. (2020). "Document Ranking with a Pretrained Sequence-to-Sequence
 from __future__ import annotations
 import numpy as np
 from sentence_transformers import CrossEncoder
+import inspect
 import os
 import re
 import time
@@ -393,6 +394,17 @@ class CrossEncoderReranker:
         return f"CrossEncoderReranker(model={self.model_name!r})"
 
 
+def _accepts_timing(reranker) -> bool:
+    """True when ``reranker.rerank`` declares a ``timing`` parameter (or **kwargs)."""
+    try:
+        params = inspect.signature(reranker.rerank).parameters
+    except (TypeError, ValueError):
+        return False
+    return "timing" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def run_rerank_stage(
     reranker: CrossEncoderReranker,
     query: str,
@@ -424,12 +436,17 @@ def run_rerank_stage(
         finally:
             timings.candidate_text_prepare_ms = (time.perf_counter() - t_prep) * 1000
 
+        # Only pass ``timing`` to rerankers that accept it. Custom or test
+        # rerankers keep the original call signature; their split timings stay 0.
+        rerank_kwargs = {}
+        if _accepts_timing(reranker):
+            rerank_kwargs["timing"] = rerank_info
         final = reranker.rerank(
             query=query,
             candidates=fused_results,
             k=top_k,
             doc_texts=rerank_texts,
-            timing=rerank_info,
+            **rerank_kwargs,
         )
         ok = True
         return final
