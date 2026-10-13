@@ -586,8 +586,24 @@ def _run_hybrid_warmup() -> None:
         # model property directly rather than running a throwaway rerank():
         # rerank() mutates `last_truncated_docs`, which the request trace
         # reads, so this loads the identical weights with no state change.
+        t_load = time.perf_counter()
         _ = p.reranker.model
-        print("[hybrid-warmup] reranker loaded")
+        load_s = time.perf_counter() - t_load
+        print(
+            f"[hybrid-warmup] reranker loaded in {load_s:.2f}s "
+            f"model={p.reranker.model_name} device={p.reranker.device}"
+        )
+
+        # Then one small SYNTHETIC prediction on the already-loaded model, so the
+        # first real rerank does not also pay the one-time inference setup. Its
+        # output is discarded. It touches no request state (no rerank(), no
+        # last_truncated_docs) and uses no corpus text.
+        info = p.reranker.warmup_inference()
+        print(
+            f"[hybrid-warmup] reranker dummy inference: {info['pairs']} synthetic "
+            f"pairs in {info['inference_ms'] / 1000:.2f}s "
+            f"model={info['model']} device={info['device']}"
+        )
 
         elapsed = time.perf_counter() - started
         _WARMUP_STATE.update(status="ready", seconds=round(elapsed, 1))

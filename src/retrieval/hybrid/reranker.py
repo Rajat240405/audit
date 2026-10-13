@@ -37,9 +37,14 @@ from __future__ import annotations
 import numpy as np
 from sentence_transformers import CrossEncoder
 import os
+import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from src.retrieval.result import RetrievedResult
+
+if TYPE_CHECKING:  # annotation only; avoids importing faiss-dependent pipeline
+    from src.retrieval.hybrid.pipeline import RetrievalTimings
 
 
 def resolve_rerank_model() -> str:
@@ -60,6 +65,12 @@ def resolve_rerank_model() -> str:
     if local.exists():
         return str(local)
     return "cross-encoder/ms-marco-MiniLM-L-12-v2"
+
+
+#: Synthetic warm-up input. Fixed strings only: never corpus content, never
+#: logged. Sized so the batch exercises tokenisation and the forward pass.
+_WARMUP_QUERY = "synthetic warm-up query"
+_WARMUP_DOC = "synthetic warm-up passage for model initialisation. " * 12
 
 
 class CrossEncoderReranker:
@@ -147,6 +158,7 @@ class CrossEncoderReranker:
         candidates: list[tuple[str, float] | RetrievedResult],
         k: int = 5,
         doc_texts: dict[str, str] | None = None,
+        timing: dict | None = None,
     ) -> list[tuple[str, float]]:
         """
         Re-rank candidates using the cross-encoder.
@@ -163,6 +175,10 @@ class CrossEncoderReranker:
         doc_texts : dict[str, str], optional
             Mapping from doc_id → full document text (question + answer).
             If not provided, uses RetrievedResult.question + answer fields.
+        timing : dict, optional
+            Out-parameter for diagnostics. Filled with ``candidate_count``,
+            ``model_access_ms`` and ``model_predict_ms`` even when a step
+            raises. Never changes the returned value.
 
         Returns
         -------
@@ -198,11 +214,25 @@ class CrossEncoderReranker:
         # Build query-document pairs for cross-encoder
         query_doc_pairs = [(query, doc_text) for _, doc_text in doc_pairs]
 
-        # Score all pairs
-        scores: list[float] = self.model.predict(
-            query_doc_pairs,
-            show_progress_bar=False,
-        )
+        info = timing if timing is not None else {}
+        info["candidate_count"] = len(candidates)
+
+        # Score all pairs. Model access (which lazily loads the weights on the
+        # first call) is timed apart from prediction so the two can be told
+        # apart in the logs.
+        t_access = time.perf_counter()
+        try:
+            model = self.model
+        finally:
+            info["model_access_ms"] = (time.perf_counter() - t_access) * 1000
+        t_predict = time.perf_counter()
+        try:
+            scores: list[float] = model.predict(
+                query_doc_pairs,
+                show_progress_bar=False,
+            )
+        finally:
+            info["model_predict_ms"] = (time.perf_counter() - t_predict) * 1000
 
         # Handle numpy array return type
         if hasattr(scores, "tolist") or isinstance(scores, np.ndarray):
@@ -217,6 +247,32 @@ class CrossEncoderReranker:
         )
 
         return reranked[:k]
+
+    def warmup_inference(self, n_pairs: int = 4) -> dict:
+        """Run one small synthetic prediction to warm the inference path.
+
+        Uses FIXED synthetic text and the already-loaded model. The predictions
+        are discarded: nothing is returned to callers, and no request state is
+        touched (``last_truncated_docs`` is not modified, and ``rerank()`` is not
+        called). Only timings and identifiers are returned, for logging.
+        """
+        t_access = time.perf_counter()
+        model = self.model
+        access_ms = (time.perf_counter() - t_access) * 1000
+
+        pairs = [
+            (_WARMUP_QUERY, f"{_WARMUP_DOC}[{i}]") for i in range(max(1, int(n_pairs)))
+        ]
+        t_predict = time.perf_counter()
+        model.predict(pairs, show_progress_bar=False)  # output intentionally discarded
+        inference_ms = (time.perf_counter() - t_predict) * 1000
+        return {
+            "model": self.model_name,
+            "device": self.device,
+            "pairs": len(pairs),
+            "model_access_ms": access_ms,
+            "inference_ms": inference_ms,
+        }
 
     def rerank_with_details(
         self,
@@ -259,3 +315,62 @@ class CrossEncoderReranker:
 
     def __repr__(self) -> str:
         return f"CrossEncoderReranker(model={self.model_name!r})"
+
+
+def run_rerank_stage(
+    reranker: CrossEncoderReranker,
+    query: str,
+    fused_results: list[tuple[str, float]],
+    top_k: int,
+    text_for: Callable[[str, str], str],
+    timings: RetrievalTimings,
+) -> list[tuple[str, float]]:
+    """Stage 5 rerank, with the time split into its parts.
+
+    ``text_for(cand_id, query)`` builds the text the cross-encoder sees for one
+    candidate. Preparation, model access and prediction are timed separately
+    and recorded on ``timings``. Metrics are recorded even when reranking
+    raises, and the exception then propagates unchanged. The returned list is
+    exactly what ``reranker.rerank`` returns.
+
+    Logs one structured line with counts and timings only. It never includes
+    the query, document text or model outputs.
+    """
+    t_total = time.perf_counter()
+    rerank_info: dict = {}
+    ok = False
+    try:
+        t_prep = time.perf_counter()
+        try:
+            rerank_texts = {
+                cand_id: text_for(cand_id, query) for cand_id, _s in fused_results
+            }
+        finally:
+            timings.candidate_text_prepare_ms = (time.perf_counter() - t_prep) * 1000
+
+        final = reranker.rerank(
+            query=query,
+            candidates=fused_results,
+            k=top_k,
+            doc_texts=rerank_texts,
+            timing=rerank_info,
+        )
+        ok = True
+        return final
+    finally:
+        total_ms = (time.perf_counter() - t_total) * 1000
+        timings.rerank_total_ms = total_ms
+        timings.rerank_ms = total_ms
+        timings.model_access_ms = float(rerank_info.get("model_access_ms", 0.0))
+        timings.model_predict_ms = float(rerank_info.get("model_predict_ms", 0.0))
+        timings.candidate_count = len(fused_results)
+        timings.rerank_status = "ok" if ok else "failed"
+        print(
+            f"[rerank-timing] status={timings.rerank_status} "
+            f"candidates={timings.candidate_count} top_k={top_k} "
+            f"device={getattr(reranker, 'device', '?')} "
+            f"text_prepare_ms={timings.candidate_text_prepare_ms:.1f} "
+            f"model_access_ms={timings.model_access_ms:.1f} "
+            f"model_predict_ms={timings.model_predict_ms:.1f} "
+            f"rerank_total_ms={timings.rerank_total_ms:.1f}"
+        )

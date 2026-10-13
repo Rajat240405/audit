@@ -21,7 +21,7 @@ from src.retrieval.hybrid.embedder import Embedder
 from src.retrieval.hybrid.vector_store import FAISSVectorStore
 from src.retrieval.hybrid.bm25_index import BM25Index
 from src.retrieval.hybrid.fusion import RRF
-from src.retrieval.hybrid.reranker import CrossEncoderReranker
+from src.retrieval.hybrid.reranker import CrossEncoderReranker, run_rerank_stage
 from src.retrieval.result import RetrievedResult
 
 
@@ -67,6 +67,22 @@ class RetrievalTimings:
     #: matching) and no encode happened here. Deliberately excluded from
     #: as_dict() so that keeps its float-only contract for existing consumers.
     embed_reused: bool = False
+
+    # Rerank-stage breakdown (diagnostics). Deliberately excluded from
+    # as_dict(): evaluation and CLI output must not change shape.
+    #: Whole reranking stage: candidate-text preparation + reranker call.
+    #: ``rerank_ms`` carries the same value for existing consumers.
+    rerank_total_ms: float = 0.0
+    #: Building the candidate document texts via ``_rerank_text_for``.
+    candidate_text_prepare_ms: float = 0.0
+    #: Obtaining the loaded CrossEncoder (the first call loads the weights).
+    model_access_ms: float = 0.0
+    #: The CrossEncoder ``predict`` call only.
+    model_predict_ms: float = 0.0
+    #: Number of candidates passed to the reranker.
+    candidate_count: int = 0
+    #: "ok" | "failed" | "not_run". Set even when the reranker raises.
+    rerank_status: str = "not_run"
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -784,20 +800,14 @@ class HybridRAGPipeline:
         # capped at PARENT_EVIDENCE_CAP_TOKENS — the same structural
         # machinery evidence assembly uses, no new mechanism introduced).
         if self.use_reranker and fused_results:
-            t_rerank = time.perf_counter()
-            rerank_texts = {
-                cand_id: self._rerank_text_for(cand_id, query)
-                for cand_id, _s in fused_results
-            }
-
-            reranked_results = self.reranker.rerank(
-                query=query,
-                candidates=fused_results,
-                k=top_k,
-                doc_texts=rerank_texts,
+            final_results = run_rerank_stage(
+                self.reranker,
+                query,
+                fused_results,
+                top_k,
+                self._rerank_text_for,
+                timings,
             )
-            timings.rerank_ms = (time.perf_counter() - t_rerank) * 1000
-            final_results = reranked_results
         else:
             final_results = fused_results[:top_k]
         print(f"CrossEncoder candidates : {len(final_results)}")
