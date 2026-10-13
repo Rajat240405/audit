@@ -73,6 +73,41 @@ export function consumeSSE(
   handlers: StreamHandlers,
   signal?: AbortSignal
 ): void {
+  consumeStream(
+    () =>
+      fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify(body),
+        signal,
+      }),
+    handlers
+  );
+}
+
+/**
+ * Follow a server generation run from frame `from` (replay, then live tail).
+ * Used to reconnect after a reload, from another tab, or after a dropped
+ * connection. Opening it never starts a generation.
+ */
+export function consumeRunEvents(
+  runId: string,
+  from: number,
+  handlers: StreamHandlers,
+  signal?: AbortSignal
+): void {
+  consumeStream(
+    () =>
+      fetch(`/api/chat/runs/${encodeURIComponent(runId)}/events?from=${from}`, {
+        method: "GET",
+        headers: { Accept: "text/event-stream" },
+        signal,
+      }),
+    handlers
+  );
+}
+
+function consumeStream(makeRequest: () => Promise<Response>, handlers: StreamHandlers): void {
   // P1.2: exactly-once completion. The backend sends an explicit `done`
   // event AND closes the stream — naive handlers ran onDone for both, so
   // Deep mode launched the post-verify request twice (wasted LLM, duplicate
@@ -83,12 +118,7 @@ export function consumeSSE(
     finished = true;
     handlers.onDone?.(complete);
   };
-  fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(body),
-    signal,
-  })
+  makeRequest()
     .then(async (res) => {
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");

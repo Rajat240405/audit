@@ -89,6 +89,8 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
+  /** Write revision of the session metadata (title, pin). See lib/sessionMerge.ts. */
+  rev?: number;
 }
 
 /**
@@ -112,6 +114,10 @@ export interface ChatMessage {
   trace?: RetrievalTrace;
   meta?: GenerationMeta;
   createdAt: number;
+  /** Server generation run that produces this answer (see generation_runs.py). */
+  runId?: string;
+  /** Write revision; the newer settled copy wins a merge. See lib/sessionMerge.ts. */
+  rev?: number;
 }
 
 export interface GroundingClaim {

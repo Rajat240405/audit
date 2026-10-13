@@ -15,15 +15,28 @@
  *     Switching back to a running chat re-projects the accumulated state and
  *     the stream continues from there. Nothing from one chat is ever written
  *     into the stores while another chat is displayed.
- *  4. Stop aborts the run and keeps the partial text, labelled "stopped".
- *     A stream that ends without the backend's explicit `done` event is kept
- *     as "interrupted" (truncated), never shown as a finished answer.
- *  5. Partial text is persisted while it streams (throttled). A reload cannot
- *     resume a run, so a message left as "streaming" is recovered as
- *     "interrupted" (lib/answerStatus.ts).
- *  6. Every late callback from a run that is closed is ignored.
+ *  4. The generation belongs to the SERVER (see generation_runs.py). The run id
+ *     is stored on the message, so a reload, another tab, or a dropped
+ *     connection can attach to the same run: the server replays every frame
+ *     produced so far and then follows it live. Attaching never starts a
+ *     second inference.
+ *  5. Only Stop cancels a run (an explicit request to the server, plus a local
+ *     abort). Closing, reloading or navigating a tab does not: the run goes on.
+ *  6. The server decides how a run ends (GET /api/chat/runs/{id}). A stream that
+ *     drops while the server still reports "running" is resumed, never shown as
+ *     interrupted. "interrupted" means the server lost the run or it is
+ *     incomplete. Partial text is kept and labelled.
+ *  7. Every late callback from a closed run, or from an earlier attempt of the
+ *     same run, is ignored. A replay therefore cannot duplicate tokens.
  */
-import { streamChat, verifyAnswer } from "@/api/chat";
+import {
+  attachRunStream,
+  cancelRun,
+  fetchRunStatus,
+  streamChat,
+  verifyAnswer,
+  type RunStatus,
+} from "@/api/chat";
 import type { StreamHandlers } from "@/api/client";
 import { useAppStore } from "@/store/useAppStore";
 import {
@@ -48,6 +61,7 @@ import type {
   GroundingClaim,
   KnowledgeMatchCard,
   PipelineStage,
+  RetrievalMode,
   RetrievalTrace,
   SourceItem,
 } from "@/types";
@@ -86,15 +100,32 @@ export interface LiveAnswer {
 }
 
 export interface ChatRun {
+  /** The server's generation id (also stored on the message). */
   runId: string;
   sessionId: string;
   messageId: string;
   question: string;
+  /** Aborts the CURRENT stream attempt only. Replaced for each attempt. */
   abort: AbortController;
   live: LiveAnswer;
+  /** Pristine copy of `live`, restored before each replay from frame 0. */
+  initial: LiveAnswer;
   persistTimer: ReturnType<typeof setTimeout> | null;
   /** Set once the run has closed. Late callbacks are then ignored. */
   closed: boolean;
+  /** Stream attempt number. Events from an older attempt are ignored. */
+  attempt: number;
+  /** The server has acknowledged this run (it sent at least one frame). */
+  acked: boolean;
+  /** A replay (not the original generation): its completion is never re-verified. */
+  replay: boolean;
+  /** Registered as this tab's active run (the canvas and Stop act on it). */
+  foreground: boolean;
+  /** The terminal status has been replayed once, so its full text is known. */
+  replayedTerminal: boolean;
+  /** Consecutive failed status checks (drives the retry back-off). */
+  retries: number;
+  resumeTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ChatRunState {
@@ -110,6 +141,74 @@ export function getActiveRun(): ChatRun | null {
 
 function newId(): string {
   return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * A run id the server accepts (32 hex characters). Generated with
+ * getRandomValues, which also works on plain-http origins where randomUUID does not.
+ */
+function newRunId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const RESUME_MIN_MS = 1000;
+const RESUME_MAX_MS = 15000;
+
+function backoffMs(retries: number): number {
+  return Math.min(RESUME_MAX_MS, RESUME_MIN_MS * 2 ** Math.min(retries, 4));
+}
+
+function cloneLive(live: LiveAnswer): LiveAnswer {
+  return JSON.parse(JSON.stringify(live)) as LiveAnswer;
+}
+
+/** Fresh projection state for a run, before any frame has arrived. */
+function newLive(retrievalMode: RetrievalMode, now: number): LiveAnswer {
+  const defs = showsHybridStages(retrievalMode) ? hybridStages() : graphStages();
+  return {
+    text: "",
+    committed: false,
+    content: "",
+    finished: false,
+    sources: [],
+    trace: null,
+    grounding: null,
+    meta: null,
+    knowledge: null,
+    reasoning: "",
+    answerChars: 0,
+    phase: "retrieving",
+    model: null,
+    error: null,
+    startedAt: now,
+    stages: defs.map((d) => ({ key: d.key, label: d.label, status: "pending" as const })),
+    stageMessage: "",
+  };
+}
+
+function makeRun(init: {
+  runId: string;
+  sessionId: string;
+  messageId: string;
+  question: string;
+  live: LiveAnswer;
+  replay: boolean;
+  foreground: boolean;
+}): ChatRun {
+  return {
+    ...init,
+    abort: new AbortController(),
+    initial: cloneLive(init.live),
+    persistTimer: null,
+    closed: false,
+    attempt: 0,
+    acked: false,
+    replayedTerminal: false,
+    retries: 0,
+    resumeTimer: null,
+  };
 }
 
 function messageContent(sessionId: string, messageId: string): string | undefined {
@@ -190,7 +289,11 @@ function schedulePersist(run: ChatRun): void {
   }, PERSIST_INTERVAL_MS);
 }
 
-type Outcome = "done" | "stopped" | "interrupted" | "error";
+/**
+ * How a run ends. `lost` is the server reporting the run unknown (it restarted or
+ * the run expired); it is stored as `interrupted`.
+ */
+type Outcome = "done" | "stopped" | "interrupted" | "error" | "lost";
 
 /**
  * Set on `pagehide` and cleared on `pageshow`. While the page is leaving, the
@@ -210,6 +313,10 @@ function finalize(run: ChatRun, outcome: Outcome): void {
     clearTimeout(run.persistTimer);
     run.persistTimer = null;
   }
+  if (run.resumeTimer) {
+    clearTimeout(run.resumeTimer);
+    run.resumeTimer = null;
+  }
   const L = run.live;
   const base = L.committed ? L.content : L.text;
   let content: string;
@@ -228,6 +335,11 @@ function finalize(run: ChatRun, outcome: Outcome): void {
     case "error":
       content = withNotice(base, `> ⚠️ ${L.error ?? "Generation failed."}`);
       break;
+    case "lost":
+      content = withNotice(base, NOTICE.serverLost);
+      L.error = NOTICE.serverLost.replace(/^> ⚠️ /, "");
+      L.phase = "error";
+      break;
     default:
       content = base;
       if (L.phase !== "error") L.phase = "done";
@@ -245,7 +357,7 @@ function finalize(run: ChatRun, outcome: Outcome): void {
 
   persist(run, {
     content,
-    status: outcome,
+    status: outcome === "lost" ? "interrupted" : outcome,
     sources: L.sources,
     trace: L.trace ?? undefined,
     meta: L.meta ?? undefined,
@@ -334,11 +446,15 @@ function startVerification(run: ChatRun, content: string, sources: SourceItem[])
     });
 }
 
-function buildHandlers(run: ChatRun): StreamHandlers {
+function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
   const L = run.live;
+  // Only the current attempt of a live run may write. Events from an earlier
+  // attempt (aborted, replaced by a replay) are dropped.
+  const current = () => !run.closed && run.attempt === attempt;
   return {
     onStatus: (stage, message, done, _count, substage) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       L.stages = markStage(L.stages, stage, done ? "done" : "running");
       // Substage events (embed/dense/bm25/rrf/rerank) drive the pipeline view
       // only. They must not replace the single phase label.
@@ -350,32 +466,37 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       project(run);
     },
     onSources: (sources) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       const typed = sources as SourceItem[];
       L.sources = typed;
       persist(run, { sources: typed });
       project(run);
     },
     onTrace: (trace) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       L.trace = trace as RetrievalTrace;
       persist(run, { trace: trace as RetrievalTrace });
       project(run);
     },
     onReasoning: (text) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       if (L.phase !== "thinking") L.phase = "thinking";
       L.reasoning += text;
       project(run);
     },
     onPhase: (phase, model) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       L.phase = phase as ActivityPhase;
       if (model) L.model = model;
       project(run);
     },
     onTokens: (text) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       L.text += text;
       if (L.committed) L.content = L.text;
       if (L.phase === "thinking") L.phase = "generating";
@@ -384,7 +505,8 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       schedulePersist(run);
     },
     onMeta: (meta) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       const m = meta as { model?: string };
       if (m.model) L.model = m.model;
       L.meta = meta as GenerationMeta;
@@ -396,7 +518,8 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       project(run);
     },
     onGrounding: (grounding) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       // Server-verified grounding overrides the client-side heuristic.
       L.grounding = (grounding as Array<{ text: string; found: boolean; source?: string }>).map(
         (g) => ({ text: g.text, found: g.found, source: g.source })
@@ -404,14 +527,16 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       project(run);
     },
     onKnowledge: ({ matches, tier }) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       const cards = matches as KnowledgeMatchCard[];
       if (!cards.length) return; // weak/ambiguous → nothing to compare
       L.knowledge = { matches: cards, tier, fresh: null };
       project(run);
     },
     onFinal: (text, droppedCount, _dropped, judgeRewritten) => {
-      if (run.closed) return;
+      if (!current()) return;
+      run.acked = true;
       if (!L.committed) {
         L.committed = true;
         L.content = L.text;
@@ -428,7 +553,7 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       project(run);
     },
     onError: (message) => {
-      if (run.closed) return;
+      if (!current()) return;
       // The page is leaving: the browser dropped the stream. onDone(false)
       // then closes the run as interrupted, not as a generation error.
       if (pageLeaving) return;
@@ -438,23 +563,135 @@ function buildHandlers(run: ChatRun): StreamHandlers {
       project(run);
     },
     onDone: (complete) => {
-      if (run.closed) return;
-      if (L.error) {
-        finalize(run, "error");
+      if (!current()) return;
+      if (complete) {
+        if (L.error) {
+          finalize(run, "error");
+          return;
+        }
+        finalize(run, "done");
+        // A replay of an answer that finished elsewhere is not re-verified: the
+        // verification result (if any) was stored by the original tab.
+        if (!run.replay && L.content && L.sources.length > 0) {
+          startVerification(run, L.content, L.sources);
+        }
         return;
       }
-      if (!complete) {
-        // The stream ended without the backend's explicit `done`, so the answer
-        // may be truncated. Keep it, labelled. Do not verify it.
-        finalize(run, "interrupted");
-        return;
-      }
-      finalize(run, "done");
-      if (L.content && L.sources.length > 0) {
-        startVerification(run, L.content, L.sources);
-      }
+      // The stream ended without the server's `done`. The page is leaving, so
+      // the server run simply continues; the next page load reconnects to it.
+      if (pageLeaving) return;
+      // Otherwise ask the server what happened. A dropped connection is not an
+      // interruption while the run is still generating.
+      scheduleSettle(run, run.retries === 0 ? 0 : backoffMs(run.retries));
     },
   };
+}
+
+/** Start one stream attempt that sends the question (the original generation). */
+function openPost(run: ChatRun, question: string, app: ReturnType<typeof useAppStore.getState>): void {
+  run.attempt += 1;
+  const attempt = run.attempt;
+  streamChat({
+    message: question,
+    mode: app.mode,
+    // Model-aware clamp at the send site: only send an effort the SELECTED
+    // model declares. `null` means the catalog hasn't resolved yet, so the
+    // stored pick is sent as-is (the backend enforces the ladder anyway);
+    // `[]` means the model has no ladder, so nothing is sent.
+    thinkingEffort:
+      app.modelEfforts === null
+        ? app.thinkingEffort
+        : app.modelEfforts.includes(app.thinkingEffort)
+          ? app.thinkingEffort
+          : undefined,
+    retrievalMode: app.retrievalMode,
+    draftStyle: app.draftStyle,
+    // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)
+    orgs: expandOrgFilter(app.sourceFilter.ministry, app.sourceFilter.orgs),
+    docCategories: app.sourceFilter.docCategories,
+    runId: run.runId,
+    signal: run.abort.signal,
+    handlers: buildHandlers(run, attempt),
+  });
+}
+
+/** Start one stream attempt that replays the run from frame 0, then follows it live. */
+function openReplay(run: ChatRun): void {
+  run.abort.abort();
+  run.abort = new AbortController();
+  run.attempt += 1;
+  const attempt = run.attempt;
+  // Rebuild the projection from the server's ordered frames, never on top of
+  // what this tab already had: that keeps the text exactly once and in order.
+  Object.assign(run.live, cloneLive(run.initial));
+  attachRunStream(run.runId, buildHandlers(run, attempt), run.abort.signal);
+}
+
+function scheduleSettle(run: ChatRun, delayMs: number): void {
+  if (run.closed) return;
+  if (run.resumeTimer) clearTimeout(run.resumeTimer);
+  run.resumeTimer = setTimeout(() => {
+    run.resumeTimer = null;
+    void settleNow(run);
+  }, delayMs);
+}
+
+/**
+ * Decide what a run that has stopped streaming should do, from the server's
+ * status (the only authority on how a run ends).
+ */
+async function settleNow(run: ChatRun): Promise<void> {
+  if (run.closed || pageLeaving) return;
+  let st: RunStatus | null | undefined;
+  try {
+    st = await fetchRunStatus(run.runId);
+  } catch {
+    st = undefined; // network or server error: unknown for now
+  }
+  if (run.closed) return;
+  if (st === undefined) {
+    // Unknown for now. Keep the answer streaming and try again later.
+    run.retries += 1;
+    scheduleSettle(run, backoffMs(run.retries));
+    return;
+  }
+  run.retries = 0;
+  if (st === null) {
+    // The server does not know this run.
+    if (!run.acked) {
+      // It never started: a refused request, not a lost answer.
+      if (!run.live.error) run.live.error = "The answer could not be started.";
+      finalize(run, "error");
+    } else {
+      finalize(run, "lost");
+    }
+    return;
+  }
+  if (st.status === "running") {
+    // Still generating on the server. A background run waits for its chat to be
+    // opened; a foreground run reconnects and follows it live.
+    if (run.foreground) openReplay(run);
+    return;
+  }
+  if (!run.replayedTerminal) {
+    // The run has ended. Replay its frames once to get the full text and the
+    // real end (done, or the stream closes without done).
+    run.replayedTerminal = true;
+    openReplay(run);
+    return;
+  }
+  switch (st.status) {
+    case "cancelled":
+      finalize(run, "stopped");
+      break;
+    case "failed":
+      run.live.error = NOTICE.serverFailed.replace(/^> ⚠️ /, "");
+      finalize(run, "error");
+      break;
+    default:
+      // "done" without its done frame, or "incomplete": keep the text, labelled.
+      finalize(run, "interrupted");
+  }
 }
 
 /**
@@ -490,43 +727,27 @@ export function startChatRun(question: string): ChatRun | null {
     createdAt: now,
   });
   const assistantId = newId();
+  const runId = newRunId();
+  // The run id is stored with the message before the first byte is sent, so a
+  // reload at any point can find and follow the run.
   sessions.addMessage(sessionId, {
     id: assistantId,
     role: "assistant",
     content: "",
     status: "streaming",
     createdAt: now,
+    runId,
   });
 
-  const defs = showsHybridStages(app.retrievalMode) ? hybridStages() : graphStages();
-  const run: ChatRun = {
-    runId: newId(),
+  const run = makeRun({
+    runId,
     sessionId,
     messageId: assistantId,
     question,
-    abort: new AbortController(),
-    persistTimer: null,
-    closed: false,
-    live: {
-      text: "",
-      committed: false,
-      content: "",
-      finished: false,
-      sources: [],
-      trace: null,
-      grounding: null,
-      meta: null,
-      knowledge: null,
-      reasoning: "",
-      answerChars: 0,
-      phase: "retrieving",
-      model: null,
-      error: null,
-      startedAt: now,
-      stages: defs.map((d) => ({ key: d.key, label: d.label, status: "pending" as const })),
-      stageMessage: "",
-    },
-  };
+    live: newLive(app.retrievalMode, now),
+    replay: false,
+    foreground: true,
+  });
 
   // Register first: from here on, a second send is refused synchronously.
   useChatRunStore.setState({ active: run });
@@ -538,39 +759,22 @@ export function startChatRun(question: string): ChatRun | null {
   useDraftStore.getState().bindMessage(sessionId, assistantId);
   writeStores(run);
 
-  streamChat({
-    message: question,
-    mode: app.mode,
-    // Model-aware clamp at the send site: only send an effort the SELECTED
-    // model declares. `null` means the catalog hasn't resolved yet, so the
-    // stored pick is sent as-is (the backend enforces the ladder anyway);
-    // `[]` means the model has no ladder, so nothing is sent.
-    thinkingEffort:
-      app.modelEfforts === null
-        ? app.thinkingEffort
-        : app.modelEfforts.includes(app.thinkingEffort)
-          ? app.thinkingEffort
-          : undefined,
-    retrievalMode: app.retrievalMode,
-    draftStyle: app.draftStyle,
-    // Tree-rule expansion: ministry -> flat org list (see lib/sourceFilter.ts)
-    orgs: expandOrgFilter(app.sourceFilter.ministry, app.sourceFilter.orgs),
-    docCategories: app.sourceFilter.docCategories,
-    signal: run.abort.signal,
-    handlers: buildHandlers(run),
-  });
+  openPost(run, question, app);
   return run;
 }
 
 /**
- * Stop the active run (from any chat). Its partial text is kept, labelled
- * "stopped". The run is closed before the abort, so no late event can apply.
+ * Stop the active run (from any chat). This is the ONLY way a generation is
+ * cancelled: the server is asked to cancel it, and the partial text is kept,
+ * labelled "stopped". The run is closed before the abort, so no late event can
+ * apply.
  */
 export function stopActiveRun(): boolean {
   const run = getActiveRun();
   if (!run || run.closed) return false;
   finalize(run, "stopped");
   run.abort.abort();
+  void cancelRun(run.runId);
   return true;
 }
 
@@ -586,6 +790,73 @@ export function attachActiveRunIfAny(sessionId: string): boolean {
   return true;
 }
 
+/**
+ * Open a chat whose answer was started earlier (in this tab before a reload, in
+ * another tab, or a closed tab). If the server still has the run, this tab
+ * follows it: the replay shows every token produced so far, then the live tail.
+ * Returns false when the message is not an answer that can be followed, or when
+ * this tab is already generating another answer.
+ */
+export function attachStoredRun(sessionId: string, messageId: string): boolean {
+  const current = getActiveRun();
+  if (current && !current.closed) {
+    return current.sessionId === sessionId && current.messageId === messageId;
+  }
+  const session = useSessionStore.getState().sessions.find((x) => x.id === sessionId);
+  const msg = session?.messages.find((m) => m.id === messageId);
+  if (!session || !msg || msg.status !== "streaming" || !msg.runId) return false;
+  const question =
+    [...session.messages]
+      .slice(0, session.messages.indexOf(msg))
+      .reverse()
+      .find((m) => m.role === "user")?.content ?? "";
+  const run = makeRun({
+    runId: msg.runId,
+    sessionId,
+    messageId,
+    question,
+    live: newLive(useAppStore.getState().retrievalMode, msg.createdAt),
+    replay: true,
+    foreground: true,
+  });
+  useChatRunStore.setState({ active: run });
+  useDraftStore.getState().bindMessage(sessionId, messageId);
+  writeStores(run);
+  scheduleSettle(run, 0);
+  return true;
+}
+
+/**
+ * On load: settle every answer that was still streaming when the page was last
+ * open, and that no tab is following now. Finished runs are replayed so their
+ * text reaches the chat. Running runs are left alone: they are followed when
+ * their chat is opened. Nothing is started.
+ */
+export function reconcileStoredRuns(): void {
+  const active = getActiveRun();
+  for (const session of useSessionStore.getState().sessions) {
+    for (const msg of session.messages) {
+      if (msg.status !== "streaming" || !msg.runId) continue;
+      if (active && active.messageId === msg.id) continue;
+      const question =
+        [...session.messages]
+          .slice(0, session.messages.indexOf(msg))
+          .reverse()
+          .find((m) => m.role === "user")?.content ?? "";
+      const run = makeRun({
+        runId: msg.runId,
+        sessionId: session.id,
+        messageId: msg.id,
+        question,
+        live: newLive(useAppStore.getState().retrievalMode, msg.createdAt),
+        replay: true,
+        foreground: false,
+      });
+      scheduleSettle(run, 0);
+    }
+  }
+}
+
 /** Page is closing or hidden: keep the partial text so a reload can show it. */
 export function flushActiveRunForUnload(): void {
   const run = getActiveRun();
@@ -597,8 +868,14 @@ if (typeof window !== "undefined") {
     pageLeaving = true;
     flushActiveRunForUnload();
   });
-  window.addEventListener("pageshow", () => {
+  window.addEventListener("pageshow", (e: PageTransitionEvent) => {
     pageLeaving = false;
+    // Restored from the back/forward cache: the stream was closed while the page
+    // was away. Follow the run again.
+    if (e.persisted) {
+      const run = getActiveRun();
+      if (run && !run.closed) scheduleSettle(run, 0);
+    }
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushActiveRunForUnload();

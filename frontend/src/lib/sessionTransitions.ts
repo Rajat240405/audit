@@ -25,7 +25,13 @@ import { useDraftStore } from "@/store/useDraftStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { clearAnswerScopedPanels } from "@/lib/answerScope";
-import { attachActiveRunIfAny, getActiveRun, stopActiveRun } from "@/lib/chatRun";
+import {
+  attachActiveRunIfAny,
+  attachStoredRun,
+  getActiveRun,
+  reconcileStoredRuns,
+  stopActiveRun,
+} from "@/lib/chatRun";
 
 export { clearAnswerScopedPanels } from "@/lib/answerScope";
 
@@ -70,9 +76,11 @@ export function startNewSession(): string {
 }
 
 /**
- * Open an existing session. If it is the chat whose answer is still
- * generating, the live state is re-attached. Otherwise the canvas loads the
- * last answer. Per-session state is cleared first, so nothing leaks across.
+ * Open an existing session. If its answer is still generating in this tab, the
+ * live state is re-attached. If it is generating on the server (started in
+ * another tab, or before a reload), this tab follows that run: the text produced
+ * so far is shown at once, and new tokens arrive live. Otherwise the canvas
+ * loads the last answer. Per-session state is cleared first, so nothing leaks.
  */
 export function restoreSession(id: string): void {
   const sessions = useSessionStore.getState();
@@ -86,6 +94,7 @@ export function restoreSession(id: string): void {
     ? [...session.messages].reverse().find((m) => m.role === "assistant")
     : undefined;
   if (!last) return;
+  if (last.status === "streaming" && last.runId && attachStoredRun(id, last.id)) return;
 
   const draft = useDraftStore.getState();
   draft.setDraft(last.content || "", last.sources ?? []);
@@ -106,12 +115,14 @@ export function deleteSessionSafely(id: string): void {
 let loadRestored = false;
 
 /**
- * Once per page load: re-open the session that was active before a reload or
- * a return to the page, if it still exists. Never creates a session.
+ * Once per page load: re-open the chat that THIS TAB had open before a reload,
+ * if it still exists (a new tab has none, so it starts fresh). Then settle any
+ * answer that was still streaming, in any chat. Never creates a session.
  */
 export function restoreActiveSessionOnLoad(): void {
   if (loadRestored) return;
   loadRestored = true;
   const id = useSessionStore.getState().activeSessionId;
   if (id && !getActiveRun()) restoreSession(id);
+  reconcileStoredRuns();
 }

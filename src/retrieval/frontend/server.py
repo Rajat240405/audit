@@ -16,12 +16,13 @@ import calendar
 import json
 import os
 import re
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -744,6 +745,10 @@ class ChatStreamRequest(BaseModel):
     doc_types: list[str] | None = None  # source filter: parliament / annual_report / ...
     orgs: list[str] | None = None          # source filter: expanded org slugs (tree rule already applied)
     doc_categories: list[str] | None = None  # source filter: annual / monthly / budget / ...
+    # Client-chosen id for this generation (see generation_runs.py). A repeat
+    # request with the same id ATTACHES to the existing run; it never starts a
+    # second inference. Omitted: the server picks one.
+    run_id: str | None = None
 
 
 class ChatRequest(ChatStreamRequest):
@@ -1629,6 +1634,13 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
+# Generation runs: one registry per process (see generation_runs.py). A run
+# outlives the HTTP connection that started it.
+from src.retrieval.frontend import generation_runs as gen_runs  # noqa: E402
+
+RUN_STORE = gen_runs.RunStore()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Grounding verification (server-side)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2230,7 +2242,49 @@ def chat_stream(request: ChatStreamRequest):
         finally:
             generator.system_prompt = original_system_prompt
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    run_id = request.run_id or secrets.token_urlsafe(18)
+    if not gen_runs.valid_run_id(run_id):
+        raise HTTPException(status_code=422, detail="invalid run_id")
+    # The generation runs on its own worker thread and is recorded frame by
+    # frame. This response is only one viewer of it: if the browser goes away,
+    # the run continues and can be replayed by the next viewer.
+    run, _created = RUN_STORE.get_or_start(run_id, event_stream)
+    return StreamingResponse(
+        gen_runs.stream_frames(run, 0),
+        media_type="text/event-stream",
+        headers={"X-Run-Id": run_id, "Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/chat/runs/{run_id}")
+def chat_run_status(run_id: str):
+    """Server-side status of one generation run (no answer text)."""
+    run = RUN_STORE.get(run_id) if gen_runs.valid_run_id(run_id) else None
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run")
+    return run.status_dict()
+
+
+@app.get("/api/chat/runs/{run_id}/events")
+def chat_run_events(run_id: str, from_: int = Query(0, alias="from", ge=0)):
+    """Replay frames ``from..`` of a run, then follow it live until it ends."""
+    run = RUN_STORE.get(run_id) if gen_runs.valid_run_id(run_id) else None
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run")
+    return StreamingResponse(
+        gen_runs.stream_frames(run, from_),
+        media_type="text/event-stream",
+        headers={"X-Run-Id": run_id, "Cache-Control": "no-cache"},
+    )
+
+
+@app.post("/api/chat/runs/{run_id}/cancel")
+def chat_run_cancel(run_id: str):
+    """Explicit Stop. The only request that cancels a generation."""
+    run = RUN_STORE.cancel(run_id) if gen_runs.valid_run_id(run_id) else None
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run")
+    return run.status_dict()
 
 
 @app.post("/api/investigate")

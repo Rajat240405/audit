@@ -1,4 +1,4 @@
-import { apiFetch, consumeSSE, type StreamHandlers } from "./client";
+import { apiFetch, consumeRunEvents, consumeSSE, type StreamHandlers } from "./client";
 import type {
   ChatMessage,
   DraftStyle,
@@ -23,6 +23,8 @@ export interface ChatStreamOptions {
   orgs?: string[];
   docCategories?: string[];
   topK?: number;
+  /** Client-chosen id of this generation (the server run). See api/chat.ts runs. */
+  runId?: string;
   signal?: AbortSignal;
   handlers: StreamHandlers;
 }
@@ -41,10 +43,52 @@ export function streamChat(opts: ChatStreamOptions): void {
       orgs: opts.orgs && opts.orgs.length ? opts.orgs : undefined,
       doc_categories: opts.docCategories && opts.docCategories.length ? opts.docCategories : undefined,
       top_k: opts.topK ?? 5,
+      run_id: opts.runId,
     },
     opts.handlers,
     opts.signal
   );
+}
+
+/** Server-side status of a generation run. `null`: the server does not know it. */
+export type RunState = "running" | "done" | "cancelled" | "failed" | "incomplete";
+
+export interface RunStatus {
+  run_id: string;
+  status: RunState;
+  frames: number;
+  cancel_requested: boolean;
+}
+
+/**
+ * Ask the server for a run's status. Resolves `null` when the server has no such
+ * run (restarted, or expired). Rejects on network or server errors, which the
+ * caller treats as "unknown for now", never as "interrupted".
+ */
+export async function fetchRunStatus(runId: string): Promise<RunStatus | null> {
+  const res = await fetch(`/api/chat/runs/${encodeURIComponent(runId)}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as RunStatus;
+}
+
+/**
+ * Follow a run from the start: every frame produced so far, then the live tail.
+ * Starts no generation. Used when a chat is opened, after a reload, or from
+ * another tab.
+ */
+export function attachRunStream(runId: string, handlers: StreamHandlers, signal?: AbortSignal): void {
+  consumeRunEvents(runId, 0, handlers, signal);
+}
+
+/**
+ * Explicit Stop: ask the server to cancel the run. Only this (and not a closed or
+ * reloaded tab) cancels a generation. Resolves whether or not the run existed.
+ */
+export async function cancelRun(runId: string): Promise<void> {
+  await fetch(`/api/chat/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }).catch(() => undefined);
 }
 
 export interface EditStreamOptions {
