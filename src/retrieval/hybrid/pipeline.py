@@ -81,6 +81,8 @@ class RetrievalTimings:
     model_predict_ms: float = 0.0
     #: Number of candidates passed to the reranker.
     candidate_count: int = 0
+    #: Effective CrossEncoder prediction batch size (RERANK_BATCH_SIZE).
+    rerank_batch_size: int = 0
     #: "ok" | "failed" | "not_run". Set even when the reranker raises.
     rerank_status: str = "not_run"
 

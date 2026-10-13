@@ -37,6 +37,7 @@ from __future__ import annotations
 import numpy as np
 from sentence_transformers import CrossEncoder
 import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -65,6 +66,65 @@ def resolve_rerank_model() -> str:
     if local.exists():
         return str(local)
     return "cross-encoder/ms-marco-MiniLM-L-12-v2"
+
+
+#: Environment variable for the CrossEncoder prediction batch size. Only the
+#: grouping of pairs into prediction batches changes; every pair is still scored.
+RERANK_BATCH_SIZE_ENV = "RERANK_BATCH_SIZE"
+#: Matches the sentence-transformers library default, so unset means no change.
+DEFAULT_RERANK_BATCH_SIZE = 32
+
+
+def parse_rerank_batch_size(raw: object) -> int | None:
+    """Return ``raw`` as a positive integer, or ``None`` if it is not one.
+
+    Accepts a positive ``int`` or a string of decimal digits (surrounding
+    whitespace allowed). Rejects bools, zero, negatives, floats and any other
+    text.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and re.fullmatch(r"\s*[0-9]+\s*", raw):
+        value = int(raw)
+        return value if value > 0 else None
+    return None
+
+
+def _resolve_rerank_batch_size(raw: object = None) -> tuple[int, str]:
+    """Return ``(batch_size, source)``; source is argument, env, default or fallback.
+
+    Never raises. A malformed, zero or negative value falls back to the default
+    and prints one warning, so a bad optional tuning setting cannot break
+    queries. ``raw`` is an explicit argument. When it is ``None`` the value
+    comes from ``RERANK_BATCH_SIZE``.
+    """
+    if raw is not None:
+        value = parse_rerank_batch_size(raw)
+        if value is not None:
+            return value, "argument"
+        print(
+            f"[reranker][warning] batch_size={str(raw)[:32]!r} is not a positive "
+            f"integer; using default {DEFAULT_RERANK_BATCH_SIZE}"
+        )
+        return DEFAULT_RERANK_BATCH_SIZE, "fallback"
+    env_raw = os.environ.get(RERANK_BATCH_SIZE_ENV)
+    if env_raw is None or not env_raw.strip():
+        return DEFAULT_RERANK_BATCH_SIZE, "default"
+    value = parse_rerank_batch_size(env_raw)
+    if value is not None:
+        return value, "env"
+    print(
+        f"[reranker][warning] {RERANK_BATCH_SIZE_ENV}={env_raw.strip()[:32]!r} is not "
+        f"a positive integer; using default {DEFAULT_RERANK_BATCH_SIZE}"
+    )
+    return DEFAULT_RERANK_BATCH_SIZE, "fallback"
+
+
+def resolve_rerank_batch_size(raw: object = None) -> int:
+    """Effective CrossEncoder batch size. See ``_resolve_rerank_batch_size``."""
+    return _resolve_rerank_batch_size(raw)[0]
 
 
 #: Synthetic warm-up input. Fixed strings only: never corpus content, never
@@ -98,6 +158,7 @@ class CrossEncoderReranker:
         model_name: str | None = None,
         device: str | None = None,
         max_length: int = 512,
+        batch_size: int | None = None,
     ) -> None:
         """
         Parameters
@@ -123,6 +184,10 @@ class CrossEncoderReranker:
         max_length : int
             Maximum token length for the cross-encoder.
             Default 512 handles most Q&A pairs.
+        batch_size : int, optional
+            Prediction batch size passed to ``CrossEncoder.predict``. Default
+            is the ``RERANK_BATCH_SIZE`` env var, else 32. Only the grouping of
+            pairs changes: every candidate is still scored.
         """
         if model_name is None:
             model_name = resolve_rerank_model()
@@ -135,6 +200,11 @@ class CrossEncoderReranker:
                 f"unset RERANK_DEVICE to return to the CPU policy."
             )
         self.max_length = max_length
+        self.batch_size, batch_source = _resolve_rerank_batch_size(batch_size)
+        print(
+            f"[reranker] batch_size={self.batch_size} source={batch_source} "
+            f"device={self.device}"
+        )
         self._model: CrossEncoder | None = None
         # GLM #5: docs that exceeded max_length in the last rerank (truncated
         # by the cross-encoder silently). Populated by rerank() so callers can
@@ -216,6 +286,7 @@ class CrossEncoderReranker:
 
         info = timing if timing is not None else {}
         info["candidate_count"] = len(candidates)
+        info["batch_size"] = self.batch_size
 
         # Score all pairs. Model access (which lazily loads the weights on the
         # first call) is timed apart from prediction so the two can be told
@@ -229,6 +300,7 @@ class CrossEncoderReranker:
         try:
             scores: list[float] = model.predict(
                 query_doc_pairs,
+                batch_size=self.batch_size,
                 show_progress_bar=False,
             )
         finally:
@@ -264,12 +336,15 @@ class CrossEncoderReranker:
             (_WARMUP_QUERY, f"{_WARMUP_DOC}[{i}]") for i in range(max(1, int(n_pairs)))
         ]
         t_predict = time.perf_counter()
-        model.predict(pairs, show_progress_bar=False)  # output intentionally discarded
+        model.predict(  # output intentionally discarded
+            pairs, batch_size=self.batch_size, show_progress_bar=False
+        )
         inference_ms = (time.perf_counter() - t_predict) * 1000
         return {
             "model": self.model_name,
             "device": self.device,
             "pairs": len(pairs),
+            "batch_size": self.batch_size,
             "model_access_ms": access_ms,
             "inference_ms": inference_ms,
         }
@@ -302,6 +377,7 @@ class CrossEncoderReranker:
 
         scores: list[float] = self.model.predict(
             query_doc_pairs,
+            batch_size=self.batch_size,
             show_progress_bar=False,
         )
         if hasattr(scores, "tolist") or isinstance(scores, np.ndarray):
@@ -364,10 +440,12 @@ def run_rerank_stage(
         timings.model_access_ms = float(rerank_info.get("model_access_ms", 0.0))
         timings.model_predict_ms = float(rerank_info.get("model_predict_ms", 0.0))
         timings.candidate_count = len(fused_results)
+        timings.rerank_batch_size = int(rerank_info.get("batch_size", 0))
         timings.rerank_status = "ok" if ok else "failed"
         print(
             f"[rerank-timing] status={timings.rerank_status} "
             f"candidates={timings.candidate_count} top_k={top_k} "
+            f"batch_size={timings.rerank_batch_size} "
             f"device={getattr(reranker, 'device', '?')} "
             f"text_prepare_ms={timings.candidate_text_prepare_ms:.1f} "
             f"model_access_ms={timings.model_access_ms:.1f} "
