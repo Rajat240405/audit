@@ -72,11 +72,16 @@ STATUS_FAILED = "failed"
 
 #: Version of the per-page extraction POLICY (routing decisions, not model or
 #: DPI). Bump when what the pipeline does for a given PDF changes. Current
-#: policy: PicoDet runs on every page before any OCR; a detected table is
-#: DOTS-owned, with no OCR, PyMuPDF or legacy fallback; a DOTS-rejected or
-#: unavailable table page fails the document; the cache only stores validated
-#: successes. Bumping this string invalidates existing entries exactly once.
-EXTRACTION_POLICY_VERSION = "table-first-v2"
+#: policy: PicoDet runs once per page before any OCR; a detected table is
+#: DOTS-owned, with no OCR, PyMuPDF or legacy fallback; a page PicoDet clears
+#: continues through the full legacy strategy order (scanned OCR, find_tables,
+#: embedded-image OCR, serial rows, prose); a DOTS-rejected or unavailable table
+#: page fails the document; a PicoDet fault fails the document rather than
+#: reading as "no table"; the cache only stores validated successes.
+#: v3: no-table pages were previously flattened to prose under routing, which
+#: dropped grid tables that the legacy find_tables strategy recovers. Entries
+#: written under v2 hold that flattened text, so they must miss once.
+EXTRACTION_POLICY_VERSION = "table-first-v3"
 
 
 # ── configuration ───────────────────────────────────────────────────────────

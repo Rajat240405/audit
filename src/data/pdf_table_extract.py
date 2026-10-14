@@ -402,28 +402,30 @@ def _scanned_page_ocr(page, page_num: int) -> dict[str, Any] | None:
     return None
 
 
-def _non_table_page_payload(page, page_num: int, lines: list[dict], enable_ocr: bool) -> dict[str, Any]:
-    """Page with no table: scanned-page OCR when there is no text layer, else prose.
-
-    Shared by the legacy and the table-routed paths so the no-table outcome is
-    identical in both. Under routing it runs only AFTER PicoDet has cleared the
-    page, so OCR can never pre-empt a table.
-    """
-    native_char_count = sum(len(l["text"]) for l in lines)
-    if not lines or native_char_count < 30:
-        if enable_ocr:
-            ocr_payload = _scanned_page_ocr(page, page_num)
-            if ocr_payload is not None:
-                return ocr_payload
-        if not lines:
-            return {"page_num": page_num, "type": "empty", "content": "", "tables": []}
-    return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
-
-
 def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[str, Any]:
+    """Select the per-page strategy.
+
+    Routing off (the default): the legacy strategies, unchanged. Routing on:
+    PicoDet decides first, see :func:`_extract_page_payload_routed`.
+    """
     if dots_routing_enabled():
         return _extract_page_payload_routed(page, page_num, enable_ocr=enable_ocr)
+    return _extract_page_payload_legacy(page, page_num, enable_ocr=enable_ocr)
 
+
+def _extract_page_payload_legacy(page, page_num: int, enable_ocr: bool = True) -> dict[str, Any]:
+    """The legacy page extraction, in its original strategy order.
+
+    1. scanned page (< 30 native chars): Tesseract OCR, when enabled;
+    2. PyMuPDF ``find_tables()`` grid tables;
+    3. embedded raster table, via OCR (when enabled);
+    4. borderless serial-row reconstruction;
+    5. baseline-merged prose.
+
+    Routing calls this for every page that PicoDet did not clear as a table, so
+    a page without a detected table gets the same extraction as with routing
+    off. The body is intentionally not re-ordered.
+    """
     lines = _page_lines(page)
     native_char_count = sum(len(l["text"]) for l in lines)
 
@@ -744,31 +746,28 @@ def _extract_page_payload_dots_only(page, page_num: int) -> dict[str, Any]:
 def _extract_page_payload_routed(page, page_num: int, enable_ocr: bool = True) -> dict[str, Any]:
     """Table-first routing for ONE page (``DOTS_ENABLED=true``).
 
-    Order is fixed and deliberate:
+    PicoDet runs exactly once per page, and the outcome has three possibilities:
 
-    1. **PicoDet runs on every page, before any OCR.** A scanned page with a
-       table must never be OCR'd instead of routed (the pre-fix behaviour).
-    2. **Table detected** -> DOTS is the exclusive extractor for the page. No
-       Tesseract, no PyMuPDF table strategies, no prose merge.
-       ``enforce_validation=True`` makes a rejected output a hard failure even
-       when ``DOTS_VALIDATOR_STRICT`` is off.
-    3. **No table** -> the shared non-table path (scanned OCR or prose), which
-       is the same outcome a document without tables gets today.
+    1. **PicoDet ran and detected a table.** DOTS is the only extractor for the
+       page. ``enforce_validation=True`` makes a rejected output a hard failure
+       (including ``RULE_NO_TABLE_FOUND``) even when ``DOTS_VALIDATOR_STRICT``
+       is off. There is no fallback to OCR, PyMuPDF or the legacy strategies.
+    2. **PicoDet ran and returned no table.** The page continues through
+       :func:`_extract_page_payload_legacy`, the same strategy order that runs
+       with routing off. The legacy strategies never call PicoDet again.
+    3. **PicoDet could not run, or returned a malformed result.**
+       ``table_detect.page_has_table`` raises ``TableDetectorUnavailable``.
+       That error propagates. Nothing here catches it, so a detector failure is
+       never read as "no table" and never reaches the legacy path.
 
-    Failure semantics (see ``raise`` sites): a detector error raises
-    ``TableDetectorUnavailable``; it is never read as "no table". A DOTS
-    outage, timeout or rejection raises ``DotsUnavailable`` /
-    ``DotsInvalidOutput``. There is no fallback to a weaker extractor anywhere
-    on this path.
+    A DOTS outage, timeout or rejection raises ``DotsUnavailable`` /
+    ``DotsInvalidOutput`` and propagates the same way.
     """
     from src.data import dots_client, table_detect
 
-    lines = _page_lines(page)
-    native_char_count = sum(len(l["text"]) for l in lines)
-
-    # TableDetectorUnavailable propagates: a detector that cannot run must not
-    # be confused with a page that has no table.
-    if table_detect.page_has_table(page):
+    if table_detect.page_has_table(page):  # PicoDet: the single call for this page
+        lines = _page_lines(page)
+        native_char_count = sum(len(l["text"]) for l in lines)
         content = dots_client.get_client().page_to_text(
             page,
             page_num,
@@ -778,7 +777,9 @@ def _extract_page_payload_routed(page, page_num: int, enable_ocr: bool = True) -
         )
         return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
 
-    return _non_table_page_payload(page, page_num, lines, enable_ocr)
+    # PicoDet ran successfully and reported no table. Continue through the
+    # unchanged legacy strategies. PicoDet is not consulted again for this page.
+    return _extract_page_payload_legacy(page, page_num, enable_ocr=enable_ocr)
 
 
 def _fuse_split_row(prev_row: list[str], cont_row: list[str]) -> list[str]:

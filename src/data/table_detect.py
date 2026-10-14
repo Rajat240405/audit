@@ -43,6 +43,7 @@ handling, thresholding and ordering without installing Paddle.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from typing import Any, Callable, NamedTuple, Sequence
@@ -308,17 +309,27 @@ def _load_backend() -> Callable[[bytes, float], Sequence[Any]]:
             # inference.yml) and silently discards every box below it, so a
             # configured 0.25 would never widen recall — only a client-side
             # filter above 0.5 would have had any effect.
-            results = predictor.predict(arr, threshold=threshold)
+            results = list(predictor.predict(arr, threshold=threshold) or [])
+            if not results:
+                # One image in, one result out. Zero results is a broken
+                # predictor, not an empty page, so it must not read as "no table".
+                raise TableDetectorUnavailable(
+                    "PicoDet returned no result for a page image (expected one)"
+                )
             out: list[Any] = []
-            for res in results or []:
+            for res in results:
                 payload = res
                 if hasattr(res, "json"):
                     payload = res.json
                 if isinstance(payload, dict):
                     payload = payload.get("res", payload)
-                    boxes = payload.get("boxes") or []
-                else:  # pragma: no cover - backend shape drift
-                    boxes = []
+                boxes = payload.get("boxes") if isinstance(payload, dict) else None
+                if not isinstance(boxes, list):
+                    # Shape drift (e.g. a PaddleX upgrade). An empty page reports
+                    # "boxes": []. A missing or non-list key is a malformed result.
+                    raise TableDetectorUnavailable(
+                        "PicoDet result has an unrecognised shape (no 'boxes' list)"
+                    )
                 out.extend(boxes)
             return out
 
@@ -353,12 +364,14 @@ def ensure_ready() -> None:
             f"{_ENV_ENABLED}=false but table routing requires the PicoDet detector"
         )
     backend = _load_backend()
+    thr = score_threshold()
     try:
-        raw = backend(_probe_png(), score_threshold())
+        raw = backend(_probe_png(), thr)
     except Exception as exc:  # noqa: BLE001 - surface as a typed failure
         raise TableDetectorUnavailable(f"PicoDet probe inference failed: {exc}") from exc
-    if raw is None:
-        raise TableDetectorUnavailable("PicoDet probe inference returned no result")
+    # Validate the shape as well as the call: a malformed probe result means the
+    # detector cannot be trusted, so the preflight must fail rather than pass.
+    _filter_tables(raw, thr)
 
 
 def _probe_png() -> bytes:
@@ -380,8 +393,10 @@ def _normalise_detection(item: Any) -> TableBox | None:
 
     Accepts a ``TableBox``, a mapping (``label``/``cls_id``/``score``/
     ``coordinate``|``bbox``), or a ``(label, score, bbox)`` sequence. Anything
-    unparseable returns ``None`` and is skipped rather than raising — a weird
-    detection must not abort a nightly run.
+    unparseable returns ``None``. The caller treats ``None`` as a MALFORMED
+    detector result and raises (see :func:`_filter_tables`). It is never read
+    as "no table": a detector whose output cannot be understood has not told us
+    that the page is table-free.
     """
     if isinstance(item, TableBox):
         return item
@@ -414,7 +429,9 @@ def _normalise_detection(item: Any) -> TableBox | None:
     try:
         score_f = float(score)
     except (TypeError, ValueError):
-        score_f = 0.0
+        return None  # a score we cannot read is a malformed detection
+    if not math.isfinite(score_f):
+        return None
 
     x0, y0, x1, y1 = coords
     return TableBox(
@@ -430,12 +447,31 @@ def is_table_label(label: str) -> bool:
 
 
 def _filter_tables(raw: Sequence[Any], threshold: float) -> list[TableBox]:
-    """Keep table-labelled detections at or above ``threshold``, in reading order."""
+    """Keep table-labelled detections at or above ``threshold``, in reading order.
+
+    A result that is not a sequence of well-formed detections raises
+    :class:`TableDetectorUnavailable`. Only a successfully parsed detection
+    with a non-table label is dropped. An unreadable one is not "no table".
+    """
+    if raw is None or isinstance(raw, (str, bytes, bytearray, dict)):
+        raise TableDetectorUnavailable(
+            "PicoDet returned a malformed result (expected a sequence of detections, "
+            f"got {type(raw).__name__})"
+        )
+    try:
+        items = list(raw)
+    except TypeError as exc:
+        raise TableDetectorUnavailable(
+            f"PicoDet returned a non-iterable result ({type(raw).__name__})"
+        ) from exc
+
     boxes: list[TableBox] = []
-    for item in raw or ():
+    for item in items:
         box = _normalise_detection(item)
         if box is None:
-            continue
+            raise TableDetectorUnavailable(
+                f"PicoDet returned a malformed detection: {str(item)[:200]}"
+            )
         if not is_table_label(box.label):
             continue
         if box.score < threshold:
