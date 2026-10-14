@@ -45,8 +45,7 @@ export interface StreamHandlers {
   onReasoning?: (text: string) => void;
   onPhase?: (phase: string, model?: string) => void;
   onMeta?: (meta: unknown) => void;
-  onGrounding?: (grounding: unknown) => void;
-  onFinal?: (text: string, droppedCount: number, dropped: string[], judgeRewritten: boolean) => void;
+  onFinal?: (text: string) => void;
   /** Saved-knowledge matches offered alongside the fresh RAG answer. */
   onKnowledge?: (payload: {
     matches: unknown[];
@@ -110,7 +109,7 @@ export function consumeRunEvents(
 function consumeStream(makeRequest: () => Promise<Response>, handlers: StreamHandlers): void {
   // P1.2: exactly-once completion. The backend sends an explicit `done`
   // event AND closes the stream — naive handlers ran onDone for both, so
-  // Deep mode launched the post-verify request twice (wasted LLM, duplicate
+  // Deep mode launched a duplicate follow-up request (wasted LLM, duplicate
   // toasts/races). Whichever fires first wins; the rest no-op.
   let finished = false;
   const finish = (complete: boolean) => {
@@ -176,16 +175,8 @@ function consumeStream(makeRequest: () => Promise<Response>, handlers: StreamHan
           case "meta":
             handlers.onMeta?.(ev.meta);
             break;
-          case "grounding":
-            handlers.onGrounding?.(ev.grounding);
-            break;
           case "final":
-            handlers.onFinal?.(
-              String(ev.text ?? ""),
-              typeof ev.citation_dropped_count === "number" ? ev.citation_dropped_count : 0,
-              Array.isArray(ev.citation_dropped) ? ev.citation_dropped : [],
-              Boolean(ev.judge_rewritten)
-            );
+            handlers.onFinal?.(String(ev.text ?? ""));
             break;
           case "knowledge":
             // Additive event: unknown to older handlers, which simply never

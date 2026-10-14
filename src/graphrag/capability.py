@@ -4,14 +4,13 @@ Explicit graph mode: the user's query is resolved to deterministic anchors
 (no LLM at query time, no automatic routing — spec §18/§19), documents are
 pulled by direct and one expansion-hop graph edges, ranked, and returned as
 the SHARED ``RetrievedResult`` contract (src/retrieval/result.py) so the
-existing serving paths and the downstream answer/verification pipeline can
-consume them unchanged (spec §17).
+existing serving paths can consume them unchanged (spec §17).
 
 Graph evidence (spec §12/§17): every retrieved document carries the facts
 that produced it (fact keys, relationship types, origins) and
 ``GraphCapability.explain`` returns full ``GraphEvidence`` records
 (fact + supporting documents + evidence snippets + origin + timestamps) in a
-shape Phase 3's centralized verification can consume.
+shape the graph provenance views can consume.
 
 Graceful degradation (WS0 freeze preserved): when the graph backend is not
 configured or unreachable, ``build_graph_capability`` returns a disabled
@@ -56,7 +55,7 @@ EXPANSION_FANOUT_LIMIT = 25
 
 @dataclass
 class GraphEvidence:
-    """One graph fact with full provenance (Phase-3 verification input)."""
+    """One graph fact with full provenance."""
 
     fact_key: str
     rel: str
@@ -90,14 +89,6 @@ class DisabledGraphCapability:
 
     def explain(self, results: list[RetrievedResult]) -> list[GraphEvidence]:
         return []
-
-    def verify_answer(self, answer: str, results: list[RetrievedResult],
-                      depth: str = "light", llm_client=None):
-        """Honest-empty verification: no graph, so no graph evidence and no
-        graph integrity claim — an EMPTY report, never a passing one."""
-        from src.verification.contract import VerificationReport
-
-        return VerificationReport(method=depth)
 
     def stats(self) -> dict:
         return {"disabled": True, "reason": self.reason}
@@ -258,29 +249,6 @@ class GraphCapability:
             first_seen_at=f.first_seen_at, updated_at=f.updated_at,
             source_field=f.source_field,
         )
-
-    # ── verification (WS3: delegates to the ONE authority) ────────────────
-
-    def verify_answer(self, answer: str, results: list[RetrievedResult],
-                      depth: str = "light", llm_client=None):
-        """Verify an answer against THIS capability's graph evidence.
-
-        Thin entry point only: the graph results are normalized into the
-        shared verification contract (``graph_results`` resolves each cited
-        fact's Document→SUPPORTS→Fact provenance through the store) and handed
-        to the central ``VerificationAuthority``. GraphRAG contains NO
-        verification logic of its own.
-
-        ``llm_client`` is injected (the caller passes the client built by the
-        existing generation architecture); ``depth="light"`` makes zero LLM
-        calls. No provider or model is referenced here.
-        """
-        from src.verification.authority import VerificationAuthority
-        from src.verification.sources import graph_results
-
-        evidence = graph_results(results, capability=self)
-        return VerificationAuthority(llm_client=llm_client).verify(
-            evidence, answer, depth=depth)
 
     def _node_dict(self, key: str) -> dict:
         n: Optional[NodeView] = self.store.get_node(key)

@@ -4,8 +4,6 @@ import ReactMarkdown from "react-markdown";
 import { markdownComponents } from "@/components/common/markdownComponents";
 import remarkGfm from "remark-gfm";
 import { useDraftStore } from "@/store/useDraftStore";
-import { FactVerificationPanel } from "./FactVerificationPanel";
-import { DeepVerifyBanner } from "./DeepVerifyBanner";
 import { useSessionStore } from "@/store/useSessionStore";
 import { KnowledgeComparisonPanel } from "@/components/workspace/KnowledgeComparisonPanel";
 import { useStickyAnchorScroll } from "@/hooks/useStickyScroll";
@@ -13,30 +11,19 @@ import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
 import { useEditStore } from "@/store/useEditStore";
 import { Toolbar } from "./Toolbar";
-import { refreshGrounding, summarizeGrounding } from "@/lib/serverGrounding";
-import { useAppStore } from "@/store/useAppStore";
-import { cn } from "@/utils/cn";
 
 /**
  * Drafting canvas — the heart of the workstation. White document card with a
  * header, live streaming markdown body, and docked AI editing tools.
  *
  * The canvas shows ONLY the final draft/answer. Retrieved sources / citations
- * are deliberately NOT rendered here — they stay available internally for RAG
- * and verification (see the Sources tab and the grounding score below), so this
- * is purely a presentation choice. The "Cross-Verify Facts" action asks the
- * backend (/api/verify) to re-check the draft and updates the score and the
- * facts panel without showing the source list.
+ * are deliberately NOT rendered here — they stay available in the Sources tab,
+ * so this is purely a presentation choice.
  */
 export function DraftCanvas() {
   const content = useDraftStore((s) => s.content);
   const streamingText = useDraftStore((s) => s.streamingText);
   const isStreaming = useDraftStore((s) => s.isStreaming);
-  const grounding = useDraftStore((s) => s.grounding);
-  const groundingFor = useDraftStore((s) => s.groundingFor);
-  // Lifted into the store so a NEW QUERY can close it (answer-scoped state).
-  const factsOpen = useDraftStore((s) => s.factsOpen);
-  const setFactsOpen = useDraftStore((s) => s.setFactsOpen);
   const { edit, pendingEdit, accept, reject } = useEditDraft();
   const editing = useEditStore((s) => s.editing);
   const pushToast = useToastStore((s) => s.push);
@@ -45,59 +32,6 @@ export function DraftCanvas() {
   // dragging them back down on every token; returning to the bottom resumes
   // the follow. (Previously this force-scrolled on every token.)
   const { ref: streamRef } = useStickyAnchorScroll<HTMLDivElement>([streamingText]);
-
-  // The score is only meaningful for rows verified against the CURRENT draft.
-  // Counts come from the same summary the facts panel shows, so the two never
-  // disagree. Term presence rows are not facts and are not in the score.
-  const groundingStale = groundingFor != null && groundingFor !== content;
-  const summary = summarizeGrounding(grounding);
-  const score =
-    !groundingStale && summary.facts > 0
-      ? Math.round((summary.grounded / summary.facts) * 100)
-      : null;
-  const [verifying, setVerifying] = useState(false);
-
-  // Cross-Verify asks the BACKEND (/api/verify) to check the current draft
-  // against its sources, using the same depth as the automatic check. The
-  // browser does not extract or judge claims itself. The rewritten text in the
-  // response is ignored, so this button never changes the canvas.
-  const crossVerify = async () => {
-    const { content: answer, sources, activeMessageId } = useDraftStore.getState();
-    if (!answer || verifying) return;
-    const depth = useAppStore.getState().mode === "deep" ? "full" : "light";
-    setVerifying(true);
-    const res = await refreshGrounding(answer, sources, depth);
-    setVerifying(false);
-
-    // Discard the result if the canvas moved on while the request ran.
-    const now = useDraftStore.getState();
-    if (now.content !== answer || now.activeMessageId !== activeMessageId) return;
-
-    if (!res.ok) {
-      pushToast("error", `Cross-verification failed: ${res.error}`);
-      return;
-    }
-    now.setGrounding(res.claims, answer);
-    // The claim list is shown in the persistent panel below; the toast is
-    // supplementary feedback and intentionally carries only the summary.
-    setFactsOpen(true);
-
-    const sum = summarizeGrounding(res.claims);
-    if (sum.facts === 0) {
-      pushToast("info", "Cross-verification complete — no factual claims found to check.");
-    } else if (sum.grounded === sum.facts) {
-      pushToast("success", `Cross-verification complete — all ${sum.facts} factual claim(s) supported by sources.`);
-    } else {
-      const parts = [
-        sum.conflicting > 0 ? `${sum.conflicting} conflicting` : "",
-        sum.needsReview > 0 ? `${sum.needsReview} need review` : "",
-      ].filter(Boolean);
-      pushToast(
-        "error",
-        `Cross-verification: ${sum.grounded} of ${sum.facts} factual claims supported; ${parts.join(", ")}.`
-      );
-    }
-  };
 
   // Direct manual editing of the canvas (no AI). On save the content is set
   // in-place and the active session's last assistant message is updated so
@@ -148,22 +82,7 @@ export function DraftCanvas() {
               </button>
             )}
             <span className="text-[10px] text-muted">
-            BGE-M3 • 2-STAGE RAG
-            {groundingStale && (
-              <span className="ml-2 font-semibold text-muted">
-                • Grounding stale — re-run Cross-Verify
-              </span>
-            )}
-            {score != null && (
-              <span
-                className={cn(
-                  "ml-2 font-semibold",
-                  score >= 80 ? "text-success" : score >= 40 ? "text-warning" : "text-danger"
-                )}
-              >
-                • {summary.grounded} of {summary.facts} facts supported ({score}%)
-              </span>
-            )}
+              BGE-M3 • 2-STAGE RAG
             </span>
           </span>
         </div>
@@ -267,31 +186,16 @@ export function DraftCanvas() {
         </div>
       )}
 
-      {/* Deep-mode verification progress — Wait / Start anyway */}
-      <DeepVerifyBanner />
-
       {/* Docked editing tools */}
-      {factsOpen && (
-        <FactVerificationPanel onClose={() => setFactsOpen(false)} />
-      )}
-
       <div className="space-y-3 rounded-b-lg border border-t-0 border-border bg-surface p-3 shadow-sm">
         <Toolbar editing={editing} />
-        {/* data-tour: product-tour anchor for "Cross-Verify Facts". */}
-        <div className="flex gap-3" data-tour="draft-verify">
+        <div className="flex gap-3">
           <button
             onClick={() => edit("Rewrite this draft in a formal official register.")}
             disabled={!content || editing}
             className="rounded-md border border-border bg-surface px-4 py-2 text-xs font-bold uppercase text-foreground shadow-sm hover:bg-surface-2 disabled:opacity-50"
           >
             Formalize
-          </button>
-          <button
-            onClick={() => void crossVerify()}
-            disabled={!content || verifying}
-            className="rounded-md border border-border bg-surface px-4 py-2 text-xs font-bold uppercase text-foreground shadow-sm hover:bg-surface-2 disabled:opacity-50"
-          >
-            {verifying ? "Verifying…" : "Cross-Verify Facts"}
           </button>
         </div>
       </div>

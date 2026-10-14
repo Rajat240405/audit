@@ -218,7 +218,7 @@ def cmd_query(config, args) -> int:
             print(f"   anchors: {[a['name'] for a in g.get('anchors', [])]}")
             for fk in g.get("fact_keys", [])[:5]:
                 print(f"   fact: {fk}")
-        # full provenance block (Phase-3 verification input)
+        # full provenance block
         print(json.dumps([e.to_dict() for e in cap.explain(results)],
                          indent=2, default=str))
         return 0

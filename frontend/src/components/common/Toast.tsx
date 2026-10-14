@@ -8,14 +8,14 @@ export interface ToastItem {
   id: string;
   kind: ToastKind;
   message: string;
-  /** Sticky toasts never auto-dismiss — used for cross-verification notices
-   *  that must stay visible until the user closes them. */
+  /** Sticky toasts never auto-dismiss — used for notices that must stay
+   *  visible until the user closes them. */
   sticky?: boolean;
 }
 
 export function Toast({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss?: (id: string) => void }) {
   return (
-    // max-h + scroll: sticky verification notices never auto-dismiss, so a
+    // max-h + scroll: sticky notices never auto-dismiss, so a
     // long session can stack enough of them to run off the top of the screen.
     <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex max-h-[70vh] w-80 flex-col gap-2 overflow-y-auto">
       <AnimatePresence>
