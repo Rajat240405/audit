@@ -32,7 +32,10 @@ CLI: ``python -m src.scraping.ls.pipeline [--loksabha 18,16-17] [--sessions …]
 [--max-records N] [--coverage-ref workbook.xlsx] [--config …] [--root …]``
 
 Exit codes: 0 = success, 2 = usage/config error, 3 = partial run (some
-loksabha inventories/sessions failed — details in last_run.json).
+loksabha inventories/sessions failed — details in last_run.json), 4 =
+infrastructure failure (PICODET_UNAVAILABLE / DOTS_UNAVAILABLE, or a
+mid-crawl outage). Code 4 is never in a source's exit_ok, so crawl_all skips
+ingest. It is never folded into 3.
 """
 
 from __future__ import annotations
@@ -47,6 +50,11 @@ from typing import Any
 import httpx
 
 from src.scraping import records as rec_utils
+from src.scraping.extraction_health import (
+    is_infrastructure_failure,
+    preflight_table_routing,
+    report_infrastructure_failure,
+)
 from src.scraping.formats import DocFacts
 from src.scraping.http import CrawlHttpClient, HttpApiError, HttpTransportError
 from src.scraping.ls import discovery
@@ -890,7 +898,14 @@ def main(argv: list[str] | None = None, *, transport=None, sleeper=None) -> int:
     if opts.dry_run:
         print(f"[dry-run] root={root} (nothing will be written)", flush=True)
     try:
+        # Health first: a failed preflight stops the source before any crawl
+        # work or ingestion. No-op when table routing is off.
+        preflight_table_routing()
         report = run(ctx)
+    except Exception as exc:  # noqa: BLE001 - only infrastructure is converted
+        if not is_infrastructure_failure(exc):
+            raise
+        return report_infrastructure_failure(exc, source="lok-sabha")
     finally:
         http.close()
 

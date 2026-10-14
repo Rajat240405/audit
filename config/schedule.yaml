@@ -45,6 +45,8 @@
 #   0  — completed with zero failures
 #   2  — config/usage error (never in exit_ok)
 #   3  — completed but with partial failures (still ingestible)
+#   4  — infrastructure failure (PicoDet or DOTS unavailable). Never ingestible.
+#        Not listed in any exit_ok below, so ingest is always skipped.
 # INCOIS main() returns None → subprocess exits 0 on success (no code 3).
 
 version: 1

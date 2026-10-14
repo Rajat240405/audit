@@ -30,6 +30,9 @@ Failure ladder:
   - An ingest failure (python -m src.scripts.ingest returns non-zero) is
     recorded in the run history.  The corpus append-only guarantee means a
     failed ingest leaves the corpus intact.
+  - An infrastructure failure (exit code 4: PicoDet or DOTS unavailable, found
+    by the health preflight or mid-crawl) is never accepted for ingest, even
+    when a source's exit_ok list contains other codes. Exit 3 cannot mask it.
   - One source failing does NOT stop the other sources.
 
 HPC compatibility: all paths go through ``app_paths.*()`` which respect
@@ -42,6 +45,10 @@ Exit codes:
   1  — one or more sources had failures (partial success)
   2  — bad usage or schedule config error
   3  — maintenance lock is already held by another process
+
+Per-source crawler exit codes (LS, RS): 0 ok, 2 config error, 3 partial,
+4 infrastructure failure. A source is ingested only when its exit code is in
+its exit_ok list AND is not 4.
 
 Do NOT add APScheduler/Celery/cron here.  Scheduling is external.
 """
@@ -58,6 +65,7 @@ from typing import Any
 
 import yaml
 
+from src.scraping.extraction_health import EXIT_INFRA
 from src.scraping.run_log import (
     KIND_CRAWL,
     KIND_INGEST,
@@ -306,10 +314,13 @@ def run_source(
         crawl_ok = True
     else:
         exit_code, duration_s = _run_subprocess(cmd, label=f"{name} crawler")
-        crawl_ok = exit_code in exit_ok
+        # Exit 4 (infrastructure) is never ingestible, whatever exit_ok says.
+        # A source that lost PicoDet or DOTS must not ingest a partial crawl.
+        crawl_ok = exit_code in exit_ok and exit_code != EXIT_INFRA
+        infra = exit_code == EXIT_INFRA
         _log(
             f"  crawler exit_code={exit_code} "
-            f"({'ok' if crawl_ok else 'FAILED'}) "
+            f"({'ok' if crawl_ok else ('INFRASTRUCTURE FAILURE' if infra else 'FAILED')}) "
             f"duration={duration_s:.1f}s"
         )
         rec = make_record(

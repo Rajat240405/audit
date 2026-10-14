@@ -40,6 +40,7 @@ implementation, shared across eras.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from pathlib import Path
@@ -52,7 +53,11 @@ from src.scraping.manifest import load_manifest, write_manifest
 from src.scraping.rs.client import RsClient
 from src.scraping.rs.documents import Slot, process_slot
 from src.scraping.rs.normalize import sort_key, utcnow_iso
-from src.scraping.rs.pipeline import apply_answer_fallback
+from src.scraping.rs.pipeline import (
+    apply_answer_fallback,
+    apply_table_routing_answer,
+    guard_staged_answer,
+)
 from src.utils.atomic_io import write_bytes_atomic
 
 UUID_RE = (r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -375,6 +380,7 @@ def run_backfill(*, http: CrawlHttpClient, cfg: dict[str, Any], root: Path,
 
         attention = list(manifest.get("attention") or [])
         answer_usable = bool((row.get("answer_text") or "").strip())
+        table_note: str | None = None
         if lang == "eng" and not answer_usable:
             apply_answer_fallback(meta, row, facts, body, fallback_wanted)
             answer_usable = bool((row.get("answer_text") or "").strip())
@@ -387,9 +393,22 @@ def run_backfill(*, http: CrawlHttpClient, cfg: dict[str, Any], root: Path,
                 cause = meta.get("answer_unavailable_cause") or "extract-failed"
                 attention = [a for a in attention if a.get("id") != rid]
                 attention.append({"id": rid, "reason": f"no usable answer ({cause})"})
+        elif lang == "eng" and answer_usable and fallback_wanted:
+            # Inline answer present. Table detection still runs on the recovered
+            # English PDF, so a detected table's DOTS content reaches the staged
+            # row (same policy as the crawl). The staged-answer guard keeps a
+            # richer document answer already on record. Infra failures propagate.
+            prev_row = {"answer_text": row.get("answer_text"),
+                        "metadata": copy.deepcopy(meta)}
+            table_note = apply_table_routing_answer(meta, row, facts, body)
+            row = guard_staged_answer(row, prev_row)
+            if str(meta.get("text_selection_reason", "")).startswith("table-routed"):
+                outcome["note"] = "table-routed answer from recovered PDF"
         remaining_failed = [f for f in manifest["failed_slots"] if f.get("id") == rid]
         if answer_usable and not remaining_failed:
             attention = [a for a in attention if a.get("id") != rid]
+        if table_note:
+            attention.append({"id": rid, "reason": table_note})
         manifest["attention"] = sorted(attention, key=lambda a: a["id"])
         outcomes.append(outcome)
 

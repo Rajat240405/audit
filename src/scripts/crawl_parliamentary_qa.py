@@ -39,7 +39,9 @@ Usage (run on a machine with internet; HPC ingests the staged corpus offline):
 Exit codes: 0 = success (or every back-fill slot resolved), 1 = back-fill ran
 but slots remain pending (see outcomes in last_backfill.json), 2 = usage/
 config error, 3 = some sessions failed (partial run; per-session failures are
-in last_run.json).
+in last_run.json), 4 = infrastructure failure (PICODET_UNAVAILABLE /
+DOTS_UNAVAILABLE, or a mid-crawl outage). Code 4 is never folded into 3 and is
+never in exit_ok, so crawl_all skips ingest.
 """
 
 from __future__ import annotations
@@ -55,6 +57,11 @@ from src.scraping.config import (
     load_config,
     output_root,
     resolve_ministries,
+)
+from src.scraping.extraction_health import (
+    is_infrastructure_failure,
+    preflight_table_routing,
+    report_infrastructure_failure,
 )
 from src.scraping.http import CrawlHttpClient
 from src.scraping.rs.pipeline import CrawlContext, RunOptions, pending_backfill, run
@@ -165,8 +172,13 @@ def main(argv: list[str] | None = None, *, transport=None, sleeper=None) -> int:
 
         http = CrawlHttpClient(transport=transport, sleeper=sleeper, **http_kwargs(cfg))
         try:
+            preflight_table_routing()
             report = run_backfill(http=http, cfg=cfg, root=root,
                                   sessions=sessions, dry_run=args.dry_run)
+        except Exception as exc:  # noqa: BLE001 - only infrastructure is converted
+            if not is_infrastructure_failure(exc):
+                raise
+            return report_infrastructure_failure(exc, source="rajya-sabha backfill")
         finally:
             http.close()
         _print_backfill_summary(report)
@@ -188,7 +200,14 @@ def main(argv: list[str] | None = None, *, transport=None, sleeper=None) -> int:
     if opts.dry_run:
         print(f"[dry-run] root={root} (nothing will be written)")
     try:
+        # Health first: a failed preflight stops the source before any crawl
+        # work or ingestion. No-op when table routing is off.
+        preflight_table_routing()
         report = run(ctx)
+    except Exception as exc:  # noqa: BLE001 - only infrastructure is converted
+        if not is_infrastructure_failure(exc):
+            raise
+        return report_infrastructure_failure(exc, source="rajya-sabha")
     finally:
         http.close()
 

@@ -16,12 +16,16 @@ restructuring either pipeline.
 
 KEY
 ---
-``sha256(pdf_bytes)`` + ``extractor_version``. Content-addressed, so it is
-immune to filename changes, re-downloads, mtime churn and path moves, and a
-re-published PDF with identical bytes is correctly treated as unchanged.
-Changing the extractor (DOTS on/off, PicoDet threshold, DPI, model) changes the
-version and therefore the key — no stale text is ever reused across a pipeline
-change.
+``sha256(EXTRACTION_POLICY_VERSION | sha256(pdf_bytes) | extractor_version)``.
+Content-addressed, so it is immune to filename changes, re-downloads, mtime
+churn and path moves, and a re-published PDF with identical bytes is correctly
+treated as unchanged. Changing the extractor (DOTS on/off, PicoDet threshold,
+DPI, model) changes ``extractor_version`` and therefore the key. Changing the
+routing *policy* (what the pipeline decides to do per page) is an explicit,
+manually bumped ``EXTRACTION_POLICY_VERSION``: every entry written under an
+older policy then misses exactly once, and unchanged PDFs hit again afterwards.
+The policy version is part of the key, not of the corpus provenance string, so
+``metadata.extractor_version`` keeps its documented format.
 
 SAFETY PROPERTIES
 -----------------
@@ -66,6 +70,14 @@ TEXT_DIRNAME = "text"
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
 
+#: Version of the per-page extraction POLICY (routing decisions, not model or
+#: DPI). Bump when what the pipeline does for a given PDF changes. Current
+#: policy: PicoDet runs on every page before any OCR; a detected table is
+#: DOTS-owned, with no OCR, PyMuPDF or legacy fallback; a DOTS-rejected or
+#: unavailable table page fails the document; the cache only stores validated
+#: successes. Bumping this string invalidates existing entries exactly once.
+EXTRACTION_POLICY_VERSION = "table-first-v2"
+
 
 # ── configuration ───────────────────────────────────────────────────────────
 
@@ -109,11 +121,18 @@ def content_sha256(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def cache_key(content_hash: str, extractor_version: str) -> str:
-    """Stable key. Both components matter: same bytes + different extractor
-    must be a MISS, otherwise a pipeline upgrade would silently reuse old text."""
+def cache_key(content_hash: str, extractor_version: str,
+              policy_version: str | None = None) -> str:
+    """Stable key. All three components matter: same bytes with a different
+    extractor OR a different extraction policy must be a MISS, otherwise a
+    pipeline upgrade would silently reuse old text.
+
+    ``policy_version`` is resolved at call time (not bound as a default), so
+    bumping :data:`EXTRACTION_POLICY_VERSION` takes effect immediately.
+    """
+    policy = policy_version or EXTRACTION_POLICY_VERSION
     return hashlib.sha256(
-        f"{content_hash}|{extractor_version}".encode("utf-8")
+        f"{policy}|{content_hash}|{extractor_version}".encode("utf-8")
     ).hexdigest()
 
 
@@ -222,12 +241,14 @@ def _text_path(content_hash: str, extractor_version: str) -> Path:
 # ── public API ──────────────────────────────────────────────────────────────
 
 
-def lookup(body: bytes, extractor_version: str | None = None) -> Optional[str]:
-    """Cached extraction text for these exact bytes + extractor, else None.
+def lookup_entry(body: bytes, extractor_version: str | None = None
+                 ) -> Optional[tuple[str, dict[str, Any]]]:
+    """Cached ``(text, extra)`` for these exact bytes + extractor + policy.
 
-    Returns a hit ONLY for a validated success. Failures, unknown keys, a
-    disabled cache and ``EXTRACTION_FORCE_REPROCESS`` all return None so the
-    caller extracts normally.
+    ``extra`` is the metadata stored with the success (for example whether a
+    table was detected). Returns a hit ONLY for a validated success. Failures,
+    unknown keys, a disabled cache and ``EXTRACTION_FORCE_REPROCESS`` all return
+    None so the caller extracts normally.
     """
     if not body or not cache_enabled() or force_reprocess():
         return None
@@ -245,11 +266,18 @@ def lookup(body: bytes, extractor_version: str | None = None) -> Optional[str]:
     if entry.output_sha256 and hashlib.sha256(
             text.encode("utf-8")).hexdigest() != entry.output_sha256:
         return None                      # fingerprint mismatch -> re-extract
-    return text
+    return text, dict(entry.extra or {})
+
+
+def lookup(body: bytes, extractor_version: str | None = None) -> Optional[str]:
+    """Cached extraction text for these exact bytes + extractor, else None."""
+    hit = lookup_entry(body, extractor_version)
+    return None if hit is None else hit[0]
 
 
 def record_success(body: bytes, text: str, *, extractor_version: str | None = None,
-                   doc_id: str | None = None, source_url: str | None = None) -> bool:
+                   doc_id: str | None = None, source_url: str | None = None,
+                   extra: dict[str, Any] | None = None) -> bool:
     """Commit a VALIDATED extraction. Returns True when stored.
 
     Refuses empty/whitespace output, so a partial or failed run can never be
@@ -283,6 +311,7 @@ def record_success(body: bytes, text: str, *, extractor_version: str | None = No
             output_chars=len(text),
             processed_at=datetime.now(timezone.utc).isoformat(),
             attempts=(prev.attempts + 1) if prev else 1,
+            extra=dict(extra or {}),
         ))
         return True
     except OSError:

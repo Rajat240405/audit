@@ -21,7 +21,11 @@ from __future__ import annotations
 import io
 from typing import Any
 
-from src.data.pdf_table_extract import DependencyMissingError, extract_pdf_text, split_question_answer
+from src.data.pdf_table_extract import (
+    DependencyMissingError,
+    extract_pdf_text_with_report,
+    split_question_answer,
+)
 
 #: extraction failure reasons (verbatim legacy vocabulary)
 Reason = str  # "scanned" | "parser_failure" | "unsupported" | "dependency_unavailable"
@@ -48,6 +52,12 @@ def _docx_text(data: bytes) -> str | None:
         return None
 
 
+def _dependency_is_fatal() -> bool:
+    from src.scraping.extraction_health import routing_required
+
+    return routing_required()
+
+
 def extract_qa(body: bytes, doc_format: str) -> tuple[tuple[str, str] | None, Reason | None]:
     """Extract (question, answer) from document bytes of a sniffed format.
 
@@ -58,30 +68,44 @@ def extract_qa(body: bytes, doc_format: str) -> tuple[tuple[str, str] | None, Re
         return None, "unsupported"
         
     if doc_format == "pdf":
-        # Incremental processing: identical bytes + identical extractor version
-        # => reuse the validated text instead of re-running PicoDet -> DOTS.
-        # Misses, failures and EXTRACTION_FORCE_REPROCESS all fall through to a
-        # normal extraction; the cache is never a correctness dependency.
+        # Incremental processing: identical bytes + identical extraction policy
+        # + identical extractor version => reuse the validated text instead of
+        # re-running PicoDet -> DOTS. Misses, failures and
+        # EXTRACTION_FORCE_REPROCESS all fall through to a normal extraction;
+        # the cache is never a correctness dependency.
         from src.scraping import extraction_cache as _xc
+        from src.scraping.extraction_health import is_infrastructure_failure
 
         cached = _xc.lookup(body)
         if cached is not None:
             return split_question_answer(cached), None
 
         try:
-            text = extract_pdf_text(body, enable_ocr=True)
+            extraction = extract_pdf_text_with_report(body, enable_ocr=True)
         except DependencyMissingError as exc:
+            if _dependency_is_fatal():
+                # Under table routing a missing extraction dependency is an
+                # environment outage, not a property of this PDF: stop the
+                # source rather than recording a per-document failure.
+                raise
             _xc.record_failure(body, f"dependency_unavailable: {exc}")
             return None, f"dependency_unavailable: {exc}"
         except Exception as exc:  # noqa: BLE001
+            if is_infrastructure_failure(exc):
+                # Outage (PicoDet / DOTS). Do NOT record a failure against this
+                # document and do NOT convert it into parser_failure: that would
+                # make an infrastructure fault look like a bad PDF and let the
+                # source exit "partial" with ingest still running.
+                raise
             _xc.record_failure(body, f"parser_failure: {type(exc).__name__}")
             return None, "parser_failure"
 
+        text = extraction.text
         if text is None or not text.strip():
             _xc.record_failure(body, "scanned")
             return None, "scanned"
         # Validated output only — committed before the caller can use it.
-        _xc.record_success(body, text)
+        _xc.record_success(body, text, extra={"dots_pages": extraction.dots_pages})
     elif doc_format == "docx":
         text = _docx_text(body)
         if text is None:

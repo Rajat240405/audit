@@ -37,7 +37,7 @@ import os
 import re
 import threading
 from statistics import median
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -290,6 +290,21 @@ def _page_text(page) -> str:
 
 
 
+class PdfExtraction(NamedTuple):
+    """Extraction outcome plus the routing facts the caller needs.
+
+    ``text``        whole-document text, or None when empty.
+    ``dots_pages``  number of pages whose table was detected and DOTS-owned.
+                    Always 0 when routing is off. A caller that must know
+                    whether the document carries a table (RS answer selection)
+                    reads it here. The same number is persisted in the cache so
+                    a cache hit reports it without re-running PicoDet.
+    """
+
+    text: str | None
+    dots_pages: int
+
+
 def extract_pdf_text(
     data: bytes,
     enable_ocr: bool = True,
@@ -297,6 +312,19 @@ def extract_pdf_text(
     mode: str = MODE_AUTO,
     doc_label: str | None = None,
 ) -> str | None:
+    """Text-only form of :func:`extract_pdf_text_with_report`."""
+    return extract_pdf_text_with_report(
+        data, enable_ocr=enable_ocr, mode=mode, doc_label=doc_label,
+    ).text
+
+
+def extract_pdf_text_with_report(
+    data: bytes,
+    enable_ocr: bool = True,
+    *,
+    mode: str = MODE_AUTO,
+    doc_label: str | None = None,
+) -> PdfExtraction:
     """Extract whole-document text with multi-page, borderless, bordered, and scanned tables.
 
     Raises DependencyMissingError if PyMuPDF or required OCR is unavailable.
@@ -332,9 +360,10 @@ def extract_pdf_text(
                 payload = _extract_page_payload(page, page_idx + 1, enable_ocr=enable_ocr)
                 page_payloads.append(payload)
 
+        dots_pages = sum(1 for p in page_payloads if p.get("type") == DOTS_PAYLOAD_TYPE)
         stitched_chunks = _stitch_multipage_payloads(page_payloads)
         res = "\n\n".join(c for c in stitched_chunks if c.strip())
-        return res if res.strip() else None
+        return PdfExtraction(res if res.strip() else None, dots_pages)
     finally:
         doc.close()
 
@@ -345,42 +374,68 @@ def extract_pdf_text_with_fallback(data: bytes, enable_ocr: bool = True) -> str:
     return text if text and text.strip() else ""
 
 
+def _scanned_page_ocr(page, page_num: int) -> dict[str, Any] | None:
+    """Tesseract OCR for a page with no usable text layer.
+
+    Returns the ``ocr_text`` payload, or ``None`` when OCR produced nothing (the
+    caller then falls back to the native text). Raises ``DependencyMissingError``
+    when Tesseract is absent, ``ExtractionTimeoutError`` on a timeout and
+    ``RuntimeError`` on any other OCR failure.
+    """
+    from src.data.ocr_table_extract import (
+        DependencyMissingError as OcrDependencyError,
+        is_tesseract_available,
+        ocr_page_to_structured_text,
+    )
+    if not is_tesseract_available():
+        raise DependencyMissingError("Tesseract OCR is required for scanned PDF pages but is unavailable.")
+    try:
+        ocr_res = ocr_page_to_structured_text(page, timeout=_OCR_PAGE_TIMEOUT_SEC)
+        if ocr_res and ocr_res.strip():
+            return {"page_num": page_num, "type": "ocr_text", "content": ocr_res, "tables": []}
+    except TimeoutError as exc:
+        raise ExtractionTimeoutError(f"OCR timeout exceeded on Page {page_num} (>10.0s); {exc}") from exc
+    except OcrDependencyError as exc:
+        raise DependencyMissingError(str(exc)) from exc
+    except Exception as exc:
+        raise RuntimeError(f"OCR execution failed on Page {page_num}: {exc}") from exc
+    return None
+
+
+def _non_table_page_payload(page, page_num: int, lines: list[dict], enable_ocr: bool) -> dict[str, Any]:
+    """Page with no table: scanned-page OCR when there is no text layer, else prose.
+
+    Shared by the legacy and the table-routed paths so the no-table outcome is
+    identical in both. Under routing it runs only AFTER PicoDet has cleared the
+    page, so OCR can never pre-empt a table.
+    """
+    native_char_count = sum(len(l["text"]) for l in lines)
+    if not lines or native_char_count < 30:
+        if enable_ocr:
+            ocr_payload = _scanned_page_ocr(page, page_num)
+            if ocr_payload is not None:
+                return ocr_payload
+        if not lines:
+            return {"page_num": page_num, "type": "empty", "content": "", "tables": []}
+    return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
+
+
 def _extract_page_payload(page, page_num: int, enable_ocr: bool = True) -> dict[str, Any]:
+    if dots_routing_enabled():
+        return _extract_page_payload_routed(page, page_num, enable_ocr=enable_ocr)
+
     lines = _page_lines(page)
     native_char_count = sum(len(l["text"]) for l in lines)
-    
+
     # Check if page is pure scanned (< 30 native text characters)
     if not lines or native_char_count < 30:
         if enable_ocr:
-            from src.data.ocr_table_extract import (
-                DependencyMissingError as OcrDependencyError,
-                is_tesseract_available,
-                ocr_page_to_structured_text,
-            )
-            if not is_tesseract_available():
-                raise DependencyMissingError("Tesseract OCR is required for scanned PDF pages but is unavailable.")
-            try:
-                ocr_res = ocr_page_to_structured_text(page, timeout=_OCR_PAGE_TIMEOUT_SEC)
-                if ocr_res and ocr_res.strip():
-                    return {"page_num": page_num, "type": "ocr_text", "content": ocr_res, "tables": []}
-            except TimeoutError as exc:
-                raise ExtractionTimeoutError(f"OCR timeout exceeded on Page {page_num} (>10.0s); {exc}") from exc
-            except OcrDependencyError as exc:
-                raise DependencyMissingError(str(exc)) from exc
-            except Exception as exc:
-                raise RuntimeError(f"OCR execution failed on Page {page_num}: {exc}") from exc
+            ocr_payload = _scanned_page_ocr(page, page_num)
+            if ocr_payload is not None:
+                return ocr_payload
 
         if not lines:
             return {"page_num": page_num, "type": "empty", "content": "", "tables": []}
-
-    # PicoDet -> DOTS routing gate.
-    # When enabled this REPLACES Strategies 1-3 (the competing table extractors)
-    # for this page: PicoDet is the only detector and DOTS is the only table
-    # extractor. A page PicoDet clears falls through to the same baseline
-    # rendering Strategy 4 would have produced, so table-free documents are
-    # unaffected. Scanned-page OCR above still runs first and is untouched.
-    if dots_routing_enabled():
-        return _extract_page_payload_dots(page, page_num, lines, native_char_count)
 
     # Strategy 1: Check for PyMuPDF structured vector/grid tables
     try:
@@ -686,46 +741,44 @@ def _extract_page_payload_dots_only(page, page_num: int) -> dict[str, Any]:
     return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
 
 
-def _extract_page_payload_dots(page, page_num: int, lines: list[dict], native_char_count: int) -> dict[str, Any]:
-    """Route one page through PicoDet and, if a table is present, DOTS.
+def _extract_page_payload_routed(page, page_num: int, enable_ocr: bool = True) -> dict[str, Any]:
+    """Table-first routing for ONE page (``DOTS_ENABLED=true``).
 
-    Contract:
+    Order is fixed and deliberate:
 
-    * **No table detected** -> the page renders through ``_render_merged``, which
-      is byte-identical to what Strategy 4 produces today. A document with no
-      tables is therefore unchanged by enabling routing.
-    * **Table detected** -> DOTS owns the page outright. Its text replaces the
-      page entirely; nothing is merged with a legacy table extraction.
-    * **Detector unavailable / DOTS unreachable / output rejected** -> the
-      exception propagates. There is deliberately no fallback to an inferior
-      table extractor: a hard, diagnosable failure leaves the previous corpus
-      row intact, whereas a silent downgrade would overwrite good data with
-      worse data and nobody would ever know.
+    1. **PicoDet runs on every page, before any OCR.** A scanned page with a
+       table must never be OCR'd instead of routed (the pre-fix behaviour).
+    2. **Table detected** -> DOTS is the exclusive extractor for the page. No
+       Tesseract, no PyMuPDF table strategies, no prose merge.
+       ``enforce_validation=True`` makes a rejected output a hard failure even
+       when ``DOTS_VALIDATOR_STRICT`` is off.
+    3. **No table** -> the shared non-table path (scanned OCR or prose), which
+       is the same outcome a document without tables gets today.
 
-    The single exception is ``RULE_NO_TABLE_FOUND`` — PicoDet fired but DOTS
-    found no table. That is a detector false positive, not an extraction
-    failure, so the page keeps its legacy text.
+    Failure semantics (see ``raise`` sites): a detector error raises
+    ``TableDetectorUnavailable``; it is never read as "no table". A DOTS
+    outage, timeout or rejection raises ``DotsUnavailable`` /
+    ``DotsInvalidOutput``. There is no fallback to a weaker extractor anywhere
+    on this path.
     """
     from src.data import dots_client, table_detect
 
-    # TableDetectorUnavailable and DotsUnavailable are both RuntimeError
-    # subclasses and are intentionally allowed to propagate to the caller.
-    if not table_detect.page_has_table(page):
-        return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
+    lines = _page_lines(page)
+    native_char_count = sum(len(l["text"]) for l in lines)
 
-    try:
+    # TableDetectorUnavailable propagates: a detector that cannot run must not
+    # be confused with a page that has no table.
+    if table_detect.page_has_table(page):
         content = dots_client.get_client().page_to_text(
             page,
             page_num,
             native_char_count=native_char_count,
             detector_found_table=True,
+            enforce_validation=True,
         )
-    except dots_client.DotsInvalidOutput as exc:
-        if exc.rule == dots_client.RULE_NO_TABLE_FOUND:
-            return {"page_num": page_num, "type": "prose", "content": _render_merged(lines), "tables": []}
-        raise
+        return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
 
-    return {"page_num": page_num, "type": DOTS_PAYLOAD_TYPE, "content": content, "tables": []}
+    return _non_table_page_payload(page, page_num, lines, enable_ocr)
 
 
 def _fuse_split_row(prev_row: list[str], cont_row: list[str]) -> list[str]:

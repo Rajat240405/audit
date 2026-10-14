@@ -26,7 +26,7 @@ import os
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from src.scraping import records as rec_utils
 from src.scraping.formats import DocFacts, SlotResult
@@ -97,70 +97,97 @@ class SessionReport:
         }
 
 
-def _extract_answer_fallback(pdf_body: bytes) -> str | None:
-    """Table-aware whole-document text; None when the PDF is a scan (no text).
+class ExtractedAnswer(NamedTuple):
+    """Document-extracted answer text plus its routing fact."""
 
-    Two failure classes, deliberately handled differently:
+    text: str
+    #: Pages whose table was detected and DOTS-owned. > 0 means the document
+    #: carries a table, which an inline answer would not contain.
+    dots_pages: int
 
-    * **Document-level** (corrupt/unopenable/encrypted PDF) -> ``None``. The
-      document really is unusable, so "answer unavailable" is the honest
-      outcome. Unchanged behaviour.
 
-    * **Infrastructure-level** (DOTS endpoint down, DOTS output rejected by the
-      validator, PicoDet unavailable, Tesseract missing, OCR timeout) ->
-      **re-raised**. These mean "we could not tell", not "there is no answer".
-      Swallowing them would stamp ``answer_source=unavailable`` on a record
-      that already has a perfectly good answer, overwriting real content with
-      emptiness because a GPU box was rebooting. The caller must fail the
-      record so the previous corpus row is retained and the failure is
-      visible and diagnosable.
+def _extract_answer_fallback(pdf_body: bytes) -> ExtractedAnswer | None:
+    """Table-aware whole-document text; None when no usable text is produced.
+
+    Three failure classes, deliberately handled differently:
+
+    * **Document-level** (corrupt/unopenable PDF, scan with no text, a DOTS
+      output the validator rejected, an OCR timeout on one PDF) -> ``None``.
+      That document fails. The staged-answer guard keeps any richer answer
+      already on record, so a failed document never overwrites good data.
+
+    * **Infrastructure** (DOTS endpoint unreachable or timing out, PicoDet
+      unable to run) -> **re-raised**. These mean "we could not tell", not
+      "there is no answer". The crawl entry point turns them into a non-zero
+      exit that stops ingestion (see ``extraction_health``).
+
+    * **Environment** (a required dependency such as PyMuPDF or Tesseract is
+      missing) -> **re-raised**. Same reasoning: an operator must fix it.
     """
     try:
         from src.data.pdf_table_extract import (
             DependencyMissingError,
             ExtractionTimeoutError,
-            extract_pdf_text,
+            extract_pdf_text_with_report,
         )
     except ImportError:
         return None
 
     try:
-        text = extract_pdf_text(pdf_body)
-    except (DependencyMissingError, ExtractionTimeoutError):
-        # Must precede `except ImportError`: DependencyMissingError subclasses
-        # it, so the old ordering silently downgraded a missing extraction
-        # dependency to "unavailable".
+        extraction = extract_pdf_text_with_report(pdf_body)
+    except DependencyMissingError:
+        # Subclasses ImportError: must precede the ImportError clause below,
+        # otherwise a missing extraction dependency is silently downgraded to
+        # "unavailable".
         raise
     except ImportError:
         return None
+    except ExtractionTimeoutError:
+        return None  # this PDF exceeded its OCR budget; the document fails
     except Exception as exc:  # noqa: BLE001
         if _is_extraction_infrastructure_failure(exc):
             raise
-        return None  # unopenable/corrupt: treat as unavailable
-    return (text or "").strip() or None
+        return None  # unopenable/corrupt, or DOTS output rejected: this document fails
+    text = (extraction.text or "").strip()
+    if not text:
+        return None
+    return ExtractedAnswer(text, int(extraction.dots_pages))
 
 
 def _is_extraction_infrastructure_failure(exc: BaseException) -> bool:
-    """Is this failure about the extraction stack rather than the document?
+    """Outage of the extraction stack (DOTS unreachable, PicoDet down).
 
-    Resolved by type, with a lazy import so a repo without the DOTS extras
-    still imports cleanly and simply sees no infrastructure failures.
+    Per-document rejections such as ``DotsInvalidOutput`` are NOT infrastructure
+    and are not listed here. See :func:`_extract_answer_fallback`.
     """
-    try:
-        from src.data.dots_client import DotsInvalidOutput, DotsUnavailable
+    from src.scraping.extraction_health import is_infrastructure_failure
 
-        if isinstance(exc, (DotsUnavailable, DotsInvalidOutput)):
-            return True
-    except ImportError:
-        pass
-    try:
-        from src.data.table_detect import TableDetectorUnavailable
+    return is_infrastructure_failure(exc)
 
-        if isinstance(exc, TableDetectorUnavailable):
-            return True
-    except ImportError:
-        pass
-    return False
+
+def _cached_or_extract_answer(body: bytes) -> ExtractedAnswer | None:
+    """Validated text for these exact PDF bytes, from the cache or a fresh run.
+
+    A cache hit reuses the stored text AND its ``dots_pages`` fact, so no
+    PicoDet or DOTS call happens. Entries written before ``dots_pages`` was
+    recorded are treated as misses, because their table fact is unknown. A
+    successful extraction is committed to the cache. A per-document failure is
+    recorded, never as a success. An infrastructure failure propagates and is
+    recorded nowhere, since the document did not fail.
+    """
+    from src.scraping import extraction_cache as _xc
+
+    hit = _xc.lookup_entry(body)
+    if hit is not None and "dots_pages" in hit[1]:
+        text, extra = hit
+        return ExtractedAnswer(text, int(extra.get("dots_pages") or 0))
+
+    ans = _extract_answer_fallback(body)
+    if ans is not None:
+        _xc.record_success(body, ans.text, extra={"dots_pages": ans.dots_pages})
+    else:
+        _xc.record_failure(body, "extract-failed")
+    return ans
 
 
 def apply_answer_fallback(
@@ -183,24 +210,49 @@ def apply_answer_fallback(
         meta["answer_source"] = "unavailable"
         meta["answer_unavailable_cause"] = "legacy-format-not-extracted"
     else:
-        from src.scraping import extraction_cache as _xc
-
-        text = None
-        if body:
-            text = _xc.lookup(body)                     # unchanged PDF -> skip OCR
-            if text is None:
-                text = _extract_answer_fallback(body)
-                if text and text.strip():
-                    _xc.record_success(body, text)      # validated only
-                else:
-                    _xc.record_failure(body, "extract-failed")
-        if text:
-            rec["answer_text"] = text
+        ans = _cached_or_extract_answer(body) if body else None
+        if ans is not None:
+            rec["answer_text"] = ans.text
             meta["answer_source"] = "document-extract"
             meta.pop("answer_unavailable_cause", None)
         else:
             meta["answer_source"] = "unavailable"
             meta["answer_unavailable_cause"] = "extract-failed"
+
+
+def apply_table_routing_answer(
+    meta: dict[str, Any], rec: dict[str, Any], facts: DocFacts, body: bytes | None,
+) -> str | None:
+    """An inline answer exists: still run table detection on eligible English PDFs.
+
+    Only active when table routing is on (``DOTS_ENABLED=true``). The document
+    is run through PicoDet on every page, and the result is cached. If PicoDet
+    finds a table, the DOTS-extracted document text is the answer. Without that,
+    the inline answer stays, which is the existing text-selection policy.
+
+    Returns an attention reason when the document could not be checked, else
+    None. Infrastructure failures propagate.
+    """
+    from src.scraping.extraction_health import routing_required
+
+    if not routing_required() or facts.format != "pdf" or not body:
+        return None
+    ans = _cached_or_extract_answer(body)
+    if ans is None:
+        # Cannot confirm whether a table exists: keep the inline answer, and
+        # surface it rather than letting the gap pass silently.
+        return "table-routing: document yielded no text; inline answer kept"
+    if ans.dots_pages <= 0:
+        return None  # no table detected: existing text-selection policy stands
+    rec["answer_text"] = ans.text
+    meta["answer_source"] = "document-extract"
+    meta["answer_text_source"] = "document-extract"
+    meta["text_selection_reason"] = (
+        f"table-routed: {ans.dots_pages} page(s) DOTS-owned; document answer carries the table"
+    )
+    meta.pop("answer_unavailable_cause", None)
+    _stamp_extractor_version(meta)
+    return None
 
 
 def _prior_failed_entry(old_manifest: dict[str, Any] | None, rid: str, lang: str) -> dict | None:
@@ -510,13 +562,16 @@ def crawl_session(ctx: CrawlContext, ses: int) -> SessionReport:
                                          **facts.as_manifest()})
 
                 # inline-first → PDF-extract fallback (REC-P1)
-                if (
-                    not rec["answer_text"]
-                    and slot.lang == "eng"
-                    and facts.doc_class in ("good", "partial")
-                ):
-                    apply_answer_fallback(meta, rec, facts, body, fallback_wanted)
-                    _stamp_extractor_version(meta)
+                if slot.lang == "eng" and facts.doc_class in ("good", "partial"):
+                    if not rec["answer_text"]:
+                        apply_answer_fallback(meta, rec, facts, body, fallback_wanted)
+                        _stamp_extractor_version(meta)
+                    elif fallback_wanted:
+                        # Inline answer present. Table routing still checks the
+                        # PDF, so a detected table's DOTS content reaches the record.
+                        note = apply_table_routing_answer(meta, rec, facts, body)
+                        if note:
+                            report.attention.append({"id": rid, "reason": note})
         elif not rec["answer_text"]:
             meta["answer_source"] = "unavailable"
             meta["answer_unavailable_cause"] = "documents-disabled"

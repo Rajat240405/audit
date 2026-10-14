@@ -33,9 +33,10 @@ dictionary checks, no column-uniformity rules, no similarity comparison against
 the legacy extractor. Those would reject correct transcriptions of messy
 source documents, and rejection permanently blocks a record from improving.
 
-One check (:data:`RULE_NO_TABLE_FOUND`) is not a failure at all: when PicoDet
-fired but DOTS reports no table, the page falls back to its legacy text. That
-converts a detector false positive into a no-op instead of a loss.
+:data:`RULE_NO_TABLE_FOUND` is a rejection like any other. When PicoDet fired
+but DOTS reports no table, the page is NOT silently downgraded to a legacy
+extractor: the table-routed extraction fails for that document and the
+previous corpus row is retained (see ``pdf_table_extract``).
 """
 
 from __future__ import annotations
@@ -305,8 +306,8 @@ class ValidationResult(NamedTuple):
 
     * ``accept``   — use the DOTS text.
     * ``reject``   — hard failure; the page (and therefore the document) fails.
-    * ``fallback`` — not a failure; discard the DOTS text and keep the legacy
-      extraction for this page (detector false positive).
+      This includes ``RULE_NO_TABLE_FOUND`` (PicoDet fired, DOTS saw no table).
+      There is no ``fallback`` outcome: table-routed pages are DOTS-owned.
     """
 
     ok: bool
@@ -528,8 +529,9 @@ def validate_dots_output(
                 "reject",
             )
 
-    # V9 — consistency, NOT quality. PicoDet fired but DOTS saw no table:
-    # treat as a detector false positive and keep the legacy text.
+    # V9 — consistency, NOT quality. PicoDet fired but DOTS saw no table.
+    # This is a rejection, not a legacy fallback: under table routing the
+    # page is DOTS-owned, so a missing table must fail the extraction.
     if detector_found_table and elements is not None:
         has_table = any(
             str(e.get("category") or "").strip().lower() == "table" for e in elements
@@ -539,7 +541,7 @@ def validate_dots_output(
                 False,
                 RULE_NO_TABLE_FOUND,
                 "detector flagged a table; DOTS returned none",
-                "fallback",
+                "reject",
             )
 
     # V10 — severe truncation against the native text layer, when one exists.
@@ -747,10 +749,36 @@ class DotsClient:
             self._discovery = _Discovery(model=models[0], at=now)
         return models[0]
 
+    def health_check(self) -> str:
+        """Prove the endpoint is serving the configured model. Returns its id.
+
+        Always performs a live ``GET {base}/models``, even when ``DOTS_MODEL``
+        is pinned. :meth:`resolve_model` short-circuits on a pinned model
+        without any network call, so using it as a health probe reports a dead
+        endpoint as healthy. Raises :class:`DotsUnavailable` when the endpoint
+        is unreachable, returns non-200 or non-JSON, serves no models, or does
+        not serve the pinned ``DOTS_MODEL``.
+        """
+        models = self.list_models()
+        if not models:
+            raise DotsUnavailable(
+                "DOTS endpoint reports no served models — the server is up but the "
+                "model has not finished loading."
+            )
+        pinned = (self.cfg.model or "").strip()
+        if pinned:
+            if pinned not in models:
+                raise DotsUnavailable(
+                    f"DOTS endpoint does not serve the configured model {pinned!r} "
+                    f"(served: {', '.join(models[:5])})"
+                )
+            return pinned
+        return models[0]
+
     def is_available(self) -> bool:
-        """Health probe for preflight. Never raises."""
+        """Health probe. Never raises. See :meth:`health_check`."""
         try:
-            self.resolve_model()
+            self.health_check()
             return True
         except Exception:  # noqa: BLE001 - probe must never raise
             return False
@@ -853,12 +881,17 @@ class DotsClient:
         native_char_count: int = 0,
         detector_found_table: bool = True,
         image_bytes: bytes | None = None,
+        enforce_validation: bool = False,
     ) -> str:
         """Extract one page via DOTS, validated.
 
         Raises :class:`DotsUnavailable` on transport failure and
-        :class:`DotsInvalidOutput` on validator rejection — including the
-        ``fallback`` outcome, which the caller distinguishes via ``.rule``.
+        :class:`DotsInvalidOutput` on validator rejection, distinguished via
+        ``.rule``.
+
+        ``enforce_validation=True`` rejects on any validator failure even when
+        ``DOTS_VALIDATOR_STRICT`` is off. Table-routed extraction passes it: a
+        DOTS-owned page must never be accepted on a rejected output.
         """
         png = self.page_image(page) if image_bytes is None else image_bytes
         content, finish = self._post_chat(base64.b64encode(png).decode("ascii"))
@@ -870,7 +903,7 @@ class DotsClient:
             detector_found_table=detector_found_table,
             cfg=self.cfg,
         )
-        if not result.ok and self.cfg.strict:
+        if not result.ok and (self.cfg.strict or enforce_validation):
             raise DotsInvalidOutput(
                 f"DOTS output rejected on page {page_num} [{result.rule}]: {result.detail}",
                 rule=result.rule,

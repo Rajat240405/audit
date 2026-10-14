@@ -54,6 +54,7 @@ __all__ = [
     "TableDetectorUnavailable",
     "detect_tables",
     "detector_version",
+    "ensure_ready",
     "is_available",
     "page_has_table",
     "render_page_png",
@@ -328,15 +329,47 @@ def _load_backend() -> Callable[[bytes, float], Sequence[Any]]:
 
 def is_available() -> bool:
     """Can detection run right now? Never raises."""
-    if not enabled():
-        return False
     try:
-        _load_backend()
+        ensure_ready()
         return True
-    except TableDetectorUnavailable:
-        return False
     except Exception:  # noqa: BLE001 - availability probe must never raise
         return False
+
+
+def ensure_ready() -> None:
+    """Raise :class:`TableDetectorUnavailable` unless PicoDet can really run.
+
+    Used by the health preflight. It proves two things, not one:
+
+    * the backend initialises (weights present, Paddle importable, device OK);
+    * one inference completes on a blank page. A backend can initialise and
+      still fail on the first predict (the PIR/oneDNN failure pinned in
+      requirements.txt is exactly that kind of fault).
+
+    The probe result is discarded; only success or a typed failure matters.
+    """
+    if not enabled():
+        raise TableDetectorUnavailable(
+            f"{_ENV_ENABLED}=false but table routing requires the PicoDet detector"
+        )
+    backend = _load_backend()
+    try:
+        raw = backend(_probe_png(), score_threshold())
+    except Exception as exc:  # noqa: BLE001 - surface as a typed failure
+        raise TableDetectorUnavailable(f"PicoDet probe inference failed: {exc}") from exc
+    if raw is None:
+        raise TableDetectorUnavailable("PicoDet probe inference returned no result")
+
+
+def _probe_png() -> bytes:
+    """A small blank white page. Content is irrelevant; only the predictor path matters."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (320, 320), color=(255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ── detection ────────────────────────────────────────────────────────────────

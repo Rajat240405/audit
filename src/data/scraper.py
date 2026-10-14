@@ -589,7 +589,11 @@ class RealArchiveScraper(Scraper):
                 text = self._extract_pdf_text_bytes(data)
             except ImportError:
                 raise  # PyMuPDF not installed — propagate so the caller knows
-            except Exception:
+            except Exception as exc:
+                from src.scraping.extraction_health import is_infrastructure_failure
+
+                if is_infrastructure_failure(exc):
+                    raise  # DOTS / PicoDet outage is not a property of this PDF
                 return None, "parser_failure"  # corrupt/unopenable PDF
             if text is None:
                 return None, "scanned"  # valid PDF but no text (image-only)
