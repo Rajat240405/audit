@@ -159,7 +159,7 @@ export function Workspace() {
           />
         )}
       </div>
-      {/* Full-document reader — opened from the Sources tab or Cross-Verify Facts */}
+      {/* Full-document reader — opened from the Sources tab */}
       <DocViewerModal />
       {/* Live model activity — thinking, received context, go-to-canvas */}
       <ModelActivityPanel />

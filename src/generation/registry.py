@@ -357,9 +357,9 @@ class ModelFamily:
         resolve_execution() in new code.
 
         Fast profile: temperature 0.0 · max_tokens 4096 · docs 3 · chars 1000 ·
-        thinking OFF · verify light.
+        thinking OFF.
         Deep profile: temperature 0.2 · max_tokens 12288 · docs 5 · chars 3000 ·
-        thinking ON · verify full. (Deep's 12288 = reasoning 8192 + output 4096
+        thinking ON. (Deep's 12288 = reasoning 8192 + output 4096
         because thinking-capable models spend max_tokens on reasoning AND answer.)"""
         from src.generation.policy import resolve_execution
 
@@ -370,7 +370,6 @@ class ModelFamily:
             "max_context_docs": plan.max_context_docs,
             "max_doc_chars": plan.max_doc_chars,
             "thinking": plan.thinking,
-            "verify_depth": plan.verify_depth,
         }
 
 
@@ -1152,7 +1151,7 @@ class OpenAICompatibleProvider(BaseProvider):
         # The chain-of-thought (qwen3 ``reasoning_content``) stays available in
         # ``raw_response``; the UI surfaces reasoning via the streaming path.
         # Gluing CoT onto the answer here would corrupt downstream citation
-        # verification and diverge from the Ollama response shape.
+        # handling and diverge from the Ollama response shape.
         text = msg.get("content") or ""
         usage = data.get("usage") or {}
         lat = (time.monotonic() - start) * 1000

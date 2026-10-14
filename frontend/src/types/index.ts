@@ -11,8 +11,6 @@ export type {
   Session,
   ChatMessage,
   MessageStatus,
-  GroundingClaim,
-  InvestigationResult,
   KnowledgeSource,
   KnowledgeMatchCard,
   KnowledgeLookupResult,

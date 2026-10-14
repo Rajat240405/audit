@@ -34,16 +34,11 @@ import {
   cancelRun,
   fetchRunStatus,
   streamChat,
-  verifyAnswer,
   type RunStatus,
 } from "@/api/chat";
 import type { StreamHandlers } from "@/api/client";
 import { useAppStore } from "@/store/useAppStore";
-import {
-  useDraftStore,
-  deepVerifyBlocksNewQuery,
-  type DeepVerifyStatus,
-} from "@/store/useDraftStore";
+import { useDraftStore } from "@/store/useDraftStore";
 import { useActivityStore, type ActivityPhase } from "@/store/useActivityStore";
 import { usePipelineStore } from "@/store/usePipelineStore";
 import { useSessionStore } from "@/store/useSessionStore";
@@ -53,12 +48,10 @@ import { showsHybridStages } from "@/lib/retrievalMode";
 import { expandOrgFilter } from "@/lib/sourceFilter";
 import { clearAnswerScopedPanels } from "@/lib/answerScope";
 import { NOTICE, withNotice } from "@/lib/answerStatus";
-import { toGroundingClaims } from "@/lib/serverGrounding";
 import { graphStages, hybridStages } from "@/utils/formatters";
 import type {
   ChatMessage,
   GenerationMeta,
-  GroundingClaim,
   KnowledgeMatchCard,
   PipelineStage,
   RetrievalMode,
@@ -86,9 +79,6 @@ export interface LiveAnswer {
   finished: boolean;
   sources: SourceItem[];
   trace: RetrievalTrace | null;
-  grounding: GroundingClaim[] | null;
-  /** The answer text `grounding` was verified against (server rows only). */
-  groundingFor: string | null;
   meta: GenerationMeta | null;
   knowledge: RunKnowledge | null;
   reasoning: string;
@@ -119,8 +109,6 @@ export interface ChatRun {
   attempt: number;
   /** The server has acknowledged this run (it sent at least one frame). */
   acked: boolean;
-  /** A replay (not the original generation): its completion is never re-verified. */
-  replay: boolean;
   /** Registered as this tab's active run (the canvas and Stop act on it). */
   foreground: boolean;
   /** The terminal status has been replayed once, so its full text is known. */
@@ -176,8 +164,6 @@ function newLive(retrievalMode: RetrievalMode, now: number): LiveAnswer {
     finished: false,
     sources: [],
     trace: null,
-    grounding: null,
-    groundingFor: null,
     meta: null,
     knowledge: null,
     reasoning: "",
@@ -197,7 +183,6 @@ function makeRun(init: {
   messageId: string;
   question: string;
   live: LiveAnswer;
-  replay: boolean;
   foreground: boolean;
 }): ChatRun {
   return {
@@ -212,11 +197,6 @@ function makeRun(init: {
     retries: 0,
     resumeTimer: null,
   };
-}
-
-function messageContent(sessionId: string, messageId: string): string | undefined {
-  const s = useSessionStore.getState().sessions.find((x) => x.id === sessionId);
-  return s?.messages.find((m) => m.id === messageId)?.content;
 }
 
 /** True only while the canvas is bound to this run's message. */
@@ -246,9 +226,6 @@ function writeStores(run: ChatRun): void {
     content: L.committed ? L.content : "",
     sources: L.sources,
     trace: L.trace,
-    // Server rows only. Empty until /api/verify has answered for this run.
-    grounding: L.grounding ?? [],
-    groundingFor: L.groundingFor,
     lastMeta: L.meta as unknown as Record<string, unknown> | null,
     knowledge: L.knowledge,
   });
@@ -373,86 +350,6 @@ function finalize(run: ChatRun, outcome: Outcome): void {
   if (isForeground(run)) writeStores(run);
 }
 
-/**
- * Post-generation verification (grounding / judge / rewrite). It runs after a
- * completed answer. Results go to the answer's message. The canvas and the
- * toasts are updated only when that answer is still on screen. A background
- * result is stored only if the stored text is still the text that was verified.
- */
-function startVerification(run: ChatRun, content: string, sources: SourceItem[]): void {
-  const sid = run.sessionId;
-  const mid = run.messageId;
-  const isDeep = useAppStore.getState().mode === "deep";
-  if (isDeep && isForeground(run)) {
-    useDraftStore.getState().beginDeepVerify(sid, mid);
-  }
-  let verifyStatus: DeepVerifyStatus = "done";
-  verifyAnswer(content, sources, isDeep ? "full" : "light")
-    .then((res) => {
-      if (res.error) {
-        if (isForeground(run)) {
-          useToastStore.getState().pushSticky("error", `Verification failed: ${res.error}`);
-        }
-        return;
-      }
-      if (!isForeground(run)) {
-        if (
-          res.text &&
-          res.text !== content &&
-          messageContent(sid, mid) === content
-        ) {
-          useSessionStore.getState().updateMessage(sid, mid, { content: res.text });
-        }
-        return;
-      }
-      const draft = useDraftStore.getState();
-      const userEdited = draft.content !== content;
-      if (userEdited) {
-        // The user changed the draft during verify — don't overwrite.
-        useToastStore.getState().pushSticky(
-          "info",
-          "Verification produced revisions, but you edited the draft — review the grounding report instead."
-        );
-        // Rows describe the text that was verified (`content`), which the
-        // user has since changed, so the panel shows them as stale.
-        const rows = toGroundingClaims(res.grounding || []);
-        run.live.grounding = rows;
-        run.live.groundingFor = content;
-        useDraftStore.getState().setGrounding(rows, content);
-        return;
-      }
-      if (res.text && res.text !== draft.content) {
-        draft.applyEdit(res.text);
-        useToastStore.getState().pushSticky(
-          "success",
-          "Answer verified & cleaned (unsupported claims removed)"
-        );
-      }
-      // Rows describe the text that was VERIFIED (`content`). If the judge
-      // rewrote the canvas above, `content` no longer matches it, so the panel
-      // shows the rows as stale and the user can re-run Cross-Verify.
-      const rows = toGroundingClaims(res.grounding || []);
-      run.live.grounding = rows;
-      run.live.groundingFor = content;
-      useDraftStore.getState().setGrounding(rows, content);
-      useSessionStore.getState().updateMessage(sid, mid, {
-        content: useDraftStore.getState().content,
-      });
-    })
-    .catch((err) => {
-      console.warn("[verify] error:", err);
-      verifyStatus = "error";
-      if (isForeground(run)) {
-        useToastStore.getState().pushSticky("error", "Verification failed unexpectedly");
-      }
-    })
-    .finally(() => {
-      if (isDeep && isForeground(run)) {
-        useDraftStore.getState().settleDeepVerify(sid, mid, verifyStatus);
-      }
-    });
-}
-
 function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
   const L = run.live;
   // Only the current attempt of a live run may write. Events from an earlier
@@ -524,16 +421,6 @@ function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
       persist(run, { content: L.content, meta: L.meta });
       project(run);
     },
-    onGrounding: (grounding) => {
-      if (!current()) return;
-      run.acked = true;
-      // Server-verified grounding overrides the client-side heuristic.
-      L.grounding = toGroundingClaims(
-        grounding as GroundingClaim[]
-      );
-      L.groundingFor = L.content;
-      project(run);
-    },
     onKnowledge: ({ matches, tier }) => {
       if (!current()) return;
       run.acked = true;
@@ -542,21 +429,14 @@ function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
       L.knowledge = { matches: cards, tier, fresh: null };
       project(run);
     },
-    onFinal: (text, droppedCount, _dropped, judgeRewritten) => {
+    onFinal: (text) => {
       if (!current()) return;
       run.acked = true;
       if (!L.committed) {
         L.committed = true;
         L.content = L.text;
       }
-      if (judgeRewritten && text && text !== L.content) {
-        // The judge rewrote the answer to remove unsupported claims.
-        L.content = text;
-      }
       if (!L.content && text) L.content = text;
-      if (droppedCount > 0 || judgeRewritten) {
-        console.info(`[grounding] ${droppedCount} flagged, judge-rewrite=${judgeRewritten}`);
-      }
       persist(run, { content: L.content });
       project(run);
     },
@@ -578,11 +458,6 @@ function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
           return;
         }
         finalize(run, "done");
-        // A replay of an answer that finished elsewhere is not re-verified: the
-        // verification result (if any) was stored by the original tab.
-        if (!run.replay && L.content && L.sources.length > 0) {
-          startVerification(run, L.content, L.sources);
-        }
         return;
       }
       // The stream ended without the server's `done`. The page is leaving, so
@@ -704,20 +579,13 @@ async function settleNow(run: ChatRun): Promise<void> {
 
 /**
  * Start a run for `question` in the active session (created if needed). Returns
- * null when refused: another run is active, or the Deep "Wait" gate is set.
+ * null when refused: another run is still active.
  */
 export function startChatRun(question: string): ChatRun | null {
   if (getActiveRun()) {
     useToastStore.getState().pushSticky(
       "info",
       "An answer is still generating. Wait for it to finish, or press Stop."
-    );
-    return null;
-  }
-  if (deepVerifyBlocksNewQuery(useDraftStore.getState().deepVerify)) {
-    useToastStore.getState().pushSticky(
-      "info",
-      "Deep verification is still running. Wait for it to finish, or choose “Start anyway” to continue now."
     );
     return null;
   }
@@ -753,7 +621,6 @@ export function startChatRun(question: string): ChatRun | null {
     messageId: assistantId,
     question,
     live: newLive(app.retrievalMode, now),
-    replay: false,
     foreground: true,
   });
 
@@ -824,7 +691,6 @@ export function attachStoredRun(sessionId: string, messageId: string): boolean {
     messageId,
     question,
     live: newLive(useAppStore.getState().retrievalMode, msg.createdAt),
-    replay: true,
     foreground: true,
   });
   useChatRunStore.setState({ active: run });
@@ -857,7 +723,6 @@ export function reconcileStoredRuns(): void {
         messageId: msg.id,
         question,
         live: newLive(useAppStore.getState().retrievalMode, msg.createdAt),
-        replay: true,
         foreground: false,
       });
       scheduleSettle(run, 0);

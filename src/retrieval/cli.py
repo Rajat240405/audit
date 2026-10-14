@@ -201,7 +201,7 @@ def build(data_file: str, index_dir: str, rebuild: bool, ministry_filter: str | 
 @click.option("--show-trace", is_flag=True, help="Show retrieval trace")
 @click.option("--llm-model", type=str, default="qwen3:8b", help="LLM model name")
 @click.option("--mode", type=click.Choice(["fast", "deep"]), default="fast",
-              help="Fast = thinking off (instant), Deep = thinking on + full verify")
+              help="Fast = thinking off (instant), Deep = thinking on")
 def query(
     question: str,
     top_k: int,

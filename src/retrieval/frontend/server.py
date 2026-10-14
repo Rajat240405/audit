@@ -266,7 +266,6 @@ def _apply_execution_plan(family, prov: str, exec_mode: str):
     # Reasoning depth is bound per request by the caller (Deep only); cleared
     # here so a Fast request can never inherit a previous Deep effort.
     llm_client.reasoning_effort = None
-    ACTIVE_CONFIG["verify_depth"] = plan.verify_depth
     ACTIVE_CONFIG["model"] = resolved_model
     # Task 3: attach the resolved plan — the generator switches from legacy
     # fixed-count/char-caps to reserve-based dynamic evidence budgeting.
@@ -1697,59 +1696,6 @@ from src.retrieval.frontend import generation_runs as gen_runs  # noqa: E402
 RUN_STORE = gen_runs.RunStore()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Grounding verification (server-side)
-# ─────────────────────────────────────────────────────────────────────────────
-# After the answer streams, we extract every claim (proper nouns, acronyms,
-# figures) and check it VERBATIM against the retrieved sources. Claims not
-# found are reported — the frontend shows them as "not found in sources" so
-# the user can see exactly what the model may have invented, and the grounding
-# % badge reflects server-verified facts, not a browser heuristic.
-
-import re as _re
-
-# ── WS3: centralized Verification Authority ──────────────────────────────
-# Phase 3 moved this module's grounding/verification implementation into
-# src/verification/ so that Hybrid RAG and GraphRAG share ONE engine. The
-# private names below are kept as BINDINGS to the central implementation —
-# same functions, same behavior, same code path (Phase 1's frozen
-# verification contract is the acceptance gate). Nothing is reimplemented
-# here; edit src/verification/ to change verification behavior.
-
-from src.verification import text_support as _ts
-from src.verification.authority import VerificationAuthority as _VerificationAuthority
-
-# claim extraction / normalization / support matching / filtering
-_extract_claims = _ts.extract_claims
-_normalize = _ts.normalize
-_singularize = _ts.singularize
-_claim_candidates = _ts.claim_candidates
-_claim_supported = _ts.claim_supported
-_grounding_report = _ts.grounding_report
-_apply_citation_filter = _ts.apply_citation_filter
-_remove_rejected_sentences = _ts.remove_rejected_sentences
-
-# data/tables the frozen tests pin
-_ACRONYM_STOPWORDS = _ts.ACRONYM_STOPWORDS
-_ALIAS_GROUPS = _ts.ALIAS_GROUPS
-
-# The one engine. The LLM client is INJECTED per call (never captured at
-# import time) so runtime provider/model switches — and tests that
-# monkeypatch ``llm_client`` — are always honored.
-_verification_authority = _VerificationAuthority()
-
-
-def _llm_rewrite_answer(
-    answer: str,
-    rejected_claims: list[str],
-    sources: list[dict],
-) -> str:
-    """Rewrite the answer without judge-rejected claims, via the central
-    authority using the server's ACTIVE llm_client."""
-    return _verification_authority.rewrite_answer(
-        answer, rejected_claims, sources, llm_client)
-
-
 def _resolve_exec(request: ChatStreamRequest):
     """Bind ACTIVE_CONFIG / llm_client / generator per execution profile —
     identical resolution path as chat_endpoint and the provider switch."""
@@ -1771,7 +1717,7 @@ def _resolve_exec(request: ChatStreamRequest):
     )
     llm_client.api_key = _active_api_key()
     print(f"[exec] mode={exec_mode} think={'ON' if llm_client.think else 'OFF'} "
-          f"model={resolved_model} verify={ACTIVE_CONFIG['verify_depth']}")
+          f"model={resolved_model}")
     generator.context_budget_ratio = 0.80
     return family, plan, resolved_model
 
@@ -2171,7 +2117,7 @@ def chat_stream(request: ChatStreamRequest):
                     },
                 ) for s in sources
             ]
-            # accumulate streamed text for the server-side grounding pass
+            # accumulate the streamed answer text (the final event's text)
             streamed_parts: list[str] = []
 
             def _sync_sources(ids):
@@ -2241,10 +2187,9 @@ def chat_stream(request: ChatStreamRequest):
                     meta["is_fallback"] = False
                     yield _sse({"type": "meta", "meta": meta})
 
-            # FAST PATH: emit the answer + done immediately. Verification
-            # (grounding/judge/rewrite) runs AFTER the stream closes via
-            # /api/verify — so the stream never blocks on extra LLM calls
-            # (which caused the UI to appear "stuck" on slow local models).
+            # FAST PATH: emit the answer + done immediately. The stream never
+            # waits on extra LLM calls (which made the UI look "stuck" on slow
+            # local models).
             raw_text = "".join(streamed_parts)
             if not raw_text.strip():
                 # Model produced reasoning (or nothing) but zero answer tokens —
@@ -2259,15 +2204,6 @@ def chat_stream(request: ChatStreamRequest):
             yield _sse({
                 "type": "final",
                 "text": raw_text,
-                # Honest flag: these judge/citation values are streaming-time
-                # placeholders (all zero). Real grounding/judge/rewrite runs
-                # asynchronously via /api/verify after the stream closes.
-                "verify_pending": True,
-                "citation_dropped_count": 0,
-                "citation_dropped": [],
-                "judge_removed_count": 0,
-                "judge_removed": [],
-                "judge_rewritten": False,
             })
             print(f"[request] completed latency_ms={(time.perf_counter() - t_ret_start) * 1000:.0f}")
             yield _sse({"type": "status", "stage": "generating",
@@ -2335,87 +2271,6 @@ def chat_run_cancel(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run")
     return run.status_dict()
-
-
-@app.post("/api/investigate")
-def investigate_claim(payload: dict):
-    """Targeted investigation of ONE claim.
-
-    Uses the SAME verdict engine as /api/verify
-    (``VerificationAuthority.investigate_claim`` -> ``semantic.verify_single_claim``):
-    exact containment first, then the evidence-grounded judge with validated
-    passage IDs and quotes. Status values match the verify verdicts:
-    ``supported`` (verified), ``contradicted`` (rejected), ``insufficient``.
-
-    REPORT-ONLY. The caller's `found` verdict is echoed back untouched — the
-    user is investigating BECAUSE they doubt it, so silently flipping it would
-    destroy the signal they are inspecting.
-
-    ``claim_id`` and ``message_id`` are echoed verbatim so the frontend can
-    discard a result whose message is no longer live (a Query-1 investigation
-    finishing after Query 2 started).
-    """
-    claim_text = (payload.get("claim") or "").strip()
-    claim_id = payload.get("claim_id") or ""
-    message_id = payload.get("message_id") or ""
-    sources = payload.get("sources") or []
-
-    base = {"claim_id": claim_id, "message_id": message_id, "claim": claim_text}
-    if not claim_text:
-        return {**base, "status": "error", "error": "empty claim"}
-    if not sources:
-        return {**base, "status": "insufficient",
-                "rationale": "No sources were available to check this claim against.",
-                "sources": [], "quotes": []}
-
-    prev_effort = getattr(llm_client, "reasoning_effort", None)
-    llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
-    try:
-        verdict = _verification_authority.investigate_claim(
-            claim_text, sources, llm_client=llm_client)
-    except Exception as e:  # noqa: BLE001 — report, never 500 the panel
-        print(f"[investigate] failed: {type(e).__name__}: {e}")
-        return {**base, "status": "error", "error": f"{type(e).__name__}"}
-    finally:
-        llm_client.reasoning_effort = prev_effort
-
-    return {
-        **base,
-        "status": verdict["status"],
-        "rationale": verdict.get("rationale") or verdict.get("note") or "",
-        "sources": verdict.get("sources") or [],
-        "quotes": verdict.get("quotes") or [],
-    }
-
-
-@app.post("/api/verify")
-def verify_answer(payload: dict):
-    """Non-blocking post-generation verification.
-
-    Runs AFTER the chat stream closes (so the stream never blocks on extra LLM
-    calls). Returns the grounding rows (verdicts Supported / Needs review /
-    Conflicting evidence, with sources and validated quotes) and the answer.
-    Insufficient-evidence sentences are never removed. Only Deep mode may
-    rewrite a CONTRADICTED sentence, and a failed rewrite keeps the original.
-    All LLM calls have timeouts so this can never hang.
-    """
-    answer = payload.get("answer") or ""
-    sources = payload.get("sources") or []
-    # Mode-aware depth: Fast = light (exact containment only, no LLM judge or
-    # rewrite, instant). Deep = full (passage selection + LLM judge + rewrite).
-    depth = payload.get("depth") or ACTIVE_CONFIG.get("verify_depth", "full")
-    # WS3: the engine lives in the central Verification Authority (identical
-    # behavior and identical response contract — Phase 1 frozen). The ACTIVE
-    # llm_client is injected per call so runtime provider switches are honored.
-    # Internal call: fixed low effort (see the query-agent note). Verification
-    # is mechanical claim-checking against supplied evidence.
-    _prev_effort = getattr(llm_client, "reasoning_effort", None)
-    llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
-    try:
-        return _verification_authority.verify_answer(
-            answer=answer, sources=sources, depth=depth, llm_client=llm_client)
-    finally:
-        llm_client.reasoning_effort = _prev_effort
 
 
 @app.post("/api/edit")

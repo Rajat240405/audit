@@ -13,8 +13,6 @@ COPY src /app/src
 COPY config /app/config
 COPY pyproject.toml /app/pyproject.toml
 COPY --from=frontend /frontend/dist /app/frontend/dist
-COPY frontend/src/utils/grounding_aliases.json \
-     /app/frontend/src/utils/grounding_aliases.json
 
 EXPOSE 8000
 

@@ -129,7 +129,7 @@ export interface Session {
  * Lifecycle of an assistant answer. `undefined` (legacy messages) means the
  * answer is complete.
  *  - streaming:   a live run is writing this message (persisted partial text)
- *  - done:        completed normally (and verified or not yet verified)
+ *  - done:        completed normally
  *  - stopped:     the user pressed Stop; the partial text is kept
  *  - error:       the backend reported an error; partial text is kept
  *  - interrupted: the stream or page ended before `done` (or a reload found
@@ -150,63 +150,6 @@ export interface ChatMessage {
   runId?: string;
   /** Write revision; the newer settled copy wins a merge. See lib/sessionMerge.ts. */
   rev?: number;
-}
-
-/** A validated quote from a supplied record that the verdict relies on. */
-export interface GroundingQuote {
-  source: string;
-  text: string;
-}
-
-/**
- * Verdict for one row of the Cross-Verified Facts list, as returned by
- * /api/verify. The browser never computes these; it only displays them.
- *
- *  - kind "fact": an atomic factual claim (from a factual sentence). `status`
- *    is the verdict: "verified" (Supported), "insufficient" (Needs review),
- *    "rejected" (Conflicting evidence). `found` is true only when verified.
- *  - kind "term": an entity, figure or acronym presence check. `status` is
- *    null and `found` means the term appears in the cited records. It is not
- *    a fact verdict.
- */
-export interface GroundingClaim {
-  /** The claim text (an atomic fact, or a term). */
-  text: string;
-  found: boolean;
-  /** Fact verdict; null for terms. */
-  status?: "verified" | "rejected" | "insufficient" | null;
-  kind?: "fact" | "term";
-  /** First supporting/conflicting record (kept for existing links). */
-  source?: string;
-  /** Every record the verdict relies on (validated against the sources). */
-  sources?: string[];
-  /** Validated quotes, each from one of `sources`. */
-  quotes?: GroundingQuote[];
-  /** The answer sentence the claim was taken from, when it differs from text. */
-  sentence?: string | null;
-  /** exact | llm_judge | not_checked | text */
-  method?: string;
-  /** One-line explanation of the verdict. */
-  note?: string;
-  /** The judge's short rationale, when it gave one. */
-  rationale?: string;
-  /** Stable identity (see lib/claimIdentity). */
-  claim_id?: string;
-}
-
-/**
- * Result of a targeted single-claim investigation. REPORT-ONLY. The statuses
- * use the same verdict rules as /api/verify.
- */
-export interface InvestigationResult {
-  claim_id: string;
-  message_id: string;
-  claim: string;
-  status: "supported" | "contradicted" | "insufficient" | "error";
-  rationale?: string;
-  sources?: string[];
-  quotes?: GroundingQuote[];
-  error?: string;
 }
 
 export interface ServerStatus {
@@ -342,13 +285,7 @@ export type StreamEvent =
       model?: string;
     }
   | { type: "meta"; meta: GenerationMeta }
-  | { type: "grounding"; grounding: GroundingClaim[] }
-  | {
-      type: "final";
-      text: string;
-      citation_dropped_count: number;
-      citation_dropped: string[];
-    }
+  | { type: "final"; text: string }
   | { type: "error"; message: string }
   /** Saved-knowledge matches offered ALONGSIDE the fresh RAG answer — the
    *  saved answer never replaces generation, so old clients that ignore this

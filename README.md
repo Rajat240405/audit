@@ -76,7 +76,6 @@ audit2
 │  │  │  └─ Workspace.tsx
 │  │  ├─ services
 │  │  │  ├─ export.ts
-│  │  │  ├─ grounding.ts
 │  │  │  ├─ markdown.ts
 │  │  │  └─ sse.ts
 │  │  ├─ store
@@ -97,8 +96,7 @@ audit2
 │  │  ├─ utils
 │  │  │  ├─ cn.ts
 │  │  │  ├─ evidence.ts
-│  │  │  ├─ formatters.ts
-│  │  │  └─ grounding_aliases.json
+│  │  │  └─ formatters.ts
 │  │  └─ vite-env.d.ts
 │  ├─ tsconfig.app.json
 │  ├─ tsconfig.json

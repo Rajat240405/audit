@@ -10,8 +10,8 @@
  *  - A settled message (done / stopped / error / interrupted) always beats a
  *    message that is still streaming. A late partial write from a tab that is
  *    still generating can never overwrite a finished answer.
- *  - Two settled copies: the newer write wins (rev). This is how edits and
- *    verification results win over an older copy.
+ *  - Two settled copies: the newer write wins (rev). This is how edits win
+ *    over an older copy.
  *  - Two streaming copies of the same run: the longer text wins. Both come from
  *    the same ordered event stream, so the longer one is the more complete.
  *  - Sessions are merged by id, with the same rev rule for their metadata.

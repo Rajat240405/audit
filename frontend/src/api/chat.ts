@@ -1,14 +1,12 @@
-import { apiFetch, consumeRunEvents, consumeSSE, type StreamHandlers } from "./client";
+import { consumeRunEvents, consumeSSE, type StreamHandlers } from "./client";
 import type {
   ChatMessage,
   DraftStyle,
   ExecutionMode,
-  GroundingClaim,
   RetrievalMode,
   RetrievalTrace,
   SourceItem,
   ThinkingEffort,
-  InvestigationResult,
 } from "@/types";
 
 export interface ChatStreamOptions {
@@ -100,28 +98,6 @@ export interface EditStreamOptions {
   handlers: StreamHandlers;
 }
 
-/** Post-generation verification (non-blocking, runs after the stream closes).
- *  Returns the grounding report + a judge-rewritten answer with unsupported
- *  claims removed. */
-export async function verifyAnswer(
-  answer: string,
-  sources: SourceItem[],
-  depth?: "light" | "full"
-): Promise<{
-  text: string;
-  /** Atomic fact rows (kind "fact", with a verdict in `status`) and term rows (kind "term"), in answer order. */
-  grounding: GroundingClaim[];
-  judge_rewritten: boolean;
-  judge_removed_count: number;
-  verification_stats?: Record<string, number>;
-  error?: string;
-}> {
-  return apiFetch("/api/verify", {
-    method: "POST",
-    body: JSON.stringify({ answer, sources, depth }),
-  });
-}
-
 /** Stream an AI edit of the current draft. */
 export function streamEdit(opts: EditStreamOptions): void {
   consumeSSE(
@@ -156,22 +132,4 @@ export function sourcesOf(msg: ChatMessage): SourceItem[] {
 
 export function traceOf(msg: ChatMessage): RetrievalTrace | undefined {
   return msg.trace;
-}
-
-/** Targeted investigation of ONE suspicious fact. Report-only. */
-export async function investigateClaim(opts: {
-  claim: string;
-  claimId: string;
-  messageId: string;
-  sources: SourceItem[];
-}): Promise<InvestigationResult> {
-  return apiFetch("/api/investigate", {
-    method: "POST",
-    body: JSON.stringify({
-      claim: opts.claim,
-      claim_id: opts.claimId,
-      message_id: opts.messageId,
-      sources: opts.sources,
-    }),
-  });
 }

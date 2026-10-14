@@ -4,7 +4,7 @@
  * A session's state is spread across stores by design:
  *
  *   useSessionStore   conversation (messages, active id)   — persisted
- *   useDraftStore     canvas content + sources + grounding — projection
+ *   useDraftStore     canvas content + sources — projection
  *   useActivityStore  live model activity + error          — projection
  *   usePipelineStore  retrieval stage trace                — projection
  *   useChatRunStore   the in-flight answer, if any         — lib/chatRun.ts
@@ -57,8 +57,8 @@ export function clearSessionScopedState(): void {
 
   usePipelineStore.getState().reset();
 
-  // Answer-specific transient panels: Cross-Verified Facts, its inline
-  // investigations, the Edit-with-AI comparison, and any in-flight edit.
+  // Answer-specific transient panels: the saved-knowledge comparison, the
+  // Edit-with-AI comparison, and any in-flight edit.
   clearAnswerScopedPanels();
 }
 

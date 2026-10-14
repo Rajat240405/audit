@@ -142,7 +142,6 @@ def test_plan_fast_matches_legacy_effective_values():
     assert plan.reasoning_budget_tokens == 0
     assert plan.max_context_docs == 3
     assert plan.max_doc_chars == 1000
-    assert plan.verify_depth == "light"
     assert plan.num_ctx == 32768
     assert plan.prompt_budget_tokens == int(32768 * 0.80)
     assert plan.think_mode == "template"
@@ -160,7 +159,6 @@ def test_plan_deep_matches_legacy_effective_values():
     assert plan.reasoning_budget_tokens + plan.output_budget_tokens == plan.max_tokens
     assert plan.max_context_docs == 5
     assert plan.max_doc_chars == 3000
-    assert plan.verify_depth == "full"
     assert plan.num_ctx == 32768
     assert plan.prompt_budget_tokens == int(32768 * 0.80)
     assert plan.warnings == ()
@@ -215,7 +213,6 @@ def test_get_execution_params_shim_delegates_to_plan():
         assert legacy["temperature"] == plan.temperature
         assert legacy["max_context_docs"] == plan.max_context_docs
         assert legacy["max_doc_chars"] == plan.max_doc_chars
-        assert legacy["verify_depth"] == plan.verify_depth
 
 
 # ── 5. wire preservation + heuristic removal ──────────────────────────────

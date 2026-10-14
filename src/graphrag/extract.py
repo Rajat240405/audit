@@ -12,9 +12,7 @@ Validation (spec §13) — the builder NEVER blindly accepts LLM output:
     LLM JSON
       → structural validation   (allowed labels/relations, name sanity)
       → grounding               (names + evidence must appear VERBATIM in the
-                                 document, casefold/whitespace-normalized —
-                                 the same verbatim-trust philosophy as the
-                                 server's LLM-judge gate)
+                                 document, casefold/whitespace-normalized)
       → normalization           (Phase 1 vocabulary: known surfaces →
                                  canonical "c:" keys; unknowns → stable "u:"
                                  keys, raw preserved — open world)

@@ -149,7 +149,6 @@ _PROFILES: dict = {
                                    # final document quota; budget decides
         "max_context_docs": 3,     # LEGACY fallback only (no-plan consumers)
         "max_doc_chars": 1000,     # LEGACY fallback only (no-plan consumers)
-        "verify_depth": "light",   # regex-only, no LLM judge
     },
     "deep": {
         "temperature": 0.2,
@@ -161,7 +160,6 @@ _PROFILES: dict = {
         "retrieval_top_k": 10,     # INITIAL candidate pool (Task 3)
         "max_context_docs": 5,     # LEGACY fallback only
         "max_doc_chars": 3000,     # LEGACY fallback only
-        "verify_depth": "full",
     },
 }
 
@@ -214,8 +212,6 @@ class ExecutionPlan:
     # plan is attached (standalone AnswerGenerator, interactive CLI)
     max_context_docs: int
     max_doc_chars: int
-    # verification
-    verify_depth: str
     # What may actually go on the wire for THIS model: the mode value when
     # thinking capability is KNOWN (supported true/false); None when the
     # capability is UNKNOWN (dynamically discovered model) — consumers must
@@ -384,7 +380,6 @@ def resolve_execution(
         evidence_budget_tokens=evidence_budget,
         max_context_docs=int(prof["max_context_docs"]),
         max_doc_chars=int(prof["max_doc_chars"]),
-        verify_depth=str(prof["verify_depth"]),
         native_context_tokens=ctx_info["native_context_tokens"],
         serving_context_tokens=ctx_info["serving_context_tokens"],
         app_context_limit_tokens=ctx_info["app_context_limit_tokens"],

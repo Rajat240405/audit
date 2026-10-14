@@ -114,7 +114,6 @@ def test_plan_fast_matches_standard_profile():
     assert plan.reasoning_budget_tokens == 0
     assert plan.max_context_docs == 3
     assert plan.max_doc_chars == 1000
-    assert plan.verify_depth == "light"
     assert plan.num_ctx == 32768
     assert plan.prompt_budget_tokens == int(32768 * 0.80)
     assert plan.warnings == ()
@@ -132,7 +131,6 @@ def test_plan_deep_matches_standard_profile():
     assert plan.reasoning_budget_tokens == 8192
     assert plan.max_context_docs == 5
     assert plan.max_doc_chars == 3000
-    assert plan.verify_depth == "full"
     assert plan.num_ctx == 32768
     assert plan.warnings == ()
 

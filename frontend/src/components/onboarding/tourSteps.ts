@@ -9,10 +9,9 @@
  *   Draft · History · Sources · RAG Pipeline ·
  *   Notes · Graph                                    pages/Workspace.tsx (TABS)
  *   Markdown / DOCX / TXT                            components/workspace/ExportMenu.tsx
- *   Cross-Verify Facts / Formalize / Edit            components/workspace/DraftCanvas.tsx
+ *   Formalize / Edit                                  components/workspace/DraftCanvas.tsx
  *   Bullets / Formal / Concise / Exec Summary
  *   Grammar / Prose / Edit with AI                    components/workspace/Toolbar.tsx
- *   Cross-Verified Facts / grounded / unsupported    components/workspace/FactVerificationPanel.tsx
  *   Retrieving / Thinking / Generating               components/activity/ModelActivityPanel.tsx
  *   Newly processed / Reconciled / changed /
  *   Skipped unchanged / Failed                       components/graph/BuildGraphModal.tsx
@@ -116,8 +115,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: "draft-editing",
     title: "Editing the draft",
     body:
-      "The Drafting Canvas holds the generated answer, with a score showing the share of its factual claims that " +
-      "the retrieved evidence supports. The Edit button rewrites any part by hand; Save writes your version " +
+      "The Drafting Canvas holds the generated answer. The Edit button rewrites any part by hand; Save writes your version " +
       "back into the session transcript, so your edits persist and become the base for the next AI edit.",
     when: "Edit by hand for factual corrections or wording the model got wrong; use AI editing for restructuring.",
     target: "draft-canvas",
@@ -134,20 +132,6 @@ export const TOUR_STEPS: TourStep[] = [
       "Formalize is a one-click shortcut for the formal-register rewrite.",
     when: "Use a chip for a predictable transform, and the instruction box when you need something specific like \"add a recommendations section\".",
     target: "draft-toolbar",
-    tab: "draft",
-    placement: "bottom",
-  },
-  {
-    id: "verify",
-    title: "Cross-Verify Facts",
-    body:
-      "This re-checks the finished draft against the evidence instead of trusting the generation. Each factual claim " +
-      "is checked against passages from the retrieved records. The Cross-Verified Facts panel reports one of three " +
-      "verdicts per claim: Supported, Needs review (not enough evidence) or Conflicting evidence, with the source " +
-      "documents and quotes. The canvas score is the share of facts marked Supported. It changes the score and the " +
-      "claim list — it never rewrites the draft.",
-    when: "Run this before anything leaves your desk. Confirm every claim marked Needs review or Conflicting evidence in the original document before it is quoted.",
-    target: "draft-verify",
     tab: "draft",
     placement: "bottom",
   },

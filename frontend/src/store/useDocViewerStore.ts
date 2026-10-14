@@ -3,8 +3,8 @@ import type { SourceItem } from "@/types";
 
 /**
  * Which source document is currently open in the full-document viewer.
- * Shared by the Sources tab (EvidenceCard) and Cross-Verify Facts
- * (ClaimsList) so either can open the same reader.
+ * Opened from the Sources tab (EvidenceCard), so the same reader can be
+ * reached from every evidence view.
  */
 interface DocViewerState {
   source: SourceItem | null;
