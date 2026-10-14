@@ -13,7 +13,7 @@ import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
 import { useEditStore } from "@/store/useEditStore";
 import { Toolbar } from "./Toolbar";
-import { refreshGrounding } from "@/lib/serverGrounding";
+import { refreshGrounding, summarizeGrounding } from "@/lib/serverGrounding";
 import { useAppStore } from "@/store/useAppStore";
 import { cn } from "@/utils/cn";
 
@@ -47,11 +47,13 @@ export function DraftCanvas() {
   const { ref: streamRef } = useStickyAnchorScroll<HTMLDivElement>([streamingText]);
 
   // The score is only meaningful for rows verified against the CURRENT draft.
+  // Counts come from the same summary the facts panel shows, so the two never
+  // disagree. Term presence rows are not facts and are not in the score.
   const groundingStale = groundingFor != null && groundingFor !== content;
-  const verified = grounding.filter((g) => g.found).length;
+  const summary = summarizeGrounding(grounding);
   const score =
-    !groundingStale && grounding.length
-      ? Math.round((verified / grounding.length) * 100)
+    !groundingStale && summary.facts > 0
+      ? Math.round((summary.grounded / summary.facts) * 100)
       : null;
   const [verifying, setVerifying] = useState(false);
 
@@ -80,13 +82,19 @@ export function DraftCanvas() {
     // supplementary feedback and intentionally carries only the summary.
     setFactsOpen(true);
 
-    const unverified = res.claims.filter((r) => !r.found);
-    if (unverified.length === 0) {
-      pushToast("success", "Cross-verification complete — all claims grounded in sources.");
+    const sum = summarizeGrounding(res.claims);
+    if (sum.facts === 0) {
+      pushToast("info", "Cross-verification complete — no factual claims found to check.");
+    } else if (sum.grounded === sum.facts) {
+      pushToast("success", `Cross-verification complete — all ${sum.facts} factual claim(s) supported by sources.`);
     } else {
+      const parts = [
+        sum.conflicting > 0 ? `${sum.conflicting} conflicting` : "",
+        sum.needsReview > 0 ? `${sum.needsReview} need review` : "",
+      ].filter(Boolean);
       pushToast(
         "error",
-        `Cross-verification: ${unverified.length} claim(s) not found in sources.`
+        `Cross-verification: ${sum.grounded} of ${sum.facts} factual claims supported; ${parts.join(", ")}.`
       );
     }
   };
@@ -153,7 +161,7 @@ export function DraftCanvas() {
                   score >= 80 ? "text-success" : score >= 40 ? "text-warning" : "text-danger"
                 )}
               >
-                • Grounding {score}%
+                • {summary.grounded} of {summary.facts} facts supported ({score}%)
               </span>
             )}
             </span>

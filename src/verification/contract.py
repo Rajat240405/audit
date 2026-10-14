@@ -4,15 +4,22 @@ The ONE representation the Verification Authority consumes, regardless of
 which retrieval mode produced the evidence (Hybrid RAG or GraphRAG).
 Retrieval-specific code produces these; only the authority interprets them.
 
-Verdict semantics (strict):
-  verified     — genuine textual support in a cited source (normalized +
-                 alias-aware, number+word swap aware) AND the citation is
-                 traceable (hybrid: doc_id among the sources; graph: the
-                 Document→SUPPORTS→Fact chain resolves).
-  rejected     — stronger negative: the LLM judge said unsupported, or a
-                 graph fact is presented as grounded without supports.
-  insufficient — no support found, no judge upgrade (default for ungrounded
-                 claims; a weak/partial overlap is NEVER sufficient).
+Verdict semantics (evidence-grounded, see ``semantic.py``):
+  verified     — SUPPORTED: the claim is established by the cited records. Either
+                 the sentence appears verbatim in a cited record, or the judge
+                 cited passages whose quotes were validated against the record
+                 text and pass the deterministic guards (numbers, units,
+                 negation, qualifiers). Joint support from several records is
+                 allowed. The citation must be traceable (the record is among
+                 the supplied sources).
+  rejected     — CONTRADICTED: a validated quote from a supplied record explicitly
+                 conflicts with the claim. Also used when a graph fact is
+                 presented as grounded without supports.
+  insufficient — INSUFFICIENT_EVIDENCE: the records neither establish nor
+                 contradict the claim, or the judge is unavailable, malformed, or
+                 over budget. Missing evidence is never a contradiction.
+Entity, figure and acronym rows are presence checks, not verdicts (see
+``VerificationAuthority``).
 """
 from __future__ import annotations
 

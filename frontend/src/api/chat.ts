@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   DraftStyle,
   ExecutionMode,
+  GroundingClaim,
   RetrievalMode,
   RetrievalTrace,
   SourceItem,
@@ -108,10 +109,11 @@ export async function verifyAnswer(
   depth?: "light" | "full"
 ): Promise<{
   text: string;
-  /** Sentence rows (kind "sentence") and entity/figure rows (kind "claim"). */
-  grounding: Array<{ text: string; found: boolean; source?: string; note?: string; kind?: "claim" | "sentence" }>;
+  /** Atomic fact rows (kind "fact", with a verdict in `status`) and term rows (kind "term"), in answer order. */
+  grounding: GroundingClaim[];
   judge_rewritten: boolean;
   judge_removed_count: number;
+  verification_stats?: Record<string, number>;
   error?: string;
 }> {
   return apiFetch("/api/verify", {

@@ -267,6 +267,32 @@ def is_sentence_claim(text: str) -> bool:
     return len(normalize(t).split()) >= _MIN_SENTENCE_TOKENS
 
 
+#: A short sentence is still a factual claim when it carries a figure and reads
+#: as a finished statement, e.g. "Odisha has 9 fishing ports." (5 tokens).
+#: Without a figure, four tokens are too little to state a checkable fact.
+_MIN_FIGURE_SENTENCE_TOKENS = 4
+
+
+def is_factual_length(text: str) -> bool:
+    """True when the text is long enough to be checked as a factual statement.
+
+    Same rules as ``is_sentence_claim`` (names with an abbreviation are excluded)
+    plus the figure rule above. Used for exact-containment checks and for
+    extracting factual sentences.
+    """
+    t = text.strip()
+    if not t or _NAMED_ABBR_RE.fullmatch(t):
+        return False
+    n = len(normalize(t).split())
+    if n >= _MIN_SENTENCE_TOKENS:
+        return True
+    # Short form: must read as a finished statement. A colon marks a label or
+    # heading ("Source 1: ministry bulletin"), and a missing full stop marks a
+    # fragment. Both are excluded.
+    return (n >= _MIN_FIGURE_SENTENCE_TOKENS and bool(re.search(r"\d", t))
+            and t.endswith((".", "!")) and ":" not in t)
+
+
 def sentence_contained(sentence: str, src_normalized: str) -> bool:
     """True when the whole sentence appears, word-bounded, in a normalized source."""
     s = normalize(sentence)
@@ -312,7 +338,7 @@ def extract_factual_sentences(answer: str) -> list[str]:
         s = s.replace("**", "").replace("__", "").replace("`", "").strip()
         if not s or _NON_STATEMENT_RE.match(s) or s.endswith("?"):
             continue
-        if not is_sentence_claim(s) or not _has_fact_token(s):
+        if not is_factual_length(s) or not _has_fact_token(s):
             continue
         key = normalize(s)
         if key in seen:

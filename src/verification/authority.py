@@ -1,33 +1,39 @@
 """Verification Authority (Phase 3 / WS3).
 
-The ONE centralized verification engine for every retrieval mode:
-Hybrid RAG and GraphRAG evidence are normalized into the shared contract
-(``contract.py``) and verified here — there is no per-mode verifier.
+The ONE centralized verification engine for every retrieval mode and every
+entry point:
 
-Deterministic core: claim extraction + strict normalized/alias-aware support
-(``text_support``). Optional LLM pass (``depth="full"``): the judge re-checks
-only the claims the regex could NOT verify, with the FROZEN verbatim-trust
-gate — a judge "supported" is accepted only when the cited source actually
-contains the claim (same normalized matcher); on any judge failure the regex
-verdicts stand. Optional rewrite removes judge-rejected claims, followed by
-the deterministic rejected-sentence safety net.
+  * ``/api/verify`` (post-answer and Cross-Verify) -> ``verify_answer``
+  * ``/api/investigate`` (one claim)               -> ``investigate_claim``
+  * GraphRAG / EvidenceSet                          -> ``verify``
 
-Model/provider agnostic: the LLM client is INJECTED (the server passes its
-active client built by the shared generation architecture; tests pass a
-scripted fake; light depth makes zero LLM calls).
+All three use the same verdict rules (``semantic.py``): SUPPORTED ->
+``verified``, CONTRADICTED -> ``rejected``, INSUFFICIENT_EVIDENCE ->
+``insufficient``. Verdicts are evidence-grounded: exact containment is a
+deterministic fast path, and the LLM judge decides semantic support from
+passages selected from the supplied records. Every passage ID, source ID and
+quote the judge cites is validated against the supplied records before it is
+used.
 
-Graph mode adds integrity checks on the resolved provenance
-(``graph_checks``): every cited fact must exist, LLM-origin facts must carry
-verbatim evidence in at least one support, zero-support facts are never
-presented as grounded, supports must reference known documents, and
-deterministic facts must name their source field.
+Deterministic term checks (``text_support.grounding_report``) still run for
+entities, figures and acronyms. They report presence only and never count as
+fact verification.
+
+Automatic rewrite (Deep mode only, unchanged behaviour): sentences that carry a
+CONTRADICTED claim are removed or rewritten. Insufficient evidence never
+removes or rewrites anything.
+
+Graph mode adds integrity checks on the resolved provenance (``graph_checks``).
+
+Model/provider agnostic: the LLM client is INJECTED. Light depth makes zero LLM
+calls.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Optional
 
+from src.verification import semantic as sem
 from src.verification import text_support as ts
 from src.verification.markdown_structure import (
     remove_list_and_heading_for_claims,
@@ -48,18 +54,95 @@ from src.verification.contract import (
 
 __all__ = ["VerificationAuthority"]
 
-_JUDGE_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_INVESTIGATION_STATUS = {
+    STATUS_VERIFIED: "supported",
+    STATUS_REJECTED: "contradicted",
+    STATUS_INSUFFICIENT: "insufficient",
+}
 
 
 class VerificationAuthority:
-    """One verification engine for all retrieval modes (see module docstring)."""
+    """One verification engine for all retrieval modes and entry points."""
 
     def __init__(self, llm_client=None) -> None:
         # llm_client: anything with .generate(prompt=..., system=...) -> obj.text
         # (the project's LLMClient satisfies this; tests use scripted fakes).
         self._llm = llm_client
 
-    # ── public: normalized contract (both modes) ──────────────────────────
+    # ── shared core ───────────────────────────────────────────────────────
+
+    def _check(self, answer: str, sources: list[dict], depth: str, client):
+        """Fact rows (semantic) + term rows (presence). Returns (rows, stats)."""
+        judge = client if depth == "full" else None
+        fact_rows, stats = sem.verify_factual_sentences(
+            answer, sources, client=judge, depth=depth)
+        for r in fact_rows:
+            r["kind"] = "fact"
+            r["found"] = r["status"] == STATUS_VERIFIED
+        term_rows = []
+        for g in ts.grounding_report(answer, sources):
+            present = bool(g["found"])
+            term_rows.append({
+                "text": g["text"], "sentence": None, "kind": "term",
+                "status": None, "found": present,
+                "method": "text",
+                "sources": [g["source"]] if g.get("source") else [],
+                "quotes": [],
+                "note": ("term present in the cited records (presence check, "
+                         "not a fact check)") if present else
+                        "term not found in the cited records",
+                "rationale": "",
+            })
+        return fact_rows + term_rows, stats
+
+    @staticmethod
+    def _wire_row(r: dict) -> dict:
+        """Response row for /api/verify. ``found`` = verified fact or present term."""
+        sources = list(r.get("sources") or [])
+        return {
+            "text": r["text"],
+            "found": bool(r.get("found")),
+            "status": r.get("status"),
+            "kind": r.get("kind", "fact"),
+            "source": sources[0] if sources else None,
+            "sources": sources,
+            "quotes": list(r.get("quotes") or []),
+            "sentence": r.get("sentence"),
+            "method": r.get("method", "text"),
+            "note": r.get("note", ""),
+            "rationale": r.get("rationale", ""),
+        }
+
+    @staticmethod
+    def _rejected_sentences(rows: list[dict]) -> list[str]:
+        out: list[str] = []
+        for r in rows:
+            if r.get("kind") == "fact" and r.get("status") == STATUS_REJECTED:
+                s = r.get("sentence") or r["text"]
+                if s not in out:
+                    out.append(s)
+        return out
+
+    def _rewrite(self, answer: str, rows: list[dict], sources: list[dict],
+                 client) -> tuple[str, bool]:
+        """Deep-mode rewrite of CONTRADICTED sentences. Returns (text, rewritten).
+
+        A failing rewrite keeps the original answer (never silently drops text).
+        """
+        rejected = self._rejected_sentences(rows)
+        if not rejected or client is None or not answer.strip():
+            return answer, False
+        try:
+            rewrite = self.rewrite_answer(answer, rejected, sources, client)
+        except Exception as e:  # noqa: BLE001 - keep the answer on any failure
+            print(f"[verify] rewrite skipped ({type(e).__name__}: {e})")
+            return answer, False
+        if rewrite and rewrite.strip():
+            final, _ = ts.remove_rejected_sentences(rewrite, rejected)
+            return final, True
+        return answer, False
+
+    # ── public: normalized contract (graph and hybrid EvidenceSet) ────────
 
     def verify(
         self,
@@ -70,59 +153,41 @@ class VerificationAuthority:
     ) -> VerificationReport:
         """Verify an answer against a normalized EvidenceSet.
 
-        ``depth``: "light" = deterministic only (no LLM); "full" = + LLM
-        judge/rewrite. Returns a VerificationReport (claims + sufficiency +
-        provenance + graph checks)."""
+        ``depth``: "light" = deterministic only (no LLM); "full" = + semantic
+        judge and rewrite. Returns a VerificationReport.
+        """
         client = llm_client or self._llm
         sources = evidence.as_sources()
         report = VerificationReport(method=depth)
         if not answer or not sources:
             return report
 
-        # 1) deterministic grounding (shared core)
-        grounding = ts.grounding_report(answer, sources)
-        for g in grounding:
-            if g["found"]:
-                status, method = STATUS_VERIFIED, "text"
-            elif str(g.get("note", "")).startswith("rejected by LLM judge"):
-                status, method = STATUS_REJECTED, "llm_judge"
-            else:
-                status, method = STATUS_INSUFFICIENT, "text"
+        rows, _stats = self._check(answer, sources, depth, client)
+        for r in rows:
             report.claims.append(ClaimVerdict(
-                claim=g["text"], status=status,
-                source_doc_id=g.get("source"), method=method,
-                note=g.get("note", "")))
-        # Factual sentences: deterministic exact containment, report-only.
-        sentence_claims = self._sentence_verdicts(
-            ts.sentence_grounding_report(answer, sources))
-        report.claims.extend(sentence_claims)
+                claim=r["text"],
+                status=(r["status"] if r.get("kind") == "fact"
+                        else (STATUS_VERIFIED if r["found"] else STATUS_INSUFFICIENT)),
+                source_doc_id=(r.get("sources") or [None])[0],
+                method=r.get("method", "text"),
+                note=r.get("note", ""),
+            ))
 
-        # 2) citation filter (informational; frozen behavior)
+        # citation filter (informational; frozen behavior)
         _filtered, dropped = ts.apply_citation_filter(answer, sources)
         report.citation_dropped = dropped
 
-        # 3) LLM judge — full depth only, only claims the regex missed
-        if depth == "full" and any(not g.get("found") for g in grounding):
-            grounding = self.judge_claims(grounding, sources, client)
-            report.claims = self._claims_from_grounding(grounding) + sentence_claims
+        # rewrite (full depth) — only CONTRADICTED sentences
+        if depth == "full":
+            final, rewritten = self._rewrite(answer, rows, sources, client)
+            report.final_text = final
+            report.judge_rewritten = rewritten
+            report.judge_removed = [r["text"] for r in rows
+                                    if r.get("kind") == "fact"
+                                    and r.get("status") == STATUS_REJECTED]
 
-        # 4) rewrite (full depth) — remove judge-rejected claims
-        rejected = [
-            c.claim for c in report.claims
-            if c.status == STATUS_REJECTED
-            and str(c.note).startswith("rejected by LLM judge")
-        ]
-        if depth == "full" and rejected:
-            rewrite = self.rewrite_answer(answer, rejected, sources, client)
-            if rewrite and rewrite.strip():
-                report.final_text = rewrite
-                report.judge_rewritten = True
-                report.final_text, _ = ts.remove_rejected_sentences(
-                    report.final_text, rejected)
-            report.judge_removed = rejected
-
-        # 5) citation/provenance integrity: a verified claim must cite a
-        #    source that is actually in the evidence set
+        # citation/provenance integrity: a verified claim must cite a source
+        # that is actually in the evidence set
         doc_ids = evidence.doc_ids()
         for c in report.claims:
             if c.status == STATUS_VERIFIED and c.source_doc_id not in doc_ids:
@@ -132,15 +197,14 @@ class VerificationAuthority:
             c.source_doc_id in doc_ids
             for c in report.claims if c.status == STATUS_VERIFIED)
 
-        # 6) graph integrity checks (graph mode only)
+        # graph integrity checks (graph mode only)
         if evidence.mode == MODE_GRAPH:
             report.graph_checks = self._graph_checks(evidence, report)
             if not report.graph_checks.get("ok", True):
-                # facts presented as grounded but broken → reject their claims
                 self._reject_on_broken_provenance(evidence, report)
         return report
 
-    # ── public: the frozen /api/verify engine shape ───────────────────────
+    # ── public: /api/verify response shape ────────────────────────────────
 
     def verify_answer(
         self,
@@ -149,52 +213,36 @@ class VerificationAuthority:
         depth: str = "light",
         llm_client=None,
     ) -> dict:
-        """Behavior-identical to the server's pre-Phase-3 verify_answer.
+        """The /api/verify engine.
 
-        Same input/output contract (frozen in Phase 1 WS0): returns
-        {text, grounding, judge_rewritten, judge_removed_count, judge_removed,
-        citation_dropped_count} on success, or the {"error": ...} shape on
-        missing input / internal failure. The server delegates here."""
+        Returns {text, grounding, judge_rewritten, judge_removed_count,
+        judge_removed, citation_dropped_count, verification_stats, method} on
+        success, or the {"error": ...} shape on missing input or internal
+        failure. ``grounding`` rows carry ``kind`` ("fact" | "term") and, for facts,
+        ``status`` ("verified" | "rejected" | "insufficient"), validated ``sources``
+        and ``quotes``, and a ``note``.
+        """
         client = llm_client or self._llm
         if not answer or not sources:
             return {"text": answer, "grounding": [], "judge_rewritten": False,
                     "judge_removed_count": 0, "error": "missing answer or sources"}
         try:
-            grounding = ts.grounding_report(answer, sources)
+            rows, stats = self._check(answer, sources, depth, client)
             _filtered, citation_dropped = ts.apply_citation_filter(answer, sources)
-            if depth == "full" and grounding and any(not c.get("found") for c in grounding):
-                grounding = self.judge_claims(grounding, sources, client)
-            # Factual sentences are appended AFTER the judge step: they are
-            # verified by exact containment only and are never judged,
-            # rejected or removed.
-            # ``kind`` tells the UI which rows are complete factual sentences
-            # and which are entity/figure claims. Additive: existing fields
-            # are unchanged.
-            for g in grounding:
-                g.setdefault("kind", "claim")
-            grounding = grounding + ts.sentence_grounding_report(answer, sources)
-            rejected_claims = [
-                c["text"] for c in grounding
-                if (not c.get("found"))
-                and str(c.get("note", "")).startswith("rejected by LLM judge")
-            ]
-            final_text = answer
-            judge_rewritten = False
-            if depth == "full" and rejected_claims and answer.strip():
-                rewrite = self.rewrite_answer(answer, rejected_claims, sources, client)
-                if rewrite and rewrite.strip():
-                    final_text = rewrite
-                    judge_rewritten = True
-                    # deterministic safety net
-                    final_text, _ = ts.remove_rejected_sentences(
-                        final_text, rejected_claims)
+            final_text, judge_rewritten = answer, False
+            if depth == "full":
+                final_text, judge_rewritten = self._rewrite(answer, rows, sources, client)
+            rejected = [r for r in rows
+                        if r.get("kind") == "fact" and r.get("status") == STATUS_REJECTED]
             return {
                 "text": final_text,
-                "grounding": grounding,
+                "grounding": [self._wire_row(r) for r in rows],
                 "judge_rewritten": judge_rewritten,
-                "judge_removed_count": len(rejected_claims),
-                "judge_removed": rejected_claims[:20],
+                "judge_removed_count": len(rejected),
+                "judge_removed": [r["text"] for r in rejected][:20],
                 "citation_dropped_count": len(citation_dropped),
+                "verification_stats": stats.to_dict(),
+                "method": depth,
             }
         except Exception as e:  # noqa: BLE001 - never break the app
             import traceback
@@ -204,160 +252,25 @@ class VerificationAuthority:
                     "judge_removed_count": 0,
                     "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
-    # ── internals ─────────────────────────────────────────────────────────
+    # ── public: /api/investigate (one claim, same verdict rules) ──────────
 
-    @staticmethod
-    def _claims_from_grounding(grounding: list[dict]) -> list[ClaimVerdict]:
-        out = []
-        for g in grounding:
-            if g["found"]:
-                status = STATUS_VERIFIED
-            elif str(g.get("note", "")).startswith("rejected by LLM judge"):
-                status = STATUS_REJECTED
-            else:
-                status = STATUS_INSUFFICIENT
-            note = str(g.get("note", ""))
-            judged = note.startswith(("verified by LLM judge", "rejected by LLM judge"))
-            method = "llm_judge" if judged else "text"
-            out.append(ClaimVerdict(
-                claim=g["text"], status=status, source_doc_id=g.get("source"),
-                method=method, note=g.get("note", "")))
-        return out
+    def investigate_claim(self, claim: str, sources: list[dict],
+                          llm_client=None) -> dict:
+        """Judge ONE claim with the same rules as /api/verify.
 
-    def judge_claims(self, claims: list[dict], sources: list[dict],
-                     client=None) -> list[dict]:
-        """Verify flagged claims with the LLM judge against the sources.
-
-        Returns the claims list with updated ``found`` / ``source`` / ``note``.
-        On any failure (LLM offline, parse error) returns the original claims
-        unchanged — the regex verdicts remain authoritative.
-
-        Public API (WS3): the server's ``_llm_judge_claims`` and both engine
-        entry points route here, so there is exactly ONE judge implementation.
-        ``client`` defaults to the injected constructor client."""
-        client = client or self._llm
-        if client is None:
-            return claims  # no LLM available: regex verdicts stand
-        if not claims or not sources:
-            return claims
-        # Only judge claims the regex could NOT verify (the interesting ones).
-        pending = [c for c in claims if not c.get("found")]
-        if not pending:
-            return claims
-
-        try:
-            # Compact source text: id + answer (truncated) per doc.
-            src_blocks = []
-            for i, s in enumerate(sources[:6], start=1):
-                ans = (s.get("answer") or "")[:1500]
-                src_blocks.append(f"[Source {i}] {s.get('doc_id','')}\n{ans}")
-            src_text = "\n\n".join(src_blocks)
-
-            claim_lines = "\n".join(
-                f"{i}. {c['text']}" for i, c in enumerate(pending, start=1))
-            prompt = (
-                "You are a strict evidence auditor. Below are source documents and a "
-                "list of claims. For EACH claim decide whether it is SUPPORTED by the "
-                "sources — supported means the claim's fact appears in the source text "
-                "verbatim or is directly implied. If a claim names an organization, "
-                "programme, or figure that does not appear in the sources, it is NOT "
-                "supported.\n"
-                "Return ONLY JSON (no prose):\n"
-                '{"verdicts":[{"index":1,"supported":true,"source":"18-3-2571"},'
-                '{"index":2,"supported":false,"source":null}]}\n\n'
-                f"SOURCES:\n{src_text}\n\nCLAIMS:\n{claim_lines}"
-            )
-            resp = client.generate(
-                prompt=prompt,
-                system=(
-                    "You are an evidence-verification assistant. Answer strictly with "
-                    "the requested JSON. Never invent claims or sources."
-                ),
-            )
-            raw = resp.text
-            m = _JUDGE_JSON_RE.search(raw or "")
-            if not m:
-                return claims
-            data = json.loads(m.group(0))
-            verdicts = data.get("verdicts") or []
-
-            by_index = {}
-            for v in verdicts:
-                try:
-                    by_index[int(v.get("index"))] = v
-                except (TypeError, ValueError):
-                    continue
-
-            out = []
-            pending_i = 0
-            for c in claims:
-                if c.get("found"):
-                    out.append(c)  # already verified verbatim by regex — keep
-                    continue
-                pending_i += 1  # index within the pending list the judge saw
-                v = by_index.get(pending_i)
-                if v is None:
-                    out.append(c)  # judge gave no verdict — keep regex verdict
-                    continue
-                supported = bool(v.get("supported"))
-                src = v.get("source") or None
-                # CRITICAL: the judge's "supported" is only trusted if it can
-                # name a source that ACTUALLY contains the claim. The judge is
-                # the same model that hallucinated the claim (e.g. "VSSC" — it
-                # "remembers" VSSC is ISRO's space centre), so a bare
-                # "supported: true" must NOT override a verbatim miss. Only
-                # accept the judge's verdict when the claim text appears in
-                # the cited source's text (same normalized+alias matcher).
-                judge_trusted = False
-                if supported and src:
-                    for s in sources:
-                        if s.get("doc_id") == src:
-                            stxt = ts.normalize(
-                                f"{s.get('question','')} {s.get('answer','')}")
-                            if ts.claim_matches_source(c["text"], stxt):
-                                judge_trusted = True
-                            break
-                if supported and not judge_trusted:
-                    out.append({
-                        "text": c["text"],
-                        "found": False,
-                        "source": None,
-                        "note": "rejected by LLM judge (no verbatim source support)",
-                    })
-                else:
-                    out.append({
-                        "text": c["text"],
-                        "found": judge_trusted,
-                        "source": src if judge_trusted else None,
-                        "note": ("verified by LLM judge" if judge_trusted
-                                 else "rejected by LLM judge"),
-                    })
-            return out
-        except Exception as e:  # noqa: BLE001 - judge must never break the flow
-            import traceback
-            print(f"[llm-judge] failed ({type(e).__name__}: {e}) — using regex verdicts")
-            print(traceback.format_exc(limit=3))
-            return claims
-
-    @staticmethod
-    def _sentence_verdicts(sentences: list[dict]) -> list[ClaimVerdict]:
-        """Verdicts for factual-sentence checks. Never judged, never rejected."""
-        return [
-            ClaimVerdict(
-                claim=s["text"],
-                status=STATUS_VERIFIED if s["found"] else STATUS_INSUFFICIENT,
-                source_doc_id=s.get("source"),
-                method="text",
-                note=s.get("note", ""),
-            )
-            for s in sentences
-        ]
-
-    # Backward-compatibility alias for the pre-WS3 private name. Thin
-    # delegation — NOT a second implementation.
-    def _judge_claims(self, claims: list[dict], sources: list[dict],
-                      client=None) -> list[dict]:
-        return self.judge_claims(claims, sources, client)
+        Returns {status: supported|contradicted|insufficient, rationale, note,
+        sources, quotes, method}. Report-only: nothing is rewritten.
+        """
+        client = llm_client or self._llm
+        row, _stats = sem.verify_single_claim(claim, sources, client)
+        return {
+            "status": _INVESTIGATION_STATUS.get(row["status"], "insufficient"),
+            "rationale": row.get("rationale") or row.get("note") or "",
+            "note": row.get("note", ""),
+            "sources": list(row.get("sources") or []),
+            "quotes": list(row.get("quotes") or []),
+            "method": row.get("method", ""),
+        }
 
     def rewrite_answer(self, answer: str, rejected_claims: list[str],
                        sources: list[dict], client=None) -> str:

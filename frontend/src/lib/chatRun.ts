@@ -529,7 +529,7 @@ function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
       run.acked = true;
       // Server-verified grounding overrides the client-side heuristic.
       L.grounding = toGroundingClaims(
-        grounding as Array<{ text: string; found: boolean; source?: string; note?: string; kind?: string }>
+        grounding as GroundingClaim[]
       );
       L.groundingFor = L.content;
       project(run);

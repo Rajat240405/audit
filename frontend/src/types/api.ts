@@ -152,31 +152,60 @@ export interface ChatMessage {
   rev?: number;
 }
 
+/** A validated quote from a supplied record that the verdict relies on. */
+export interface GroundingQuote {
+  source: string;
+  text: string;
+}
+
+/**
+ * Verdict for one row of the Cross-Verified Facts list, as returned by
+ * /api/verify. The browser never computes these; it only displays them.
+ *
+ *  - kind "fact": an atomic factual claim (from a factual sentence). `status`
+ *    is the verdict: "verified" (Supported), "insufficient" (Needs review),
+ *    "rejected" (Conflicting evidence). `found` is true only when verified.
+ *  - kind "term": an entity, figure or acronym presence check. `status` is
+ *    null and `found` means the term appears in the cited records. It is not
+ *    a fact verdict.
+ */
 export interface GroundingClaim {
-  /** For kind "sentence" this is the complete factual sentence. */
+  /** The claim text (an atomic fact, or a term). */
   text: string;
   found: boolean;
+  /** Fact verdict; null for terms. */
+  status?: "verified" | "rejected" | "insufficient" | null;
+  kind?: "fact" | "term";
+  /** First supporting/conflicting record (kept for existing links). */
   source?: string;
-  /** Server verdict note (e.g. why a sentence was not verified). */
+  /** Every record the verdict relies on (validated against the sources). */
+  sources?: string[];
+  /** Validated quotes, each from one of `sources`. */
+  quotes?: GroundingQuote[];
+  /** The answer sentence the claim was taken from, when it differs from text. */
+  sentence?: string | null;
+  /** exact | llm_judge | not_checked | text */
+  method?: string;
+  /** One-line explanation of the verdict. */
   note?: string;
-  /**
-   * "sentence": a complete factual sentence checked by exact containment.
-   * "claim": an entity, figure or acronym claim. Absent on legacy payloads,
-   * which are treated as "claim".
-   */
-  kind?: "claim" | "sentence";
-  /** Stable identity (see lib/claimIdentity). Absent on legacy payloads. */
+  /** The judge's short rationale, when it gave one. */
+  rationale?: string;
+  /** Stable identity (see lib/claimIdentity). */
   claim_id?: string;
 }
 
-/** Result of a targeted single-fact investigation. REPORT-ONLY. */
+/**
+ * Result of a targeted single-claim investigation. REPORT-ONLY. The statuses
+ * use the same verdict rules as /api/verify.
+ */
 export interface InvestigationResult {
   claim_id: string;
   message_id: string;
   claim: string;
-  status: "supported" | "unsupported" | "error";
+  status: "supported" | "contradicted" | "insufficient" | "error";
   rationale?: string;
   sources?: string[];
+  quotes?: GroundingQuote[];
   error?: string;
 }
 

@@ -1739,12 +1739,6 @@ _ALIAS_GROUPS = _ts.ALIAS_GROUPS
 _verification_authority = _VerificationAuthority()
 
 
-def _llm_judge_claims(claims: list[dict], sources: list[dict]) -> list[dict]:
-    """Judge flagged claims via the central authority using the server's
-    ACTIVE llm_client (resolved at call time, not import time)."""
-    return _verification_authority.judge_claims(claims, sources, llm_client)
-
-
 def _llm_rewrite_answer(
     answer: str,
     rejected_claims: list[str],
@@ -2345,11 +2339,13 @@ def chat_run_cancel(run_id: str):
 
 @app.post("/api/investigate")
 def investigate_claim(payload: dict):
-    """Targeted investigation of ONE suspicious claim.
+    """Targeted investigation of ONE claim.
 
-    Deliberately NOT a second verification implementation: it delegates to the
-    same ``VerificationAuthority.judge_claims`` the automatic pass uses, with a
-    single-element claim list, so one judge remains the source of truth.
+    Uses the SAME verdict engine as /api/verify
+    (``VerificationAuthority.investigate_claim`` -> ``semantic.verify_single_claim``):
+    exact containment first, then the evidence-grounded judge with validated
+    passage IDs and quotes. Status values match the verify verdicts:
+    ``supported`` (verified), ``contradicted`` (rejected), ``insufficient``.
 
     REPORT-ONLY. The caller's `found` verdict is echoed back untouched — the
     user is investigating BECAUSE they doubt it, so silently flipping it would
@@ -2368,33 +2364,27 @@ def investigate_claim(payload: dict):
     if not claim_text:
         return {**base, "status": "error", "error": "empty claim"}
     if not sources:
-        return {**base, "status": "unsupported",
+        return {**base, "status": "insufficient",
                 "rationale": "No sources were available to check this claim against.",
-                "sources": []}
+                "sources": [], "quotes": []}
 
     prev_effort = getattr(llm_client, "reasoning_effort", None)
     llm_client.reasoning_effort = INTERNAL_REASONING_EFFORT
     try:
-        judged = _verification_authority.judge_claims(
-            [{"text": claim_text, "found": False}], sources, client=llm_client)
+        verdict = _verification_authority.investigate_claim(
+            claim_text, sources, llm_client=llm_client)
     except Exception as e:  # noqa: BLE001 — report, never 500 the panel
         print(f"[investigate] failed: {type(e).__name__}: {e}")
         return {**base, "status": "error", "error": f"{type(e).__name__}"}
     finally:
         llm_client.reasoning_effort = prev_effort
 
-    verdict = (judged or [{}])[0]
-    supported = bool(verdict.get("found"))
-    cited = verdict.get("source")
     return {
         **base,
-        "status": "supported" if supported else "unsupported",
-        "rationale": verdict.get("note") or (
-            "The judge found this claim in the cited source."
-            if supported else
-            "The judge could not find this claim in the provided sources."
-        ),
-        "sources": [cited] if cited else [],
+        "status": verdict["status"],
+        "rationale": verdict.get("rationale") or verdict.get("note") or "",
+        "sources": verdict.get("sources") or [],
+        "quotes": verdict.get("quotes") or [],
     }
 
 
@@ -2403,14 +2393,16 @@ def verify_answer(payload: dict):
     """Non-blocking post-generation verification.
 
     Runs AFTER the chat stream closes (so the stream never blocks on extra LLM
-    calls). Returns the grounding report + a judge-rewritten answer with any
-    unsupported claims removed. All LLM calls have timeouts so this can never
-    hang.
+    calls). Returns the grounding rows (verdicts Supported / Needs review /
+    Conflicting evidence, with sources and validated quotes) and the answer.
+    Insufficient-evidence sentences are never removed. Only Deep mode may
+    rewrite a CONTRADICTED sentence, and a failed rewrite keeps the original.
+    All LLM calls have timeouts so this can never hang.
     """
     answer = payload.get("answer") or ""
     sources = payload.get("sources") or []
-    # Mode-aware depth: Fast = light (regex only, no LLM judge/rewrite —
-    # instant). Deep = full (regex + LLM judge + rewrite).
+    # Mode-aware depth: Fast = light (exact containment only, no LLM judge or
+    # rewrite, instant). Deep = full (passage selection + LLM judge + rewrite).
     depth = payload.get("depth") or ACTIVE_CONFIG.get("verify_depth", "full")
     # WS3: the engine lives in the central Verification Authority (identical
     # behavior and identical response contract — Phase 1 frozen). The ACTIVE
