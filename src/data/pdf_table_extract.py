@@ -19,9 +19,13 @@ Design & Policy:
 
 Routing (DOTS_ENABLED=true):
 
-    page -> scanned? -> yes -> Tesseract OCR (unchanged; non-table scanned pages)
-                     -> no  -> PicoDet -> TABLE    -> DOTS            ("dots_table")
-                                       -> NO TABLE -> _render_merged  ("prose")
+    page -> PicoDet (exactly once) -> TABLE    -> DOTS only                  ("dots_table")
+                                   -> NO TABLE -> legacy page extraction, in its original
+                                                  order: scanned page -> Tesseract;
+                                                  find_tables(); embedded-image OCR;
+                                                  serial rows; merged prose
+                                   -> FAILED   -> TableDetectorUnavailable (hard failure,
+                                                  never the legacy path)
 
 Page order is preserved: routing happens inside the per-page loop and every branch returns
 a payload for that page, which the stitcher consumes in order.

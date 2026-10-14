@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import math
+import numbers
 import os
 import threading
 from typing import Any, Callable, NamedTuple, Sequence
@@ -118,15 +119,23 @@ class TableBox(NamedTuple):
 
 
 def _env_float(name: str, default: float) -> float:
-    """Tolerant float read. A typo must never break an ingestion run."""
+    """Tolerant float read. A typo must never break an ingestion run.
+
+    ``nan`` and ``inf`` are rejected too: a threshold of ``inf`` would drop every
+    detection, which is a silent "no table" on every page.
+    """
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         log.warning("%s=%r is not a number; using %s", name, raw, default)
         return default
+    if not math.isfinite(value):
+        log.warning("%s=%r is not a finite number; using %s", name, raw, default)
+        return default
+    return value
 
 
 def _env_int(name: str, default: int) -> int:
@@ -163,7 +172,12 @@ def device() -> str:
 
 
 def enabled() -> bool:
-    """Is the detector switched on? Defaults to true; the DOTS master switch gates routing."""
+    """Is the detector switched on? Defaults to true.
+
+    Policy: ``DOTS_ENABLED=false`` is the only legacy switch. When routing is on
+    (``DOTS_ENABLED=true``) a disabled detector is an infrastructure failure
+    (:class:`TableDetectorUnavailable`), never a silent fallback to legacy text.
+    """
     return _env_bool(_ENV_ENABLED, True)
 
 
@@ -249,8 +263,8 @@ def _load_backend() -> Callable[[bytes, float], Sequence[Any]]:
                     f"the {model_name} model into that directory (7.4 MB: "
                     "inference.pdiparams, inference.json, inference.yml, "
                     "config.json), or unset PICODET_MODEL_DIR to allow a "
-                    "download, or set PICODET_ENABLED=false to stay on the "
-                    "legacy extraction path."
+                    "download. To run without table routing, set "
+                    "DOTS_ENABLED=false."
                 )
 
         try:
@@ -259,7 +273,7 @@ def _load_backend() -> Callable[[bytes, float], Sequence[Any]]:
             raise TableDetectorUnavailable(
                 "PicoDet table detection requires PaddlePaddle, which is not "
                 "installed. Install paddlepaddle + paddleocr, or set "
-                "PICODET_ENABLED=false to stay on the legacy extraction path."
+                "DOTS_ENABLED=false to run without table routing."
             ) from exc
 
         # Pin to CPU before any predictor is constructed: the GPU belongs to DOTS.
@@ -361,7 +375,9 @@ def ensure_ready() -> None:
     """
     if not enabled():
         raise TableDetectorUnavailable(
-            f"{_ENV_ENABLED}=false but table routing requires the PicoDet detector"
+            f"{_ENV_ENABLED}=false, but table routing (DOTS_ENABLED=true) requires "
+            "the PicoDet detector. Enable PicoDet, or set DOTS_ENABLED=false to run "
+            "without table routing."
         )
     backend = _load_backend()
     thr = score_threshold()
@@ -388,55 +404,102 @@ def _probe_png() -> bytes:
 # ── detection ────────────────────────────────────────────────────────────────
 
 
+def _parse_cls_id(value: Any) -> int | None:
+    """An integer class id, or ``None``.
+
+    Only a real integer (or a float with an integral, finite value) is a class id.
+    ``"unknown"``, ``3.7``, ``True`` and ``nan`` are not, and must not be truncated
+    into one.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        as_float = float(value)
+        if math.isfinite(as_float) and as_float.is_integer():
+            return int(as_float)
+    return None
+
+
+def _parse_number(value: Any) -> float | None:
+    """A finite real number, or ``None`` (missing, unreadable, NaN or infinite)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return as_float if math.isfinite(as_float) else None
+
+
+def _parse_bbox(raw_box: Any) -> tuple[float, float, float, float] | None:
+    """Exactly four finite coordinates, or ``None``.
+
+    A longer or shorter sequence is malformed rather than truncated, and a string
+    is never read as a sequence of digits.
+    """
+    if raw_box is None or isinstance(raw_box, (str, bytes, bytearray, dict)):
+        return None
+    try:
+        values = list(raw_box)
+    except TypeError:
+        return None
+    if len(values) != 4:
+        return None
+    coords = [_parse_number(v) for v in values]
+    if any(c is None for c in coords):
+        return None
+    return (coords[0], coords[1], coords[2], coords[3])  # type: ignore[return-value]
+
+
 def _normalise_detection(item: Any) -> TableBox | None:
-    """Coerce one backend detection into a :class:`TableBox`.
+    """Coerce one backend detection into a :class:`TableBox`, or return ``None``.
 
     Accepts a ``TableBox``, a mapping (``label``/``cls_id``/``score``/
-    ``coordinate``|``bbox``), or a ``(label, score, bbox)`` sequence. Anything
-    unparseable returns ``None``. The caller treats ``None`` as a MALFORMED
-    detector result and raises (see :func:`_filter_tables`). It is never read
-    as "no table": a detector whose output cannot be understood has not told us
-    that the page is table-free.
+    ``coordinate``|``bbox``), or a ``(label, score, bbox)`` triple. ``None`` means
+    the detection is MALFORMED: a field is missing, unreadable, non-finite or
+    shaped wrongly. The caller raises :class:`TableDetectorUnavailable` for it (see
+    :func:`_filter_tables`). It is never read as "no table": a detector whose output
+    cannot be understood has not told us that the page is table-free.
     """
     if isinstance(item, TableBox):
         return item
 
     if isinstance(item, dict):
+        cls_raw = item.get("cls_id", item.get("class_id"))
+        cls_id: int | None = None
+        if cls_raw is not None:
+            cls_id = _parse_cls_id(cls_raw)
+            if cls_id is None:
+                return None  # a class id that is present but unreadable
         label = item.get("label")
         if label is None:
-            cls_id = item.get("cls_id", item.get("class_id"))
             if cls_id is None:
                 return None
             label = (
                 "table"
-                if int(cls_id) == PUBLAYNET_TABLE_CLASS_ID
-                else f"class_{int(cls_id)}"
+                if cls_id == PUBLAYNET_TABLE_CLASS_ID
+                else f"class_{cls_id}"
             )
         raw_box = item.get("coordinate", item.get("bbox", item.get("box")))
-        score = item.get("score", item.get("confidence", 0.0))
-    elif isinstance(item, (list, tuple)) and len(item) >= 3:
-        label, score, raw_box = item[0], item[1], item[2]
+        score_raw = item.get("score", item.get("confidence"))
+    elif isinstance(item, (list, tuple)) and len(item) == 3:
+        label, score_raw, raw_box = item[0], item[1], item[2]
+        if label is None:
+            return None
     else:
         return None
 
-    try:
-        coords = tuple(float(v) for v in list(raw_box)[:4])
-    except (TypeError, ValueError):
-        return None
-    if len(coords) != 4:
+    bbox = _parse_bbox(raw_box)
+    score = _parse_number(score_raw)
+    if bbox is None or score is None:
         return None
 
-    try:
-        score_f = float(score)
-    except (TypeError, ValueError):
-        return None  # a score we cannot read is a malformed detection
-    if not math.isfinite(score_f):
-        return None
-
-    x0, y0, x1, y1 = coords
+    x0, y0, x1, y1 = bbox
     return TableBox(
         label=str(label),
-        score=score_f,
+        score=score,
         bbox=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
     )
 
@@ -449,9 +512,10 @@ def is_table_label(label: str) -> bool:
 def _filter_tables(raw: Sequence[Any], threshold: float) -> list[TableBox]:
     """Keep table-labelled detections at or above ``threshold``, in reading order.
 
-    A result that is not a sequence of well-formed detections raises
-    :class:`TableDetectorUnavailable`. Only a successfully parsed detection
-    with a non-table label is dropped. An unreadable one is not "no table".
+    Every fault in the result raises :class:`TableDetectorUnavailable`: a result
+    that is not a readable sequence, and any detection that is malformed. Only a
+    well-formed detection with a non-table label is dropped. An unreadable one is
+    not "no table", and no parse error may escape as a raw exception.
     """
     if raw is None or isinstance(raw, (str, bytes, bytearray, dict)):
         raise TableDetectorUnavailable(
@@ -460,14 +524,19 @@ def _filter_tables(raw: Sequence[Any], threshold: float) -> list[TableBox]:
         )
     try:
         items = list(raw)
-    except TypeError as exc:
+    except Exception as exc:  # noqa: BLE001 - any failure reading the result
         raise TableDetectorUnavailable(
-            f"PicoDet returned a non-iterable result ({type(raw).__name__})"
+            f"PicoDet returned an unreadable result ({type(raw).__name__}: {exc})"
         ) from exc
 
     boxes: list[TableBox] = []
     for item in items:
-        box = _normalise_detection(item)
+        try:
+            box = _normalise_detection(item)
+        except Exception as exc:  # noqa: BLE001 - a parse fault is a malformed detection
+            raise TableDetectorUnavailable(
+                f"PicoDet returned a malformed detection ({type(exc).__name__}): {str(item)[:200]}"
+            ) from exc
         if box is None:
             raise TableDetectorUnavailable(
                 f"PicoDet returned a malformed detection: {str(item)[:200]}"
@@ -486,13 +555,25 @@ def detect_tables(image_bytes: bytes, *, threshold: float | None = None) -> list
     """Detect table regions in one rendered page image.
 
     Returns table regions only, ordered top-to-bottom. Raises
-    :class:`TableDetectorUnavailable` if the backend cannot run — detection
-    failure is never silently treated as "no table", because that would
-    downgrade every page to the legacy path without anyone noticing.
+    :class:`TableDetectorUnavailable` if the detector is switched off, the backend
+    cannot run, or its output is malformed. Detection failure is never silently
+    treated as "no table", because that would downgrade every page to the legacy
+    path without anyone noticing.
     """
+    if not enabled():
+        raise TableDetectorUnavailable(
+            f"{_ENV_ENABLED}=false, but table routing (DOTS_ENABLED=true) requires "
+            "the PicoDet detector. Enable PicoDet, or set DOTS_ENABLED=false to run "
+            "without table routing."
+        )
     if not image_bytes:
         return []
-    backend = _load_backend()
+    try:
+        backend = _load_backend()
+    except TableDetectorUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any load fault is a typed failure
+        raise TableDetectorUnavailable(f"PicoDet backend could not be loaded: {exc}") from exc
     thr = score_threshold() if threshold is None else float(threshold)
     try:
         raw = backend(image_bytes, thr)
