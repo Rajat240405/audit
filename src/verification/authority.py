@@ -167,6 +167,11 @@ class VerificationAuthority:
             # Factual sentences are appended AFTER the judge step: they are
             # verified by exact containment only and are never judged,
             # rejected or removed.
+            # ``kind`` tells the UI which rows are complete factual sentences
+            # and which are entity/figure claims. Additive: existing fields
+            # are unchanged.
+            for g in grounding:
+                g.setdefault("kind", "claim")
             grounding = grounding + ts.sentence_grounding_report(answer, sources)
             rejected_claims = [
                 c["text"] for c in grounding

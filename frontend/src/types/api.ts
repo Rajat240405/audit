@@ -153,9 +153,18 @@ export interface ChatMessage {
 }
 
 export interface GroundingClaim {
+  /** For kind "sentence" this is the complete factual sentence. */
   text: string;
   found: boolean;
   source?: string;
+  /** Server verdict note (e.g. why a sentence was not verified). */
+  note?: string;
+  /**
+   * "sentence": a complete factual sentence checked by exact containment.
+   * "claim": an entity, figure or acronym claim. Absent on legacy payloads,
+   * which are treated as "claim".
+   */
+  kind?: "claim" | "sentence";
   /** Stable identity (see lib/claimIdentity). Absent on legacy payloads. */
   claim_id?: string;
 }

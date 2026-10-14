@@ -53,7 +53,7 @@ import { showsHybridStages } from "@/lib/retrievalMode";
 import { expandOrgFilter } from "@/lib/sourceFilter";
 import { clearAnswerScopedPanels } from "@/lib/answerScope";
 import { NOTICE, withNotice } from "@/lib/answerStatus";
-import { buildGroundingReport } from "@/services/grounding";
+import { toGroundingClaims } from "@/lib/serverGrounding";
 import { graphStages, hybridStages } from "@/utils/formatters";
 import type {
   ChatMessage,
@@ -87,6 +87,8 @@ export interface LiveAnswer {
   sources: SourceItem[];
   trace: RetrievalTrace | null;
   grounding: GroundingClaim[] | null;
+  /** The answer text `grounding` was verified against (server rows only). */
+  groundingFor: string | null;
   meta: GenerationMeta | null;
   knowledge: RunKnowledge | null;
   reasoning: string;
@@ -175,6 +177,7 @@ function newLive(retrievalMode: RetrievalMode, now: number): LiveAnswer {
     sources: [],
     trace: null,
     grounding: null,
+    groundingFor: null,
     meta: null,
     knowledge: null,
     reasoning: "",
@@ -243,8 +246,9 @@ function writeStores(run: ChatRun): void {
     content: L.committed ? L.content : "",
     sources: L.sources,
     trace: L.trace,
-    grounding:
-      L.grounding ?? (L.committed ? buildGroundingReport(L.content, L.sources) : []),
+    // Server rows only. Empty until /api/verify has answered for this run.
+    grounding: L.grounding ?? [],
+    groundingFor: L.groundingFor,
     lastMeta: L.meta as unknown as Record<string, unknown> | null,
     knowledge: L.knowledge,
   });
@@ -409,11 +413,12 @@ function startVerification(run: ChatRun, content: string, sources: SourceItem[])
           "info",
           "Verification produced revisions, but you edited the draft — review the grounding report instead."
         );
-        if (res.grounding && res.grounding.length) {
-          useDraftStore.setState({
-            grounding: res.grounding.map((g) => ({ text: g.text, found: g.found, source: g.source })),
-          });
-        }
+        // Rows describe the text that was verified (`content`), which the
+        // user has since changed, so the panel shows them as stale.
+        const rows = toGroundingClaims(res.grounding || []);
+        run.live.grounding = rows;
+        run.live.groundingFor = content;
+        useDraftStore.getState().setGrounding(rows, content);
         return;
       }
       if (res.text && res.text !== draft.content) {
@@ -423,11 +428,13 @@ function startVerification(run: ChatRun, content: string, sources: SourceItem[])
           "Answer verified & cleaned (unsupported claims removed)"
         );
       }
-      if (res.grounding && res.grounding.length) {
-        useDraftStore.setState({
-          grounding: res.grounding.map((g) => ({ text: g.text, found: g.found, source: g.source })),
-        });
-      }
+      // Rows describe the text that was VERIFIED (`content`). If the judge
+      // rewrote the canvas above, `content` no longer matches it, so the panel
+      // shows the rows as stale and the user can re-run Cross-Verify.
+      const rows = toGroundingClaims(res.grounding || []);
+      run.live.grounding = rows;
+      run.live.groundingFor = content;
+      useDraftStore.getState().setGrounding(rows, content);
       useSessionStore.getState().updateMessage(sid, mid, {
         content: useDraftStore.getState().content,
       });
@@ -521,9 +528,10 @@ function buildHandlers(run: ChatRun, attempt: number): StreamHandlers {
       if (!current()) return;
       run.acked = true;
       // Server-verified grounding overrides the client-side heuristic.
-      L.grounding = (grounding as Array<{ text: string; found: boolean; source?: string }>).map(
-        (g) => ({ text: g.text, found: g.found, source: g.source })
+      L.grounding = toGroundingClaims(
+        grounding as Array<{ text: string; found: boolean; source?: string; note?: string; kind?: string }>
       );
+      L.groundingFor = L.content;
       project(run);
     },
     onKnowledge: ({ matches, tier }) => {

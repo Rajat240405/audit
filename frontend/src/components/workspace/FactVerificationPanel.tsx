@@ -8,28 +8,42 @@ import type { GroundingClaim } from "@/types";
 /**
  * Persistent Cross-Verified Facts panel.
  *
- * Renders the CURRENT authoritative grounding state from `useDraftStore` —
- * written either by the server's `grounding` SSE event or by the Cross-Verify
- * button. No second verification calculation lives here.
+ * Renders the backend's grounding rows from `useDraftStore`. Those rows come
+ * from `/api/verify` (via Cross-Verify or the automatic post-answer check).
+ * This panel never extracts or judges claims itself.
+ *
+ * Two kinds of rows are shown, in separate sections:
+ *  - "Factual sentences": complete sentences, verified by exact containment.
+ *  - "Entities & figures": entity, figure and acronym claims (as before).
+ *
+ * If the draft changed after the last check, the rows are shown with a "stale"
+ * notice. If the draft has never been checked, the panel says so.
  *
  * Layout: the header (title, counts, close) is STICKY and the claim list is the
  * only scrolling region, so a long report never pushes the controls off-screen
  * and never scrolls the whole workspace.
  *
- * Each unsupported claim offers a targeted "Investigate" action. That call is
+ * Each unsupported row offers a targeted "Investigate" action. That call is
  * identity-scoped (claim_id + message_id) so a result arriving after the user
  * has fired another query is discarded rather than attached to the new answer.
  */
 export function FactVerificationPanel({ onClose }: { onClose: () => void }) {
   const grounding = useDraftStore((s) => s.grounding);
+  const groundingFor = useDraftStore((s) => s.groundingFor);
+  const content = useDraftStore((s) => s.content);
   const selectEvidence = useDraftStore((s) => s.selectEvidence);
   const sources = useDraftStore((s) => s.sources);
   const investigations = useDraftStore((s) => s.investigations);
   const investigating = useDraftStore((s) => s.investigating);
 
+  const groundingState: "none" | "current" | "stale" =
+    groundingFor == null ? "none" : groundingFor === content ? "current" : "stale";
+
   const claims = withClaimIds(grounding);
   const verified = claims.filter((g) => g.found);
   const unverified = claims.filter((g) => !g.found);
+  const sentenceRows = claims.filter((g) => g.kind === "sentence");
+  const entityRows = claims.filter((g) => g.kind !== "sentence");
 
   const openSource = (claim: GroundingClaim) => {
     if (!claim.source) return;
@@ -76,6 +90,98 @@ export function FactVerificationPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const renderRow = (claim: (typeof claims)[number]) => {
+    const cid = claim.claim_id;
+    const report = investigations[cid];
+    const busy = Boolean(investigating[cid]);
+    return (
+      <li
+        key={cid}
+        data-testid="fact-claim"
+        data-claim-id={cid}
+        data-found={claim.found ? "true" : "false"}
+        data-kind={claim.kind ?? "claim"}
+        className="flex items-start gap-2 px-3 py-2"
+      >
+        {claim.found ? (
+          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+        ) : (
+          <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-xs leading-relaxed text-foreground/90">{claim.text}</p>
+          {!claim.found && claim.kind === "sentence" && claim.note && (
+            <p className="mt-0.5 text-[10px] text-muted">{claim.note}</p>
+          )}
+          <div className="mt-0.5 flex flex-wrap items-center gap-2">
+            {claim.source && (
+              <button
+                onClick={() => openSource(claim)}
+                className="text-[10px] text-accent underline underline-offset-2"
+              >
+                {claim.source}
+              </button>
+            )}
+            {!claim.found && (
+              <button
+                data-testid={`investigate-${cid}`}
+                onClick={() => void investigate(claim.text, cid)}
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-foreground/80 hover:bg-surface disabled:opacity-50"
+              >
+                {busy ? (
+                  <>
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    Investigating…
+                  </>
+                ) : (
+                  <>
+                    <Search className="h-2.5 w-2.5" />
+                    Investigate
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+
+          {report && (
+            <div
+              data-testid={`investigation-${cid}`}
+              data-status={report.status}
+              className="mt-1.5 rounded border border-border bg-surface-2 p-2"
+            >
+              <div className="flex items-center gap-1.5">
+                <Badge
+                  variant={
+                    report.status === "supported"
+                      ? "success"
+                      : report.status === "error"
+                      ? "warning"
+                      : "danger"
+                  }
+                  className="text-[9px]"
+                >
+                  {report.status}
+                </Badge>
+                <span className="text-[9px] uppercase tracking-wide text-muted">
+                  investigation report
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-foreground/80">
+                {report.rationale || report.error}
+              </p>
+              {report.sources && report.sources.length > 0 && (
+                <p className="mt-1 text-[10px] text-muted">
+                  Evidence: {report.sources.join(", ")}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </li>
+    );
+  };
+
   return (
     <div
       data-testid="fact-verification-panel"
@@ -102,7 +208,24 @@ export function FactVerificationPanel({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      {claims.length === 0 ? (
+      {groundingState === "stale" && (
+        <p
+          data-testid="fact-verification-stale"
+          className="shrink-0 border-b border-border bg-surface-2 px-3 py-1.5 text-[10px] text-muted"
+        >
+          The draft changed after this check. Re-run Cross-Verify Facts to refresh.
+        </p>
+      )}
+
+      {groundingState === "none" ? (
+        <p
+          data-testid="fact-verification-unchecked"
+          className="px-3 py-4 text-xs text-muted"
+        >
+          This draft has not been checked against its sources yet. Press
+          Cross-Verify Facts to check it.
+        </p>
+      ) : claims.length === 0 ? (
         <p
           data-testid="fact-verification-empty"
           className="px-3 py-4 text-xs text-muted"
@@ -117,97 +240,24 @@ export function FactVerificationPanel({ onClose }: { onClose: () => void }) {
           data-testid="fact-list-scroll"
           className="min-h-0 flex-1 overflow-y-auto"
         >
-          <ul className="divide-y divide-border">
-            {claims.map((claim) => {
-              const cid = claim.claim_id;
-              const report = investigations[cid];
-              const busy = Boolean(investigating[cid]);
-              return (
-                <li
-                  key={cid}
-                  data-testid="fact-claim"
-                  data-claim-id={cid}
-                  data-found={claim.found ? "true" : "false"}
-                  className="flex items-start gap-2 px-3 py-2"
-                >
-                  {claim.found ? (
-                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
-                  ) : (
-                    <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs leading-relaxed text-foreground/90">
-                      {claim.text}
-                    </p>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                      {claim.source && (
-                        <button
-                          onClick={() => openSource(claim)}
-                          className="text-[10px] text-accent underline underline-offset-2"
-                        >
-                          {claim.source}
-                        </button>
-                      )}
-                      {!claim.found && (
-                        <button
-                          data-testid={`investigate-${cid}`}
-                          onClick={() => void investigate(claim.text, cid)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-foreground/80 hover:bg-surface disabled:opacity-50"
-                        >
-                          {busy ? (
-                            <>
-                              <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                              Investigating…
-                            </>
-                          ) : (
-                            <>
-                              <Search className="h-2.5 w-2.5" />
-                              Investigate
-                            </>
-                          )}
-                        </button>
-                      )}
-                    </div>
-
-                    {report && (
-                      <div
-                        data-testid={`investigation-${cid}`}
-                        data-status={report.status}
-                        className="mt-1.5 rounded border border-border bg-surface-2 p-2"
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <Badge
-                            variant={
-                              report.status === "supported"
-                                ? "success"
-                                : report.status === "error"
-                                ? "warning"
-                                : "danger"
-                            }
-                            className="text-[9px]"
-                          >
-                            {report.status}
-                          </Badge>
-                          <span className="text-[9px] uppercase tracking-wide text-muted">
-                            investigation report
-                          </span>
-                        </div>
-                        <p className="mt-1 text-[11px] leading-relaxed text-foreground/80">
-                          {report.rationale || report.error}
-                        </p>
-                        {report.sources && report.sources.length > 0 && (
-                          <p className="mt-1 text-[10px] text-muted">
-                            Evidence: {report.sources.join(", ")}
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          {sentenceRows.length > 0 && (
+            <section data-testid="fact-section-sentences">
+              <p className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                Factual sentences
+              </p>
+              <ul className="divide-y divide-border">
+                {sentenceRows.map(renderRow)}
+              </ul>
+            </section>
+          )}
+          {entityRows.length > 0 && (
+            <section data-testid="fact-section-entities">
+              <p className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                Entities &amp; figures
+              </p>
+              <ul className="divide-y divide-border">{entityRows.map(renderRow)}</ul>
+            </section>
+          )}
         </div>
       )}
     </div>

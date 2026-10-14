@@ -6,7 +6,6 @@ import type {
   RetrievalTrace,
   SourceItem,
 } from "@/types";
-import { buildGroundingReport } from "@/services/grounding";
 
 /**
  * Deep-mode verification progress.
@@ -71,7 +70,11 @@ interface DraftState {
   /** Sources + trace attached to the current answer. */
   sources: SourceItem[];
   trace: RetrievalTrace | null;
+  /** Server-verified grounding rows (from /api/verify). Never computed here. */
   grounding: GroundingClaim[];
+  /** The exact answer text the `grounding` rows were verified against. `null`
+   *  = not verified yet. The panel shows "stale" when the draft differs. */
+  groundingFor: string | null;
   /** Metadata from the last committed generation (for the metrics panel). */
   lastMeta: Record<string, unknown> | null;
   /** Evidence selection (audit transparency: which sentence is highlighted). */
@@ -97,6 +100,8 @@ interface DraftState {
   /** Deep-mode post-generation verification progress. Answer-scoped. */
   deepVerify: DeepVerifyState;
 
+  /** Store rows returned by the backend for `answer`. */
+  setGrounding: (claims: GroundingClaim[], answer: string) => void;
   startStream: () => void;
   appendToken: (text: string) => void;
   commitStream: (meta?: { sources?: SourceItem[]; trace?: RetrievalTrace | null }) => void;
@@ -147,6 +152,7 @@ export const useDraftStore = create<DraftState>((set) => ({
   sources: [],
   trace: null,
   grounding: [],
+  groundingFor: null,
   lastMeta: null,
   selectedEvidence: null,
   activeSessionId: null,
@@ -185,7 +191,9 @@ export const useDraftStore = create<DraftState>((set) => ({
         isStreaming: false,
         sources,
         trace,
-        grounding: buildGroundingReport(content, sources),
+        // Rows arrive from the post-stream /api/verify call, never from here.
+        grounding: [],
+        groundingFor: null,
         selectedEvidence: null,
       };
     }),
@@ -202,20 +210,17 @@ export const useDraftStore = create<DraftState>((set) => ({
       content,
       sources: sources ?? s.sources,
       trace: trace ?? s.trace,
-      grounding: buildGroundingReport(content, sources ?? s.sources),
+      grounding: [],
+      groundingFor: null,
     })),
 
-  setContent: (content) =>
-    set((s) => ({
-      content,
-      grounding: buildGroundingReport(content, s.sources),
-    })),
+  // Rows stay as they are. The panel compares `groundingFor` with `content`,
+  // so an edit marks them stale instead of recomputing them in the browser.
+  setContent: (content) => set({ content }),
 
-  applyEdit: (newContent) =>
-    set((s) => ({
-      content: newContent,
-      grounding: buildGroundingReport(newContent, s.sources),
-    })),
+  setGrounding: (claims, answer) => set({ grounding: claims, groundingFor: answer }),
+
+  applyEdit: (newContent) => set({ content: newContent }),
 
   setSources: (sources) => set({ sources }),
   setTrace: (trace) => set({ trace }),
@@ -241,8 +246,9 @@ export const useDraftStore = create<DraftState>((set) => ({
     set(() => ({
       content: answer,
       sources,
-      // Re-ground the picked text so the Facts panel reflects what is shown.
-      grounding: buildGroundingReport(answer, sources),
+      // The picked text is not verified yet. Cross-Verify checks it.
+      grounding: [],
+      groundingFor: null,
       selectedEvidence: null,
       // Choosing an answer CLOSES the comparison: the panel disappears and
       // the state is cleared so the next query starts clean. (The panel used
@@ -308,6 +314,7 @@ export const useDraftStore = create<DraftState>((set) => ({
       sources: [],
       trace: null,
       grounding: [],
+      groundingFor: null,
       lastMeta: null,
       selectedEvidence: null,
       factsOpen: false,

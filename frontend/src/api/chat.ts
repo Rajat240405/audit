@@ -108,7 +108,8 @@ export async function verifyAnswer(
   depth?: "light" | "full"
 ): Promise<{
   text: string;
-  grounding: Array<{ text: string; found: boolean; source?: string; note?: string }>;
+  /** Sentence rows (kind "sentence") and entity/figure rows (kind "claim"). */
+  grounding: Array<{ text: string; found: boolean; source?: string; note?: string; kind?: "claim" | "sentence" }>;
   judge_rewritten: boolean;
   judge_removed_count: number;
   error?: string;

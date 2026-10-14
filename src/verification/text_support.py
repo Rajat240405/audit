@@ -345,10 +345,10 @@ def sentence_grounding_report(answer: str, sources: list[dict]) -> list[dict]:
         hit = next((st for st in src_texts if sentence_contained(sentence, st["text"])), None)
         if hit is not None:
             report.append({"text": sentence, "found": True,
-                           "source": hit["doc_id"], "note": ""})
+                           "source": hit["doc_id"], "note": "", "kind": "sentence"})
         else:
             report.append({"text": sentence, "found": False, "source": None,
-                           "note": SENTENCE_NOT_VERBATIM_NOTE})
+                           "note": SENTENCE_NOT_VERBATIM_NOTE, "kind": "sentence"})
     return report
 
 

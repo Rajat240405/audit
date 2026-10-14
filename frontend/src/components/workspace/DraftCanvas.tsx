@@ -13,7 +13,8 @@ import { useToastStore } from "@/store/useToastStore";
 import { useEditDraft } from "@/hooks/useEditDraft";
 import { useEditStore } from "@/store/useEditStore";
 import { Toolbar } from "./Toolbar";
-import { buildGroundingReport } from "@/services/grounding";
+import { refreshGrounding } from "@/lib/serverGrounding";
+import { useAppStore } from "@/store/useAppStore";
 import { cn } from "@/utils/cn";
 
 /**
@@ -23,14 +24,16 @@ import { cn } from "@/utils/cn";
  * The canvas shows ONLY the final draft/answer. Retrieved sources / citations
  * are deliberately NOT rendered here — they stay available internally for RAG
  * and verification (see the Sources tab and the grounding score below), so this
- * is purely a presentation choice. The "Cross-Verify Facts" action recomputes
- * the grounding report (updating the score) without showing the source list.
+ * is purely a presentation choice. The "Cross-Verify Facts" action asks the
+ * backend (/api/verify) to re-check the draft and updates the score and the
+ * facts panel without showing the source list.
  */
 export function DraftCanvas() {
   const content = useDraftStore((s) => s.content);
   const streamingText = useDraftStore((s) => s.streamingText);
   const isStreaming = useDraftStore((s) => s.isStreaming);
   const grounding = useDraftStore((s) => s.grounding);
+  const groundingFor = useDraftStore((s) => s.groundingFor);
   // Lifted into the store so a NEW QUERY can close it (answer-scoped state).
   const factsOpen = useDraftStore((s) => s.factsOpen);
   const setFactsOpen = useDraftStore((s) => s.setFactsOpen);
@@ -43,24 +46,41 @@ export function DraftCanvas() {
   // the follow. (Previously this force-scrolled on every token.)
   const { ref: streamRef } = useStickyAnchorScroll<HTMLDivElement>([streamingText]);
 
+  // The score is only meaningful for rows verified against the CURRENT draft.
+  const groundingStale = groundingFor != null && groundingFor !== content;
   const verified = grounding.filter((g) => g.found).length;
-  const score = grounding.length ? Math.round((verified / grounding.length) * 100) : null;
+  const score =
+    !groundingStale && grounding.length
+      ? Math.round((verified / grounding.length) * 100)
+      : null;
+  const [verifying, setVerifying] = useState(false);
 
-  // Re-run the client-side grounding verification on the current draft against
-  // its retrieved sources. Updates the Grounding score only — it does NOT
-  // reveal the sources/citations list inside the canvas (Sources tab remains
-  // the home for that).
-  const crossVerify = () => {
-    const { content: c, sources } = useDraftStore.getState();
-    if (!c) return;
-    const report = buildGroundingReport(c, sources);
-    useDraftStore.setState({ grounding: report });
+  // Cross-Verify asks the BACKEND (/api/verify) to check the current draft
+  // against its sources, using the same depth as the automatic check. The
+  // browser does not extract or judge claims itself. The rewritten text in the
+  // response is ignored, so this button never changes the canvas.
+  const crossVerify = async () => {
+    const { content: answer, sources, activeMessageId } = useDraftStore.getState();
+    if (!answer || verifying) return;
+    const depth = useAppStore.getState().mode === "deep" ? "full" : "light";
+    setVerifying(true);
+    const res = await refreshGrounding(answer, sources, depth);
+    setVerifying(false);
 
+    // Discard the result if the canvas moved on while the request ran.
+    const now = useDraftStore.getState();
+    if (now.content !== answer || now.activeMessageId !== activeMessageId) return;
+
+    if (!res.ok) {
+      pushToast("error", `Cross-verification failed: ${res.error}`);
+      return;
+    }
+    now.setGrounding(res.claims, answer);
     // The claim list is shown in the persistent panel below; the toast is
     // supplementary feedback and intentionally carries only the summary.
     setFactsOpen(true);
 
-    const unverified = report.filter((r) => !r.found);
+    const unverified = res.claims.filter((r) => !r.found);
     if (unverified.length === 0) {
       pushToast("success", "Cross-verification complete — all claims grounded in sources.");
     } else {
@@ -121,6 +141,11 @@ export function DraftCanvas() {
             )}
             <span className="text-[10px] text-muted">
             BGE-M3 • 2-STAGE RAG
+            {groundingStale && (
+              <span className="ml-2 font-semibold text-muted">
+                • Grounding stale — re-run Cross-Verify
+              </span>
+            )}
             {score != null && (
               <span
                 className={cn(
@@ -254,11 +279,11 @@ export function DraftCanvas() {
             Formalize
           </button>
           <button
-            onClick={crossVerify}
-            disabled={!content}
+            onClick={() => void crossVerify()}
+            disabled={!content || verifying}
             className="rounded-md border border-border bg-surface px-4 py-2 text-xs font-bold uppercase text-foreground shadow-sm hover:bg-surface-2 disabled:opacity-50"
           >
-            Cross-Verify Facts
+            {verifying ? "Verifying…" : "Cross-Verify Facts"}
           </button>
         </div>
       </div>
