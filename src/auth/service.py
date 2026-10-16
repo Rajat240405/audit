@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from src.auth import otp as otp_mod
 from src.auth import sessions as sessions_mod
 from src.auth.config import AuthConfig
-from src.auth.emails import validate_signup_email
+from src.auth.emails import normalize_email, validate_signup_email
 from src.auth.errors import (
     AuthError,
     DuplicateAccount,
@@ -598,7 +598,16 @@ def login(
 
     Returns the raw session token once; the caller writes it to the cookie.
     """
-    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
+    # Normalise only — do NOT enforce the signup allowlist here.
+    # The allowlist gates account *creation* (start/resend/verify/complete
+    # signup); it is not an authentication check. Applying it at login locked
+    # out every existing user whose address is not currently allowlisted
+    # (e.g. after the domain policy or DEV_ADMIN_EMAIL changes), returning 403
+    # email_not_allowed instead of verifying their password.
+    # `normalize_email` still rejects empty/malformed input (400 email_invalid)
+    # and still canonicalises case/whitespace so the lookup, the rate-limit key
+    # and the stored address agree.
+    normalized = normalize_email(email)
     _rate_limit_login(normalized, client_key, config)
 
     user = _existing_user(session, normalized)

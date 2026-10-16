@@ -105,11 +105,38 @@ def test_an_unknown_address_is_rejected_identically(sqlite_session):
     assert known.value.http_status == unknown.value.http_status == 401
 
 
-def test_login_rejects_a_disallowed_address(sqlite_session):
+def test_login_does_not_apply_the_signup_allowlist(sqlite_session):
+    """Login must not answer with the *signup* allowlist error.
+
+    The allowlist is a policy about who may CREATE an account
+    (start/resend/verify/complete signup). It is not an authentication check:
+    applying it here meant any existing user whose address is not currently
+    allowlisted got 403 ``email_not_allowed`` instead of having their password
+    verified, which is both a lock-out and a needless disclosure of signup
+    policy.
+
+    An unknown address — allowlisted or not — gets the same generic
+    ``invalid_credentials`` (401) as a wrong password, so login cannot be used
+    to enumerate accounts or to probe the allowlist.
+    """
     config = make_config()
     with pytest.raises(AuthError) as exc:
         login(sqlite_session, email="someone@gmail.com", password="x", config=config)
-    assert exc.value.code == "email_not_allowed"
+    assert exc.value.code == "invalid_credentials"
+    assert exc.value.http_status == 401
+
+
+def test_login_is_indistinguishable_for_allowlisted_and_unallowlisted_unknowns(
+    sqlite_session,
+):
+    """Both an on-list and an off-list unknown address give the same error."""
+    config = make_config()
+    codes = set()
+    for address in ("ghost@incois.gov.in", "someone@gmail.com"):
+        with pytest.raises(AuthError) as exc:
+            login(sqlite_session, email=address, password="x", config=config)
+        codes.add(exc.value.code)
+    assert codes == {"invalid_credentials"}
 
 
 def test_login_is_refused_for_a_deactivated_account(sqlite_session):
