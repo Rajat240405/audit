@@ -72,6 +72,17 @@ dependencies = [
     # slim images); Dockerfile.base normalises to this headless build.
     "opencv-contrib-python-headless>=4.10.0",
 
+    # Database (Phase 1: PostgreSQL foundation) — sync SQLAlchemy 2.x +
+    # Alembic + psycopg 3. Mirror any change here into requirements.txt AND
+    # Dockerfile.base (no Dockerfile reads requirements.txt).
+    "sqlalchemy>=2.0,<2.1",
+    "alembic>=1.13,<1.15",
+    "psycopg[binary]>=3.1,<4",
+
+    # Auth (Phase 2: signup + email OTP) — Argon2id password hashing.
+    # Mirror any change here into requirements.txt AND Dockerfile.base.
+    "argon2-cffi>=23.1.0",
+
     # Testing
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",

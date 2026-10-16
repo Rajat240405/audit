@@ -61,7 +61,11 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
         "pypdf>=5.0.0" \
         "python-docx>=1.1.0" \
         "PyMuPDF>=1.24.0" \
-        "pytesseract>=0.3.10"
+        "pytesseract>=0.3.10" \
+        "sqlalchemy>=2.0,<2.1" \
+        "alembic>=1.13,<1.15" \
+        "psycopg[binary]>=3.1,<4" \
+        "argon2-cffi>=23.1.0"
 # NOTE: opencv is deliberately NOT installed here. It is installed by the
 # cv2-normalisation layer below, after paddleocr, because paddleocr pulls a
 # conflicting GUI build. Installing it here as well would only be overwritten.

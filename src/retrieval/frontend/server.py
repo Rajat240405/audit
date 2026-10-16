@@ -3342,6 +3342,26 @@ def export_document(payload: dict):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — signup / email OTP routes.
+#
+# ADDITIVE ONLY: mounts five routes under /api/auth and changes nothing else.
+# No middleware, no dependency on existing handlers, and no protection of any
+# pre-existing route — chat, knowledge, ingest and graph stay unauthenticated
+# until Phase 4.
+#
+# ORDERING MATTERS: this must be registered BEFORE the "/{path:path}" SPA
+# catch-all below, otherwise the catch-all shadows /api/auth and every signup
+# request 404s. (Starlette appends included routers in call order.)
+#
+# Importing src.auth performs no I/O — no DB connection (the engine is lazy)
+# and no SMTP connection (the mailer is built per request).
+# ─────────────────────────────────────────────────────────────────────────────
+from src.auth.router import router as auth_router  # noqa: E402
+
+app.include_router(auth_router)
+
+
 @app.get("/{path:path}", response_class=HTMLResponse)
 async def spa_history_fallback(path: str):
     """SPA history fallback: hard refresh on /workspace, /settings, etc.

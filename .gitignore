@@ -199,6 +199,14 @@ data/*.json
 # Generated Retrieval Indexes & Storage
 # ==========================
 storage/
+# Explicit for clarity: the HPC PostgreSQL data directory lives under
+# storage/postgres (bind-mounted, NEVER inside the application SIF).
+# Already covered by `storage/` above — listed so the intent is documented.
+storage/postgres/
+# Local Docker Compose database volume (see docker-compose.yml, profile "db").
+# A named volume, so normally there is nothing here on the host; this guards
+# against an accidental switch to a bind mount.
+postgres-data/
 faiss/
 indexes/
 chroma/

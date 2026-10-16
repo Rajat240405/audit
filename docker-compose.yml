@@ -10,7 +10,10 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      # The build file is named `dockerfile` (lowercase) in this repository.
+      # Spelling it with a capital D only resolves on case-insensitive
+      # filesystems (Windows/macOS) and breaks the build on Linux/CI.
+      dockerfile: dockerfile
     image: incois-audit-app:local
     container_name: incois-audit-app
     ports:
@@ -46,3 +49,50 @@ services:
     working_dir: /app
     # Single replica. Do not scale this service.
     restart: unless-stopped
+
+  # ── PostgreSQL 16 — Phase 1 foundation ────────────────────────────────────
+  # OPT-IN: behind the "db" profile, so `docker compose up -d` still starts
+  # only the application, exactly as before. Start it with:
+  #     docker compose --profile db up -d
+  #
+  # Local development only. This service is NOT used on HPC — there the
+  # database is a separate PostgreSQL SIF or an organisation-managed service
+  # (see docs/database-setup.md). It must never be baked into the app image.
+  #
+  # The application service is deliberately left untouched: nothing in the app
+  # reads DATABASE_* yet (that wiring is Phase 4/5).
+  db:
+    image: postgres:16-alpine
+    profiles: ["db"]
+    container_name: incois-audit-db
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-incois_audit}
+      POSTGRES_USER: ${DATABASE_USER:-incois}
+      # Required. Put the real value in .env (gitignored) — see .env.example.
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set in .env}
+      # Keep PGDATA on the named volume's native filesystem.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # Host 5433 by default so a natively installed PostgreSQL on 5432 is
+      # not disturbed. Inside the compose network the port stays 5432.
+      - "${DATABASE_HOST_PORT:-5433}:5432"
+    volumes:
+      # A NAMED volume, not a host bind mount: bind-mounting a PostgreSQL data
+      # directory into a Windows path is a known source of permission and
+      # locking failures. Data still survives `docker compose down`; only
+      # `docker compose down -v` removes it.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DATABASE_USER:-incois} -d ${DATABASE_NAME:-incois_audit}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

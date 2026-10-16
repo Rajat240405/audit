@@ -5,6 +5,7 @@ import { fetchModels, fetchProviders, setProvider } from "@/api/model";
 import { useAppStore } from "@/store/useAppStore";
 import type { RetrievalMode, ThinkingEffort } from "@/types";
 import { SourceFilter } from "./SourceFilter";
+import { SessionMenu } from "./SessionMenu";
 import { useThemeStore } from "@/store/useThemeStore";
 import { useActivityStore } from "@/store/useActivityStore";
 import { useTourStore } from "@/store/useTourStore";
@@ -320,6 +321,7 @@ export function Header() {
         <GuideButton />
         <MyKnowledgeButton />
         <SettingsButton />
+        <SessionMenu />
         <ThemeToggle />
       </div>
     </header>
