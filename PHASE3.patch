@@ -1,0 +1,4195 @@
+diff --git a/.env.example b/.env.example
+index 35bc026..e4ef54e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -254,6 +254,23 @@
+ #AUTH_SIGNUP_WINDOW_SECONDS=3600
+ #AUTH_SIGNUP_TOKEN_TTL_SECONDS=900        # between "code verified" and password
+ #
++# ── Phase 3: server-side sessions (defaults shown) ───────────────────────────
++# Sessions are stored in PostgreSQL. Only an HMAC of the cookie token is
++# persisted; the raw token exists in the cookie and nowhere else.
++#AUTH_SESSION_TTL_SECONDS=28800           # 8h hard ceiling, never extended
++#AUTH_SESSION_IDLE_TIMEOUT_SECONDS=7200   # 2h since last use (sliding)
++#AUTH_SESSION_COOKIE_NAME=auditpro_session
++# AUTH_SESSION_COOKIE_SECURE: unset = auto (on when APP_ENV=production, off
++# otherwise, so plain-http local dev still works). Set 1/0 to force.
++#AUTH_SESSION_COOKIE_SECURE=
++#AUTH_SESSION_COOKIE_SAMESITE=lax         # lax | strict | none
++#
++# ── Phase 3: sign-in / password-reset rate limits ────────────────────────────
++#AUTH_LOGIN_LIMIT=10                      # failed sign-ins per address+IP
++#AUTH_LOGIN_WINDOW_SECONDS=900
++#AUTH_PASSWORD_RESET_LIMIT=5              # reset codes per address per window
++#AUTH_PASSWORD_RESET_WINDOW_SECONDS=3600
++#
+ # ── Password policy (defaults shown) ─────────────────────────────────────────
+ #AUTH_PASSWORD_MIN_LENGTH=12
+ #AUTH_PASSWORD_MAX_LENGTH=256
+diff --git a/alembic/versions/0003_auth_sessions_password_reset.py b/alembic/versions/0003_auth_sessions_password_reset.py
+new file mode 100644
+index 0000000..5e2a046
+--- /dev/null
++++ b/alembic/versions/0003_auth_sessions_password_reset.py
+@@ -0,0 +1,84 @@
++"""auth sessions: sessions table (Phase 3)
++
++Phase 3 — sign in, sign out, and password reset by email OTP.
++
++Depends on 0002_signup_email_otp (Phase 2) so a fresh database always has
++app_meta and users/email_otp first.
++
++What this migration adds
++------------------------
++* ``sessions`` — server-side sign-in state.
++
++What it deliberately does NOT add
++---------------------------------
++* No new table for password-reset codes. Reset reuses ``email_otp`` with
++  ``purpose = 'password_reset'``, so the challenge lifecycle (expiry, single
++  use, attempt cap, keyed digest) is defined in exactly one place and the
++  ``purpose`` column already scopes the HMAC.
++* No role, permission or chat-history table (Phase 4 / Phase 5).
++* No change to ``users`` or ``email_otp`` — both already carry everything
++  Phase 3 needs.
++
++Nothing here is destructive: it creates one table and two indexes. No existing
++column is altered or dropped, so applying it to a database that already has
++real signup data preserves every row.
++
++Revision ID: 0003_auth_sessions_password_reset
++Revises: 0002_signup_email_otp
++Create Date: 2026-10-15
++
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++# revision identifiers, used by Alembic.
++revision: str = "0003_auth_sessions_password_reset"
++down_revision: str | None = "0002_signup_email_otp"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "sessions",
++        sa.Column("id", sa.String(length=36), nullable=False),
++        sa.Column("user_id", sa.String(length=36), nullable=False),
++        sa.Column("token_hash", sa.String(length=64), nullable=False),
++        sa.Column(
++            "created_at",
++            sa.DateTime(timezone=True),
++            server_default=sa.text("now()"),
++            nullable=False,
++        ),
++        # No onupdate: last_seen_at must move only when the session is used,
++        # not when it is revoked. The service sets it explicitly.
++        sa.Column(
++            "last_seen_at",
++            sa.DateTime(timezone=True),
++            server_default=sa.text("now()"),
++            nullable=False,
++        ),
++        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
++        sa.Column("user_agent", sa.Text(), nullable=True),
++        sa.PrimaryKeyConstraint("id", name=op.f("pk_sessions")),
++        sa.ForeignKeyConstraint(
++            ["user_id"],
++            ["users.id"],
++            name=op.f("fk_sessions_user_id"),
++            ondelete="CASCADE",
++        ),
++        sa.UniqueConstraint("token_hash", name=op.f("uq_sessions_token_hash")),
++    )
++    # token_hash is UNIQUE via the constraint above, which PostgreSQL
++    # implements as a unique index of the same name. Creating a second index
++    # here would fail with "relation already exists".
++    op.create_index(op.f("ix_sessions_user_id"), "sessions", ["user_id"])
++
++
++def downgrade() -> None:
++    op.drop_index(op.f("ix_sessions_user_id"), table_name="sessions")
++    op.drop_table("sessions")
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 17a2d4f..efa5573 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,62 +1,63 @@
+-import { lazy, Suspense } from "react";
+ import { BrowserRouter, Route, Routes } from "react-router-dom";
+-import { MainLayout } from "@/components/layout/MainLayout";
+-import { BuildGraphModal } from "@/components/graph/BuildGraphModal";
+-import { ProductTour } from "@/components/onboarding/ProductTour";
+-import { useBackendStatus } from "@/hooks/useBackendStatus";
++import { lazy, Suspense } from "react";
+ 
+-// Route-level code splitting (M7): each page loads on demand, so the initial
+-// bundle is much smaller. Suspense fallback is a lightweight loader.
+-const Workspace = lazy(() =>
+-  import("@/pages/Workspace").then((m) => ({ default: m.Workspace }))
+-);
+-const Dashboard = lazy(() =>
+-  import("@/pages/Dashboard").then((m) => ({ default: m.Dashboard }))
+-);
+-const Settings = lazy(() =>
+-  import("@/pages/Settings").then((m) => ({ default: m.Settings }))
+-);
+-// Phase 2: signup + email OTP. Additive — reachable only at /signup, and the
+-// app still opens on the Dashboard. No login/reset screen exists yet.
+-const Signup = lazy(() =>
+-  import("@/pages/Signup").then((m) => ({ default: m.Signup }))
+-);
+-const MyKnowledgeModal = lazy(() =>
+-  import("@/components/knowledge/MyKnowledgeModal").then((m) => ({
+-    default: m.MyKnowledgeModal,
+-  }))
++const Dashboard = lazy(() => import("@/pages/Dashboard").then((m) => ({ default: m.Dashboard })));
++const Workspace = lazy(() => import("@/pages/Workspace").then((m) => ({ default: m.Workspace })));
++const Signup = lazy(() => import("@/pages/Signup").then((m) => ({ default: m.Signup })));
++const SignIn = lazy(() => import("@/pages/SignIn").then((m) => ({ default: m.SignIn })));
++const ForgotPassword = lazy(() =>
++  import("@/pages/ForgotPassword").then((m) => ({ default: m.ForgotPassword }))
+ );
+ 
++import { AppShell } from "@/components/layout/AppShell";
++
+ function Loader() {
+   return (
+-    <div className="flex h-full w-full items-center justify-center text-xs text-muted">
++    <div className="flex h-screen w-full items-center justify-center text-xs text-muted">
+       Loading…
+     </div>
+   );
+ }
+ 
+-// Note: QueryClientProvider lives in main.tsx so useQuery hooks (e.g.
+-// useBackendStatus) are always inside a provider context.
++/**
++ * Phase 3 entry behaviour:
++ *
++ *   /                 -> sign in (the default entry point)
++ *   /signin           -> sign in
++ *   /signup           -> create account
++ *   /forgot-password  -> password reset by emailed code
++ *   /dashboard        -> the existing Dashboard
++ *   /workspace        -> the existing Workspace
++ *
++ * The three auth routes sit OUTSIDE `AppShell`, so they render with no
++ * dashboard chrome: no Header, no Sidebar, no toolbar, no Build-Graph button,
++ * no chat interface, no product tour. `AppShell` (MainLayout + global
++ * overlays) wraps only the in-app routes via `<Outlet />`.
++ *
++ * Phase 3 does not gate anything: in-app routes stay reachable without a
++ * session. Route protection is Phase 4.
++ */
+ export function App() {
+-  useBackendStatus();
+   return (
+     <BrowserRouter>
+-      <MainLayout>
+-        <Suspense fallback={<Loader />}>
+-          <Routes>
+-            <Route path="/" element={<Dashboard />} />
++      <Suspense fallback={<Loader />}>
++        <Routes>
++          {/* Standalone auth routes — deliberately no layout wrapper. */}
++          <Route path="/" element={<SignIn />} />
++          <Route path="/signin" element={<SignIn />} />
++          <Route path="/signup" element={<Signup />} />
++          <Route path="/forgot-password" element={<ForgotPassword />} />
++
++          {/* In-app routes — these get the dashboard chrome. */}
++          <Route element={<AppShell />}>
++            <Route path="/dashboard" element={<Dashboard />} />
+             <Route path="/workspace" element={<Workspace />} />
+-            <Route path="/signup" element={<Signup />} />
+             <Route path="*" element={<Dashboard />} />
+-          </Routes>
+-        </Suspense>
+-      </MainLayout>
+-      <Settings />
+-      <MyKnowledgeModal />
+-      <BuildGraphModal />
+-      {/* Product tour — mounted once, globally, like Settings/BuildGraphModal.
+-          Auto-starts on first run; reopenable from the header Guide button. */}
+-      <ProductTour />
++          </Route>
++        </Routes>
++      </Suspense>
+     </BrowserRouter>
+   );
+ }
++
++export default App;
+diff --git a/frontend/src/__tests__/signin.test.tsx b/frontend/src/__tests__/signin.test.tsx
+new file mode 100644
+index 0000000..bc955e5
+--- /dev/null
++++ b/frontend/src/__tests__/signin.test.tsx
+@@ -0,0 +1,512 @@
++/**
++ * Phase 3: dedicated sign-in, sign-up and password-reset screens.
++ *
++ * The most important thing these tests pin down is the layout split — an auth
++ * screen must render with no dashboard chrome around it. Every `AuthLayout`
++ * route is checked against a list of things that only exist inside the
++ * dashboard shell.
++ *
++ * Like the Phase 2 signup tests, `fetch` is the only thing mocked: the real
++ * @/api/auth module and the real pages run.
++ */
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { MemoryRouter } from "react-router-dom";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import App from "@/App";
++import { SignIn } from "@/pages/SignIn";
++import { ForgotPassword } from "@/pages/ForgotPassword";
++import { AuthApiError, signOut } from "@/api/auth";
++
++// ── helpers ────────────────────────────────────────────────────────────────
++
++interface MockResponse {
++  status?: number;
++  body?: unknown;
++  headers?: Record<string, string>;
++}
++
++type Handler = (url: string, payload: Record<string, unknown>) => MockResponse | null;
++
++function installFetch(handler: Handler) {
++  const calls: Array<{ url: string; payload: Record<string, unknown> }> = [];
++  global.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
++    const url = String(input);
++    const payload = init?.body
++      ? (JSON.parse(String(init.body)) as Record<string, unknown>)
++      : {};
++    calls.push({ url, payload });
++    const result = handler(url, payload) ?? {};
++    const status = result.status ?? 200;
++    return {
++      ok: status >= 200 && status < 300,
++      status,
++      statusText: "",
++      json: async () => result.body ?? {},
++      headers: { get: (key: string) => result.headers?.[key] ?? null },
++    } as unknown as Response;
++  }) as unknown as typeof fetch;
++  return calls;
++}
++
++const LOGGED_IN = {
++  authenticated: true,
++  user: { id: "u1", email: "boss@incois.gov.in", email_verified: true, is_active: true },
++};
++const LOGGED_OUT = { authenticated: false, user: null };
++
++/** Default handler: /me says signed out; everything else succeeds quietly. */
++function baseHandler(url: string): MockResponse | null {
++  if (url.includes("/api/auth/me")) return { body: LOGGED_OUT };
++  if (url.includes("/api/auth/login"))
++    return {
++      body: { status: "logged_in", user_id: "u1", email: "boss@incois.gov.in", expires_in_seconds: 28800 },
++    };
++  if (url.includes("/api/auth/logout")) return { body: { status: "signed_out", revoked: true } };
++  if (url.includes("/api/auth/password-policy"))
++    return {
++      body: {
++        min_length: 12,
++        max_length: 256,
++        require_lowercase: true,
++        require_uppercase: true,
++        require_digit: true,
++        require_symbol: false,
++        rejects_email_substring: true,
++        rejects_common_passwords: true,
++      },
++    };
++  if (url.includes("/api/auth/password/forgot"))
++    return {
++      body: {
++        status: "code_sent",
++        email: "boss@incois.gov.in",
++        expires_in_seconds: 600,
++        resend_available_in_seconds: 60,
++      },
++    };
++  if (url.includes("/api/auth/password/reset"))
++    return { body: { status: "password_reset", email: "boss@incois.gov.in", sessions_revoked: 2 } };
++  return { body: {} };
++}
++
++/** Render the whole app at a given path. */
++function renderAppAt(path: string) {
++  window.history.pushState({}, "", path);
++  // QueryClientProvider lives in main.tsx, not App.tsx, so tests must supply it.
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false } },
++  });
++  return render(
++    <QueryClientProvider client={client}>
++      <App />
++    </QueryClientProvider>,
++  );
++}
++
++function renderStandalone(node: React.ReactNode) {
++  return render(<MemoryRouter>{node}</MemoryRouter>);
++}
++
++/**
++ * Things that exist ONLY inside the dashboard shell. If any of these appears
++ * on an auth screen, the layout split has regressed.
++ */
++const DASHBOARD_CHROME = [
++  "Build Graph", // header: graph build button
++  "Model activity", // header: activity button title
++  "My Saved Knowledge", // header: saved-knowledge button title
++  "New session", // sidebar: new chat session
++];
++
++function expectNoDashboardChrome() {
++  for (const marker of DASHBOARD_CHROME) {
++    expect(screen.queryByText(marker, { exact: false })).toBeNull();
++  }
++  // No tour anchors, no header region, no sidebar.
++  expect(document.querySelector("[data-tour^='header-']")).toBeNull();
++  expect(document.querySelector("header")).toBeNull();
++  expect(document.querySelector("aside")).toBeNull();
++}
++
++beforeEach(() => {
++  // Sign-in and forgot-password both consider it acceptable for the policy
++  // call to fail, so log the rejection noise rather than failing on it.
++  vi.spyOn(console, "error").mockImplementation(() => {});
++});
++
++afterEach(() => {
++  vi.restoreAllMocks();
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Layout isolation — the critical UI requirement
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("auth pages render independently of the dashboard layout", () => {
++  it("/ renders sign in with no dashboard chrome", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/");
++
++    expect(await screen.findByRole("button", { name: /^sign in$/i })).toBeTruthy();
++    expect(screen.getByLabelText("Email", { selector: "input" })).toBeTruthy();
++    expect(screen.getByLabelText("Password", { selector: "input" })).toBeTruthy();
++    expectNoDashboardChrome();
++  });
++
++  it("/signin renders sign in with no dashboard chrome", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/signin");
++
++    expect(await screen.findByRole("button", { name: /^sign in$/i })).toBeTruthy();
++    expectNoDashboardChrome();
++  });
++
++  it("/signup renders the signup screen with no dashboard chrome", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/signup");
++
++    expect(await screen.findByRole("button", { name: /send verification code/i })).toBeTruthy();
++    expectNoDashboardChrome();
++  });
++
++  it("/forgot-password renders the reset screen with no dashboard chrome", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/forgot-password");
++
++    expect(await screen.findByRole("button", { name: /send reset code/i })).toBeTruthy();
++    expectNoDashboardChrome();
++  });
++
++  it("the dashboard route DOES get its chrome (the split is real, not a global removal)", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/dashboard");
++
++    // The header renders once the lazy chunk resolves.
++    await waitFor(() => {
++      expect(document.querySelector("[data-tour^='header-']")).not.toBeNull();
++    });
++    expect(screen.getByText("Build Graph")).toBeTruthy();
++    expect(document.querySelector("header")).not.toBeNull();
++  });
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Sign in
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("sign in", () => {
++  it("posts the email and password to /api/auth/login", async () => {
++    const calls = installFetch(baseHandler);
++    renderStandalone(<SignIn />);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    fireEvent.change(screen.getByLabelText("Password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
++
++    await waitFor(() => {
++      const login = calls.find((c) => c.url.includes("/api/auth/login"));
++      expect(login).toBeTruthy();
++      expect(login!.payload).toEqual({
++        email: "boss@incois.gov.in",
++        password: "Tide-Quiet-77-K9",
++      });
++    });
++  });
++
++  it("shows the server's message when the credentials are rejected", async () => {
++    installFetch((url) => {
++      if (url.includes("/api/auth/login"))
++        return {
++          status: 401,
++          body: {
++            detail: {
++              code: "invalid_credentials",
++              message: "That email and password don't match.",
++            },
++          },
++        };
++      return baseHandler(url);
++    });
++    renderStandalone(<SignIn />);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    fireEvent.change(screen.getByLabelText("Password", { selector: "input" }), {
++      target: { value: "wrong" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
++
++    expect(
++      await screen.findByText("That email and password don't match."),
++    ).toBeTruthy();
++    // Still on the sign-in form, retryable.
++    expect(screen.getByRole("button", { name: /^sign in$/i })).toBeTruthy();
++  });
++
++  it("cannot be submitted while either field is empty", async () => {
++    const calls = installFetch(baseHandler);
++    renderStandalone(<SignIn />);
++
++    const submit = screen.getByRole("button", { name: /^sign in$/i });
++    expect((submit as HTMLButtonElement).disabled).toBe(true);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    expect((submit as HTMLButtonElement).disabled).toBe(true); // no password yet
++
++    fireEvent.change(screen.getByLabelText("Password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    expect((submit as HTMLButtonElement).disabled).toBe(false);
++
++    expect(calls.filter((c) => c.url.includes("/api/auth/login")).length).toBe(0);
++  });
++
++  it("links to create an account and to password reset", async () => {
++    installFetch(baseHandler);
++    renderStandalone(<SignIn />);
++
++    expect(screen.getByRole("link", { name: /create an account/i })).toHaveProperty(
++      "getAttribute('href')" in screen ? ("href" as never) : ("href" as never),
++    );
++    const createAccount = screen
++      .getAllByRole("link")
++      .find((a) => /create an account/i.test(a.textContent ?? ""));
++    expect(createAccount?.getAttribute("href")).toBe("/signup");
++
++    const forgot = screen
++      .getAllByRole("link")
++      .find((a) => /forgot your password/i.test(a.textContent ?? ""));
++    expect(forgot?.getAttribute("href")).toBe("/forgot-password");
++  });
++
++  it("sends no request until the form is submitted", async () => {
++    const calls = installFetch(baseHandler);
++    renderStandalone(<SignIn />);
++    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(0));
++    expect(calls.filter((c) => c.url.includes("/api/auth/login")).length).toBe(0);
++  });
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Forgot password
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("forgot password", () => {
++  it("walks request → code → new password, calling each endpoint", async () => {
++    const calls = installFetch(baseHandler);
++    renderStandalone(<ForgotPassword />);
++
++    // 1. request a code
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /send reset code/i }));
++
++    expect(await screen.findByLabelText("Reset code", { selector: "input" })).toBeTruthy();
++
++    // 2. enter the code
++    fireEvent.change(screen.getByLabelText("Reset code", { selector: "input" }), {
++      target: { value: "481902" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
++
++    // 3. set a new password
++    fireEvent.change(await screen.findByLabelText("New password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.change(screen.getByLabelText("Confirm new password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /set new password/i }));
++
++    await waitFor(() => {
++      const reset = calls.find((c) => c.url.includes("/api/auth/password/reset"));
++      expect(reset).toBeTruthy();
++      expect(reset!.payload).toEqual({
++        email: "boss@incois.gov.in",
++        otp: "481902",
++        new_password: "Tide-Quiet-77-K9",
++      });
++    });
++
++    // Confirmation, and a route back to sign in.
++    expect(await screen.findByText(/go to sign in/i)).toBeTruthy();
++    expect(await screen.findByText(/Password updated for boss@incois.gov.in/)).toBeTruthy();
++  });
++
++  it("reports the same thing whether or not the address has an account", async () => {
++    // The server answers identically either way, so the screen must too —
++    // it must not become an account-enumeration oracle.
++    installFetch((url) => {
++      if (url.includes("/api/auth/password/forgot"))
++        return {
++          body: {
++            status: "code_sent",
++            email: "nobody@incois.gov.in",
++            expires_in_seconds: 600,
++            resend_available_in_seconds: 60,
++          },
++        };
++      return baseHandler(url);
++    });
++    renderStandalone(<ForgotPassword />);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "nobody@incois.gov.in" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /send reset code/i }));
++
++    expect(
++      await screen.findByText(/If nobody@incois.gov.in has an account, a reset code is on its way/),
++    ).toBeTruthy();
++    // Still advances, so there is no observable difference.
++    expect(screen.getByLabelText("Reset code", { selector: "input" })).toBeTruthy();
++  });
++
++  it("surfaces a wrong-code rejection and stays on the code step", async () => {
++    installFetch((url) => {
++      if (url.includes("/api/auth/password/reset"))
++        return {
++          status: 400,
++          body: {
++            detail: { code: "invalid_otp", message: "That code has expired." },
++          },
++        };
++      return baseHandler(url);
++    });
++    renderStandalone(<ForgotPassword />);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /send reset code/i }));
++
++    fireEvent.change(await screen.findByLabelText("Reset code", { selector: "input" }), {
++      target: { value: "000000" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
++
++    fireEvent.change(await screen.findByLabelText("New password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.change(screen.getByLabelText("Confirm new password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /set new password/i }));
++
++    expect(await screen.findByText("That code has expired.")).toBeTruthy();
++  });
++
++  it("blocks submission until the two passwords match", async () => {
++    installFetch(baseHandler);
++    renderStandalone(<ForgotPassword />);
++
++    fireEvent.change(screen.getByLabelText("Email", { selector: "input" }), {
++      target: { value: "boss@incois.gov.in" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /send reset code/i }));
++
++    fireEvent.change(await screen.findByLabelText("Reset code", { selector: "input" }), {
++      target: { value: "481902" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
++
++    fireEvent.change(await screen.findByLabelText("New password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K9" },
++    });
++    fireEvent.change(screen.getByLabelText("Confirm new password", { selector: "input" }), {
++      target: { value: "Tide-Quiet-77-K8" },
++    });
++
++    expect(screen.getByText("The two passwords do not match.")).toBeTruthy();
++    expect(
++      (screen.getByRole("button", { name: /set new password/i }) as HTMLButtonElement).disabled,
++    ).toBe(true);
++  });
++
++  it("links back to sign in", async () => {
++    installFetch(baseHandler);
++    renderStandalone(<ForgotPassword />);
++
++    const back = screen
++      .getAllByRole("link")
++      .find((a) => /back to sign in/i.test(a.textContent ?? ""));
++    expect(back?.getAttribute("href")).toBe("/signin");
++  });
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Sign out
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("sign out", () => {
++  it("calls POST /api/auth/logout", async () => {
++    const calls = installFetch(baseHandler);
++    await signOut();
++    expect(calls.some((c) => c.url.includes("/api/auth/logout"))).toBe(true);
++  });
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Session lookup
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("session lookup", () => {
++  it("treats a 401 as signed out instead of throwing", async () => {
++    installFetch(() => ({ status: 401, body: { detail: { code: "not_authenticated" } } }));
++    const { fetchSession } = await import("@/api/auth");
++    await expect(fetchSession()).resolves.toEqual({ authenticated: false, user: null });
++  });
++
++  it("surfaces the signed-in user when there is a session", async () => {
++    installFetch(() => ({ body: LOGGED_IN }));
++    const { fetchSession } = await import("@/api/auth");
++    const state = await fetchSession();
++    expect(state.authenticated).toBe(true);
++    expect(state.user?.email).toBe("boss@incois.gov.in");
++  });
++
++  it("throws (rather than reporting signed out) when the server is broken", async () => {
++    installFetch(() => ({ status: 500, body: {} }));
++    const { fetchSession } = await import("@/api/auth");
++    await expect(fetchSession()).rejects.toBeInstanceOf(AuthApiError);
++  });
++});
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Phase boundary — Phase 3 signs you in, it does not lock anything down
++// ═══════════════════════════════════════════════════════════════════════════
++
++describe("phase boundary", () => {
++  it("in-app routes stay reachable while signed out (gating is Phase 4)", async () => {
++    installFetch(baseHandler);
++    renderAppAt("/dashboard");
++
++    // If Phase 4's redirect were on, this would bounce to /signin.
++    // (The dashboard itself navigates on to /workspace, so the assertion is
++    // "we were not kicked out to an auth route", not an exact path.)
++    await waitFor(() => {
++      expect(document.querySelector("[data-tour^='header-']")).not.toBeNull();
++    });
++    expect(window.location.pathname).not.toBe("/signin");
++    expect(window.location.pathname).not.toBe("/");
++  });
++
++  it("the sign-in screen offers no role, permission or admin control", async () => {
++    installFetch(baseHandler);
++    renderStandalone(<SignIn />);
++
++    await waitFor(() => expect(screen.getByRole("button", { name: /^sign in$/i })).toBeTruthy());
++    expect(screen.queryByText(/role/i)).toBeNull();
++    expect(screen.queryByText(/permission/i)).toBeNull();
++    expect(screen.queryByText(/admin/i)).toBeNull();
++  });
++});
+diff --git a/frontend/src/api/auth.ts b/frontend/src/api/auth.ts
+index aa7a265..cd59a8b 100644
+--- a/frontend/src/api/auth.ts
++++ b/frontend/src/api/auth.ts
+@@ -182,3 +182,98 @@ export function passwordLooksValid(password: string, policy: PasswordPolicy): bo
+   if (policy.require_symbol && !/[^A-Za-z0-9]/.test(password)) return false;
+   return true;
+ }
++
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Phase 3 — sign in, sign out, session lookup, password reset
++//
++// The session lives in an HttpOnly cookie set by the server. Browser code
++// never reads or stores the session token — it just asks the server who it is.
++// ═══════════════════════════════════════════════════════════════════════════
++
++export interface SessionUser {
++  id: string;
++  email: string;
++  email_verified: boolean;
++  is_active: boolean;
++}
++
++export interface SessionState {
++  authenticated: boolean;
++  user: SessionUser | null;
++}
++
++export interface LoginResult {
++  status: string;
++  user_id: string;
++  email: string;
++  expires_in_seconds: number;
++}
++
++export interface LogoutResult {
++  status: string;
++  revoked: boolean;
++}
++
++export interface PasswordForgotResult {
++  status: string;
++  email: string;
++  expires_in_seconds: number;
++  resend_available_in_seconds: number;
++  /** Dev backends only (AUTH_DEV_RETURN_OTP); never in production. */
++  dev_otp?: string;
++}
++
++export interface PasswordResetResult {
++  status: string;
++  email: string;
++  sessions_revoked: number;
++}
++
++const SIGNED_OUT: SessionState = { authenticated: false, user: null };
++
++/** Sign in. Sets the session cookie via the response. */
++export async function signIn(email: string, password: string): Promise<LoginResult> {
++  return authRequest<LoginResult>("/api/auth/login", { email, password });
++}
++
++/** Sign out. Clears the cookie server-side, whether or not a session existed. */
++export async function signOut(): Promise<LogoutResult> {
++  return authRequest<LogoutResult>("/api/auth/logout", {});
++}
++
++/**
++ * Who am I? Returns `authenticated: false` rather than throwing when there is
++ * no valid session, so callers can render without a try/catch. Any other
++ * error (server down, 500) still throws.
++ */
++export async function fetchSession(): Promise<SessionState> {
++  const res = await fetch("/api/auth/me", { headers: { Accept: "application/json" } });
++  if (res.status === 401) return SIGNED_OUT;
++  if (!res.ok) {
++    throw new AuthApiError("Could not load the session", "session_unavailable", res.status);
++  }
++  const body = (await res.json()) as { authenticated?: boolean; user?: SessionUser };
++  return { authenticated: Boolean(body.authenticated), user: body.user ?? null };
++}
++
++/**
++ * Ask for a password-reset code. The response is identical whether or not the
++ * address has an account, so this cannot be used to discover who is registered.
++ */
++export async function requestPasswordReset(email: string): Promise<PasswordForgotResult> {
++  return authRequest<PasswordForgotResult>("/api/auth/password/forgot", { email });
++}
++
++/** Verify the reset code and set a new password. Signs out every device. */
++export async function resetPassword(
++  email: string,
++  otp: string,
++  newPassword: string,
++): Promise<PasswordResetResult> {
++  return authRequest<PasswordResetResult>("/api/auth/password/reset", {
++    email,
++    otp,
++    new_password: newPassword,
++  });
++}
+diff --git a/frontend/src/components/auth/AuthLayout.tsx b/frontend/src/components/auth/AuthLayout.tsx
+new file mode 100644
+index 0000000..98cfd51
+--- /dev/null
++++ b/frontend/src/components/auth/AuthLayout.tsx
+@@ -0,0 +1,87 @@
++/**
++ * Standalone shell for the sign-in / sign-up / forgot-password screens.
++ *
++ * This is deliberately NOT `MainLayout`. It renders no Header, no Sidebar, no
++ * toast region, no Build-Graph modal and no product tour — an authentication
++ * screen must not sit inside the dashboard chrome it is gating access to.
++ *
++ * The dashboard layout is applied separately by `AppShell`, which wraps only
++ * the in-app routes.
++ */
++import type { ReactNode } from "react";
++import { Link } from "react-router-dom";
++import { Diamond } from "lucide-react";
++
++interface AuthLayoutProps {
++  title: string;
++  /** One line of context shown under the title. */
++  subtitle?: string;
++  children: ReactNode;
++  /** Cross-links rendered under the card ("Create account" / "Back to sign in"). */
++  footer?: ReactNode;
++  /** An error or notice banner rendered above the form. */
++  alert?: ReactNode;
++}
++
++export function AuthLayout({ title, subtitle, children, footer, alert }: AuthLayoutProps) {
++  return (
++    <div className="flex min-h-screen w-full flex-col items-center justify-center bg-background px-4 py-10">
++      <div className="w-full max-w-md">
++        {/* Branding — same marks as the dashboard header, so the product is
++            recognisable, but it is a static heading here, not app chrome. */}
++        <div className="mb-6 flex flex-col items-center gap-2 text-center">
++          <div className="flex items-center gap-2 text-lg font-bold tracking-wide text-foreground">
++            <Diamond className="h-4 w-4 fill-current text-accent" aria-hidden="true" />
++            <span className="text-sm">INCOIS AUDIT PRO</span>
++          </div>
++          <h1 className="text-xl font-semibold text-foreground">{title}</h1>
++          {subtitle && <p className="text-xs text-muted">{subtitle}</p>}
++        </div>
++
++        <div className="rounded-lg border border-border bg-surface p-6 shadow-sm">
++          {alert}
++          {children}
++        </div>
++
++        {footer && <div className="mt-5 text-center text-xs text-muted">{footer}</div>}
++
++        <p className="mt-8 text-center text-[11px] leading-relaxed text-muted">
++          Access is limited to <span className="text-foreground">@incois.gov.in</span>{" "}
++          addresses and one configured developer address.
++        </p>
++      </div>
++    </div>
++  );
++}
++
++/** A standard error / notice banner for the auth screens. */
++export function AuthAlert({
++  kind,
++  children,
++}: {
++  kind: "error" | "success";
++  children: ReactNode;
++}) {
++  if (!children) return null;
++  return (
++    <div
++      role={kind === "error" ? "alert" : "status"}
++      className={
++        kind === "error"
++          ? "mb-4 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"
++          : "mb-4 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success"
++      }
++    >
++      {children}
++    </div>
++  );
++}
++
++/** The muted "or" cross-link line used under each auth card. */
++export function AuthLink({ to, children }: { to: string; children: ReactNode }) {
++  return (
++    <Link to={to} className="font-medium text-accent underline-offset-2 hover:underline">
++      {children}
++    </Link>
++  );
++}
+diff --git a/frontend/src/components/layout/AppShell.tsx b/frontend/src/components/layout/AppShell.tsx
+new file mode 100644
+index 0000000..5daea4c
+--- /dev/null
++++ b/frontend/src/components/layout/AppShell.tsx
+@@ -0,0 +1,50 @@
++/**
++ * Chrome for the in-application routes (Dashboard, Workspace).
++ *
++ * This is the OTHER half of the split introduced in Phase 3: `MainLayout` plus
++ * the global overlays and the product tour now live here, wrapped around an
++ * `<Outlet />`, so they mount only for in-app routes — never for the
++ * sign-in / sign-up / forgot-password screens, which render standalone.
++ */
++import { Suspense } from "react";
++import { Outlet } from "react-router-dom";
++import { MainLayout } from "./MainLayout";
++import { BuildGraphModal } from "@/components/graph/BuildGraphModal";
++import { ProductTour } from "@/components/onboarding/ProductTour";
++
++// Lazy, matching App's route-level code splitting.
++import { lazy } from "react";
++const Settings = lazy(() =>
++  import("@/pages/Settings").then((m) => ({ default: m.Settings }))
++);
++const MyKnowledgeModal = lazy(() =>
++  import("@/components/knowledge/MyKnowledgeModal").then((m) => ({
++    default: m.MyKnowledgeModal,
++  }))
++);
++
++function Loader() {
++  return (
++    <div className="flex h-full w-full items-center justify-center text-xs text-muted">
++      Loading…
++    </div>
++  );
++}
++
++export function AppShell() {
++  return (
++    <>
++      <MainLayout>
++        <Suspense fallback={<Loader />}>
++          <Outlet />
++        </Suspense>
++      </MainLayout>
++      <Settings />
++      <MyKnowledgeModal />
++      <BuildGraphModal />
++      {/* Product tour — auto-starts on first run; scoped to the app shell so it
++          never pops up over the sign-in screen. */}
++      <ProductTour />
++    </>
++  );
++}
+diff --git a/frontend/src/components/layout/Header.tsx b/frontend/src/components/layout/Header.tsx
+index ad424f1..b36d640 100644
+--- a/frontend/src/components/layout/Header.tsx
++++ b/frontend/src/components/layout/Header.tsx
+@@ -5,6 +5,7 @@ import { fetchModels, fetchProviders, setProvider } from "@/api/model";
+ import { useAppStore } from "@/store/useAppStore";
+ import type { RetrievalMode, ThinkingEffort } from "@/types";
+ import { SourceFilter } from "./SourceFilter";
++import { SessionMenu } from "./SessionMenu";
+ import { useThemeStore } from "@/store/useThemeStore";
+ import { useActivityStore } from "@/store/useActivityStore";
+ import { useTourStore } from "@/store/useTourStore";
+@@ -320,6 +321,7 @@ export function Header() {
+         <GuideButton />
+         <MyKnowledgeButton />
+         <SettingsButton />
++        <SessionMenu />
+         <ThemeToggle />
+       </div>
+     </header>
+diff --git a/frontend/src/components/layout/SessionMenu.tsx b/frontend/src/components/layout/SessionMenu.tsx
+new file mode 100644
+index 0000000..37c70a8
+--- /dev/null
++++ b/frontend/src/components/layout/SessionMenu.tsx
+@@ -0,0 +1,73 @@
++/**
++ * Header account chip: who is signed in, and a way to sign out.
++ *
++ * Phase 3 signs you IN. It does not lock anything DOWN — this control reports
++ * session state and offers sign-out; it gates nothing. Existing routes stay
++ * reachable without a session until Phase 4.
++ */
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { LogIn, LogOut, User as UserIcon } from "lucide-react";
++import { Link } from "react-router-dom";
++import { Button } from "@/components/ui/button";
++import { fetchSession, signOut } from "@/api/auth";
++
++export function SessionMenu() {
++  const queryClient = useQueryClient();
++
++  const { data } = useQuery({
++    queryKey: ["session"],
++    queryFn: fetchSession,
++    // Short-lived: this is chrome, not data. Never retry a 401 — fetchSession
++    // already turns that into "signed out", so a retry would just be noise.
++    staleTime: 60_000,
++    refetchOnWindowFocus: false,
++  });
++
++  const signedIn = Boolean(data?.authenticated);
++  const email = data?.user?.email ?? null;
++
++  const handleSignOut = async () => {
++    await signOut();
++    // Drop the cached session so the header re-renders immediately.
++    queryClient.setQueryData(["session"], { authenticated: false, user: null });
++    queryClient.invalidateQueries({ queryKey: ["session"] });
++  };
++
++  if (!signedIn) {
++    return (
++      <Link
++        to="/signin"
++        title="Sign in"
++        aria-label="Sign in"
++        data-testid="session-signin"
++        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
++      >
++        <LogIn className="h-4 w-4" />
++      </Link>
++    );
++  }
++
++  return (
++    <div className="flex items-center gap-1" data-testid="session-menu">
++      <span
++        className="hidden max-w-[180px] truncate text-xs text-muted lg:inline"
++        title={email ?? undefined}
++      >
++        <UserIcon className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />
++        {email}
++      </span>
++      <Button
++        variant="ghost"
++        size="icon"
++        onClick={handleSignOut}
++        title="Sign out"
++        aria-label="Sign out"
++        data-testid="session-signout"
++      >
++        <LogOut className="h-4 w-4" />
++      </Button>
++    </div>
++  );
++}
++
++export default SessionMenu;
+diff --git a/frontend/src/pages/ForgotPassword.tsx b/frontend/src/pages/ForgotPassword.tsx
+new file mode 100644
+index 0000000..1db9e84
+--- /dev/null
++++ b/frontend/src/pages/ForgotPassword.tsx
+@@ -0,0 +1,313 @@
++// Phase 3 — forgot password, via emailed one-time code.
++//
++// Two steps: request a code, then set a new password. Rendered standalone.
++//
++// The request step always reports the same thing ("if that address exists, a
++// code is on its way") because the server replies identically either way — so
++// this screen cannot be used to discover who has an account.
++import { useCallback, useEffect, useState } from "react";
++import { Link, useNavigate } from "react-router-dom";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { AuthAlert, AuthLayout, AuthLink } from "@/components/auth/AuthLayout";
++import {
++  AuthApiError,
++  fetchPasswordPolicy,
++  passwordLooksValid,
++  requestPasswordReset,
++  resetPassword,
++  type PasswordPolicy,
++} from "@/api/auth";
++
++const STEP_LABELS = ["Your email", "Reset code", "New password"];
++
++/** Conservative fallback so the UI still renders rules if the policy call fails. */
++const FALLBACK_POLICY: PasswordPolicy = {
++  min_length: 12,
++  max_length: 256,
++  require_lowercase: true,
++  require_uppercase: true,
++  require_digit: true,
++  require_symbol: false,
++  rejects_email_substring: true,
++  rejects_common_passwords: true,
++};
++
++export function ForgotPassword() {
++  const navigate = useNavigate();
++
++  const [step, setStep] = useState(0);
++  const [email, setEmail] = useState("");
++  const [code, setCode] = useState("");
++  const [password, setPassword] = useState("");
++  const [confirmPassword, setConfirmPassword] = useState("");
++
++  const [policy, setPolicy] = useState<PasswordPolicy>(FALLBACK_POLICY);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [notice, setNotice] = useState<string | null>(null);
++
++  useEffect(() => {
++    let active = true;
++    fetchPasswordPolicy()
++      .then((p) => {
++        if (active) setPolicy(p);
++      })
++      .catch(() => {
++        /* keep the fallback rules; the server still enforces the real ones */
++      });
++    return () => {
++      active = false;
++    };
++  }, []);
++
++  const passwordOk = passwordLooksValid(password, policy);
++  const passwordsMatch = password.length > 0 && password === confirmPassword;
++
++  const run = useCallback(async (fn: () => Promise<void>) => {
++    setBusy(true);
++    setError(null);
++    setNotice(null);
++    try {
++      await fn();
++    } catch (err) {
++      setError(
++        err instanceof AuthApiError ? err.message : "Something went wrong. Please try again.",
++      );
++    } finally {
++      setBusy(false);
++    }
++  }, []);
++
++  const handleRequest = () =>
++    run(async () => {
++      const result = await requestPasswordReset(email);
++      setNotice(`If ${email.trim()} has an account, a reset code is on its way.`);
++      if (result.dev_otp) {
++        setNotice(
++          `If ${email.trim()} has an account, a reset code is on its way. (Development mode — code ${result.dev_otp})`,
++        );
++      }
++      setCode("");
++      setStep(1);
++    });
++
++  const handleVerify = () =>
++    run(async () => {
++      // The code is checked by the server together with the new password, so
++      // this step only advances the form.
++      if (!code.trim()) {
++        setError("Enter the code from the email.");
++        return;
++      }
++      setStep(2);
++      setNotice(null);
++    });
++
++  const handleReset = () =>
++    run(async () => {
++      if (password !== confirmPassword) {
++        setError("The two passwords do not match.");
++        return;
++      }
++      const result = await resetPassword(email, code, password);
++      setNotice(
++        `Password updated for ${result.email}. ${
++          result.sessions_revoked > 0
++            ? `${result.sessions_revoked} session(s) were signed out.`
++            : "No other devices were signed in."
++        }`,
++      );
++      setStep(3);
++    });
++
++  return (
++    <AuthLayout
++      title="Reset your password"
++      subtitle={
++        step === 3
++          ? "Your password has been changed."
++          : "Enter your email and we'll send a one-time code."
++      }
++      alert={
++        <>
++          <AuthAlert kind="error">{error}</AuthAlert>
++          <AuthAlert kind="success">{notice}</AuthAlert>
++        </>
++      }
++      footer={
++        step === 3 ? (
++          <button
++            type="button"
++            className="font-medium text-accent underline-offset-2 hover:underline"
++            onClick={() => navigate("/signin")}
++          >
++            Back to sign in
++          </button>
++        ) : (
++          <>
++            Remembered it? <AuthLink to="/signin">Back to sign in</AuthLink>
++          </>
++        )
++      }
++    >
++      {step < 3 && (
++        <ol className="mb-5 flex items-center gap-2 text-[11px]" aria-label="Reset progress">
++          {STEP_LABELS.map((label, i) => (
++            <li key={label} className="flex flex-1 items-center gap-1.5">
++              <span
++                className={
++                  i < step
++                    ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-success/40 bg-success/15 text-[10px] text-success"
++                    : i === step
++                      ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-accent bg-accent text-[10px] text-accent-foreground"
++                      : "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border text-[10px] text-muted"
++                }
++                aria-current={i === step ? "step" : undefined}
++              >
++                {i < step ? "✓" : i + 1}
++              </span>
++              <span className={i === step ? "truncate text-foreground" : "truncate text-muted"}>
++                {label}
++              </span>
++            </li>
++          ))}
++        </ol>
++      )}
++
++      {step === 0 && (
++        <form
++          className="space-y-4"
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (!busy && email.trim()) handleRequest();
++          }}
++        >
++          <label className="block space-y-1.5">
++            <span className="text-xs font-medium">Email</span>
++            <Input
++              type="email"
++              name="email"
++              autoComplete="email"
++              autoFocus
++              required
++              placeholder="you@incois.gov.in"
++              value={email}
++              onChange={(e) => setEmail(e.target.value)}
++              disabled={busy}
++            />
++          </label>
++          <Button type="submit" className="w-full" disabled={busy || !email.trim()}>
++            {busy ? "Sending…" : "Send reset code"}
++          </Button>
++        </form>
++      )}
++
++      {step === 1 && (
++        <form
++          className="space-y-4"
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (!busy) handleVerify();
++          }}
++        >
++          <label className="block space-y-1.5">
++            <span className="text-xs font-medium">Reset code</span>
++            <Input
++              type="text"
++              name="otp"
++              inputMode="numeric"
++              autoComplete="one-time-code"
++              autoFocus
++              required
++              maxLength={8}
++              placeholder="6-digit code"
++              value={code}
++              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
++              disabled={busy}
++            />
++          </label>
++          <p className="text-[11px] text-muted">
++            Sent to {email.trim()}. The code expires and can be used once.
++          </p>
++          <Button type="submit" className="w-full" disabled={busy || !code.trim()}>
++            Continue
++          </Button>
++          <Button
++            type="button"
++            variant="ghost"
++            size="sm"
++            className="w-full"
++            disabled={busy}
++            onClick={handleRequest}
++          >
++            Resend code
++          </Button>
++        </form>
++      )}
++
++      {step === 2 && (
++        <form
++          className="space-y-4"
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (!busy && passwordOk && passwordsMatch) handleReset();
++          }}
++        >
++          <label className="block space-y-1.5">
++            <span className="text-xs font-medium">New password</span>
++            <Input
++              type="password"
++              name="newPassword"
++              autoComplete="new-password"
++              autoFocus
++              required
++              value={password}
++              onChange={(e) => setPassword(e.target.value)}
++              disabled={busy}
++            />
++          </label>
++          <label className="block space-y-1.5">
++            <span className="text-xs font-medium">Confirm new password</span>
++            <Input
++              type="password"
++              name="confirmPassword"
++              autoComplete="new-password"
++              required
++              value={confirmPassword}
++              onChange={(e) => setConfirmPassword(e.target.value)}
++              disabled={busy}
++            />
++          </label>
++          {confirmPassword.length > 0 && !passwordsMatch && (
++            <p className="text-[11px] text-danger">The two passwords do not match.</p>
++          )}
++          <p className="text-[11px] text-muted">
++            At least {policy.min_length} characters, with upper and lower case and a number.
++            Setting a new password signs out every other device.
++          </p>
++          <Button type="submit" className="w-full" disabled={busy || !passwordOk || !passwordsMatch}>
++            {busy ? "Updating…" : "Set new password"}
++          </Button>
++        </form>
++      )}
++
++      {step === 3 && (
++        <div className="space-y-4">
++          <p className="text-xs text-muted">
++            You can now{" "}
++            <Link to="/signin" className="font-medium text-accent underline-offset-2 hover:underline">
++              sign in
++            </Link>{" "}
++            with your new password.
++          </p>
++          <Button className="w-full" onClick={() => navigate("/signin")}>
++            Go to sign in
++          </Button>
++        </div>
++      )}
++    </AuthLayout>
++  );
++}
++
++export default ForgotPassword;
+diff --git a/frontend/src/pages/SignIn.tsx b/frontend/src/pages/SignIn.tsx
+new file mode 100644
+index 0000000..d50cf18
+--- /dev/null
++++ b/frontend/src/pages/SignIn.tsx
+@@ -0,0 +1,95 @@
++// Phase 3 — sign in.
++//
++// Rendered standalone (AuthLayout), never inside the dashboard shell. The
++// default entry point: the app opens here at "/".
++import { useState } from "react";
++import { useNavigate } from "react-router-dom";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { AuthAlert, AuthLayout, AuthLink } from "@/components/auth/AuthLayout";
++import { AuthApiError, signIn } from "@/api/auth";
++
++export function SignIn() {
++  const navigate = useNavigate();
++
++  const [email, setEmail] = useState("");
++  const [password, setPassword] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  const canSubmit = !busy && email.trim().length > 0 && password.length > 0;
++
++  const handleSubmit = async (event: React.FormEvent) => {
++    event.preventDefault();
++    if (!canSubmit) return;
++    setBusy(true);
++    setError(null);
++    try {
++      await signIn(email, password);
++      // Signed in — the cookie is set server-side. Go to the dashboard.
++      navigate("/dashboard");
++    } catch (err) {
++      // The server already returns one generic message for every credential
++      // failure, so there is nothing to disambiguate here (deliberately).
++      setError(
++        err instanceof AuthApiError ? err.message : "Sign in failed. Please try again.",
++      );
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <AuthLayout
++      title="Sign in"
++      subtitle="Sign in to continue to INCOIS Audit Pro."
++      alert={<AuthAlert kind="error">{error}</AuthAlert>}
++      footer={
++        <>
++          Don&apos;t have an account? <AuthLink to="/signup">Create an account</AuthLink>
++        </>
++      }
++    >
++      <form className="space-y-4" onSubmit={handleSubmit} noValidate>
++        <label className="block space-y-1.5">
++          <span className="text-xs font-medium">Email</span>
++          <Input
++            type="email"
++            name="email"
++            autoComplete="email"
++            autoFocus
++            required
++            placeholder="you@incois.gov.in"
++            value={email}
++            onChange={(e) => setEmail(e.target.value)}
++            disabled={busy}
++          />
++        </label>
++
++        <label className="block space-y-1.5">
++          <span className="text-xs font-medium">Password</span>
++          <Input
++            type="password"
++            name="password"
++            autoComplete="current-password"
++            required
++            placeholder="Your password"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            disabled={busy}
++          />
++        </label>
++
++        <div className="text-right">
++          <AuthLink to="/forgot-password">Forgot your password?</AuthLink>
++        </div>
++
++        <Button type="submit" className="w-full" disabled={!canSubmit}>
++          {busy ? "Signing in…" : "Sign in"}
++        </Button>
++      </form>
++    </AuthLayout>
++  );
++}
++
++export default SignIn;
+diff --git a/frontend/src/pages/Signup.tsx b/frontend/src/pages/Signup.tsx
+index 43d84cc..dfda066 100644
+--- a/frontend/src/pages/Signup.tsx
++++ b/frontend/src/pages/Signup.tsx
+@@ -1,19 +1,18 @@
+-// Phase 2 — signup + email OTP verification.
++// Phase 3 — create an account (Phase 2 signup flow, re-shelled).
+ //
+-// Three steps: enter email → enter the emailed code → set a password.
+-// There is deliberately NO login screen and NO password-reset screen here:
+-// those are Phase 3. Nothing on this page is reached automatically; the app
+-// still opens on the Dashboard exactly as before.
++// The OTP flow itself is unchanged from Phase 2: enter email → enter the
++// emailed code → set a password. What changed in Phase 3 is the presentation:
++// this screen now renders standalone via AuthLayout, so no dashboard navbar,
++// sidebar, toolbar or graph control appears around it, and it cross-links to
++// sign in.
+ //
+-// The account is only created at the very end, after the code is verified, so
+-// an abandoned signup leaves no half-built user behind.
+-
++// The account is still only created at the very end, after the code is
++// verified, so an abandoned signup leaves nothing behind.
+ import { useCallback, useEffect, useMemo, useState } from "react";
+-import { useNavigate } from "react-router-dom";
++import { Link, useNavigate } from "react-router-dom";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+-import { cn } from "@/utils/cn";
++import { AuthAlert, AuthLayout, AuthLink } from "@/components/auth/AuthLayout";
+ import {
+   AuthApiError,
+   completeSignup,
+@@ -47,17 +46,6 @@ const FALLBACK_POLICY: PasswordPolicy = {
+   rejects_common_passwords: true,
+ };
+ 
+-function friendlyError(err: unknown): { message: string; retryAfter: number | null } {
+-  if (err instanceof AuthApiError) {
+-    // The server's messages are already user-facing; pass them through.
+-    return { message: err.message, retryAfter: err.retryAfter };
+-  }
+-  if (err instanceof Error && err.message) {
+-    return { message: err.message, retryAfter: null };
+-  }
+-  return { message: "Something went wrong. Please try again.", retryAfter: null };
+-}
+-
+ export function Signup() {
+   const navigate = useNavigate();
+ 
+@@ -92,7 +80,7 @@ export function Signup() {
+     };
+   }, []);
+ 
+-  // Resend cooldown countdown — purely cosmetic; the server enforces its own.
++  // Resend cooldown countdown — cosmetic; the server enforces its own.
+   useEffect(() => {
+     if (cooldown <= 0) return;
+     const id = setTimeout(() => setCooldown((c) => Math.max(0, c - 1)), 1000);
+@@ -102,7 +90,6 @@ export function Signup() {
+   const policyRules = useMemo(() => describePolicy(policy), [policy]);
+   const passwordOk = passwordLooksValid(password, policy);
+   const passwordsMatch = password.length > 0 && password === confirmPassword;
+-
+   const stepIndex = STEP_ORDER.indexOf(step);
+ 
+   const run = useCallback(async (fn: () => Promise<void>) => {
+@@ -112,9 +99,12 @@ export function Signup() {
+     try {
+       await fn();
+     } catch (err) {
+-      const { message, retryAfter } = friendlyError(err);
+-      setError(message);
+-      if (retryAfter !== null) setCooldown(retryAfter);
++      setError(
++        err instanceof AuthApiError ? err.message : "Something went wrong. Please try again.",
++      );
++      if (err instanceof AuthApiError && err.retryAfter !== null) {
++        setCooldown(err.retryAfter);
++      }
+     } finally {
+       setBusy(false);
+     }
+@@ -130,7 +120,7 @@ export function Signup() {
+       setCooldown(result.resend_available_in_seconds);
+       setOtp("");
+       setStep("otp");
+-      setNotice(`We sent a ${policy ? "" : ""}verification code to ${result.email}.`);
++      setNotice(`We sent a verification code to ${result.email}.`);
+     });
+ 
+   const handleResend = () =>
+@@ -163,66 +153,76 @@ export function Signup() {
+     });
+ 
+   return (
+-    <div className="flex min-h-full w-full items-start justify-center px-4 py-10">
+-      <Card className="w-full max-w-md">
+-        <CardHeader>
+-          <CardTitle className="text-base">
+-            {step === "done" ? "Account created" : "Create your account"}
+-          </CardTitle>
+-          <p className="text-xs text-muted">
+-            {step === "done"
+-              ? "Your email is verified and your password is set."
+-              : "Signup is limited to @incois.gov.in addresses and one configured developer address."}
+-          </p>
+-        </CardHeader>
+-
+-        <CardContent className="space-y-4">
+-          {/* Progress — hidden on the success screen. */}
+-          {step !== "done" && (
+-            <ol className="flex items-center gap-2 text-[11px]" aria-label="Signup progress">
+-              {STEP_ORDER.map((name, i) => (
+-                <li key={name} className="flex flex-1 items-center gap-2">
+-                  <span
+-                    className={cn(
+-                      "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px]",
+-                      i < stepIndex
+-                        ? "border-success/40 bg-success/15 text-success"
+-                        : i === stepIndex
+-                          ? "border-accent bg-accent text-accent-foreground"
+-                          : "border-border text-muted",
+-                    )}
+-                    aria-current={i === stepIndex ? "step" : undefined}
+-                  >
+-                    {i < stepIndex ? "✓" : i + 1}
+-                  </span>
+-                  <span className={cn("truncate", i === stepIndex ? "text-foreground" : "text-muted")}>
+-                    {STEP_LABELS[name]}
+-                  </span>
+-                </li>
+-              ))}
+-            </ol>
+-          )}
+-
+-          {error && (
+-            <div
+-              role="alert"
+-              className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"
+-            >
+-              {error}
+-            </div>
+-          )}
+-          {notice && !error && (
+-            <div
+-              role="status"
+-              className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success"
++    <AuthLayout
++      title={step === "done" ? "Account created" : "Create your account"}
++      subtitle={
++        step === "done"
++          ? "Your email is verified and your password is set."
++          : "Verify your email with a one-time code, then choose a password."
++      }
++      alert={
++        <>
++          <AuthAlert kind="error">{error}</AuthAlert>
++          <AuthAlert kind="success">{notice}</AuthAlert>
++        </>
++      }
++      footer={
++        step === "done" ? null : (
++          <>
++            Already have an account? <AuthLink to="/signin">Sign in</AuthLink>
++          </>
++        )
++      }
++    >
++      {step === "done" ? (
++        <div className="space-y-4" data-testid="signup-done">
++          <div className="rounded-md border border-success/30 bg-success/10 px-3 py-3 text-xs text-success">
++            <p>
++              <strong className="text-foreground">{verifiedEmail}</strong> is verified and
++              ready to use.
++            </p>
++          </div>
++          <Button className="w-full" onClick={() => navigate("/signin")}>
++            Continue to sign in
++          </Button>
++          <p className="text-center text-[11px] text-muted">
++            <Link
++              to="/signin"
++              className="font-medium text-accent underline-offset-2 hover:underline"
+             >
+-              {notice}
+-            </div>
+-          )}
++              Go to sign in
++            </Link>
++          </p>
++        </div>
++      ) : (
++        <>
++          <ol className="mb-5 flex items-center gap-2 text-[11px]" aria-label="Signup progress">
++            {STEP_ORDER.map((name, i) => (
++              <li key={name} className="flex flex-1 items-center gap-1.5">
++                <span
++                  className={
++                    i < stepIndex
++                      ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-success/40 bg-success/15 text-[10px] text-success"
++                      : i === stepIndex
++                        ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-accent bg-accent text-[10px] text-accent-foreground"
++                        : "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border text-[10px] text-muted"
++                  }
++                  aria-current={i === stepIndex ? "step" : undefined}
++                >
++                  {i < stepIndex ? "✓" : i + 1}
++                </span>
++                <span
++                  className={i === stepIndex ? "truncate text-foreground" : "truncate text-muted"}
++                >
++                  {STEP_LABELS[name]}
++                </span>
++              </li>
++            ))}
++          </ol>
+ 
+           {step === "email" && (
+             <form
+-              className="space-y-3"
++              className="space-y-4"
+               onSubmit={(e) => {
+                 e.preventDefault();
+                 if (!busy && email.trim()) handleStart();
+@@ -250,7 +250,7 @@ export function Signup() {
+ 
+           {step === "otp" && (
+             <form
+-              className="space-y-3"
++              className="space-y-4"
+               onSubmit={(e) => {
+                 e.preventDefault();
+                 if (!busy && otp.trim()) handleVerify();
+@@ -270,16 +270,16 @@ export function Signup() {
+                   value={otp}
+                   onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+                   disabled={busy}
+-                  aria-describedby="otp-help"
+                 />
+               </label>
+-              <p id="otp-help" className="text-[11px] text-muted">
++              <p className="text-[11px] text-muted">
+                 Sent to {verifiedEmail || email}. The code expires and can only be used once.
+               </p>
+ 
+               {devOtp && (
+                 <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+-                  Development mode — the server returned the code directly: <strong>{devOtp}</strong>
++                  Development mode — the server returned the code directly:{" "}
++                  <strong>{devOtp}</strong>
+                 </p>
+               )}
+ 
+@@ -287,39 +287,40 @@ export function Signup() {
+                 {busy ? "Verifying…" : "Verify code"}
+               </Button>
+ 
+-              <Button
+-                type="button"
+-                variant="ghost"
+-                size="sm"
+-                className="w-full"
+-                disabled={busy || cooldown > 0}
+-                onClick={handleResend}
+-              >
+-                {cooldown > 0 ? `Resend available in ${cooldown}s` : "Resend code"}
+-              </Button>
+-
+-              <Button
+-                type="button"
+-                variant="ghost"
+-                size="sm"
+-                className="w-full"
+-                disabled={busy}
+-                onClick={() => {
+-                  setStep("email");
+-                  setError(null);
+-                  setNotice(null);
+-                  setDevOtp(null);
+-                  setCooldown(0);
+-                }}
+-              >
+-                Use a different email
+-              </Button>
++              <div className="flex gap-2">
++                <Button
++                  type="button"
++                  variant="ghost"
++                  size="sm"
++                  className="flex-1"
++                  disabled={busy || cooldown > 0}
++                  onClick={handleResend}
++                >
++                  {cooldown > 0 ? `Resend available in ${cooldown}s` : "Resend code"}
++                </Button>
++                <Button
++                  type="button"
++                  variant="ghost"
++                  size="sm"
++                  className="flex-1"
++                  disabled={busy}
++                  onClick={() => {
++                    setStep("email");
++                    setError(null);
++                    setNotice(null);
++                    setDevOtp(null);
++                    setCooldown(0);
++                  }}
++                >
++                  Change email
++                </Button>
++              </div>
+             </form>
+           )}
+ 
+           {step === "password" && (
+             <form
+-              className="space-y-3"
++              className="space-y-4"
+               onSubmit={(e) => {
+                 e.preventDefault();
+                 if (!busy && passwordOk && passwordsMatch) handleComplete();
+@@ -370,24 +371,9 @@ export function Signup() {
+               </Button>
+             </form>
+           )}
+-
+-          {step === "done" && (
+-            <div className="space-y-3">
+-              <p className="text-xs text-muted">
+-                <strong className="text-foreground">{verifiedEmail}</strong> is verified and ready.
+-              </p>
+-              <p className="text-[11px] text-muted">
+-                Signing in is not built yet — login arrives in Phase 3. Until then the rest of the
+-                application remains open, exactly as it is today.
+-              </p>
+-              <Button className="w-full" onClick={() => navigate("/")}>
+-                Back to Dashboard
+-              </Button>
+-            </div>
+-          )}
+-        </CardContent>
+-      </Card>
+-    </div>
++        </>
++      )}
++    </AuthLayout>
+   );
+ }
+ 
+diff --git a/src/auth/config.py b/src/auth/config.py
+index cb685bb..e27d3ec 100644
+--- a/src/auth/config.py
++++ b/src/auth/config.py
+@@ -141,6 +141,22 @@ class AuthConfig:
+     signup_window_seconds: int = 3600
+     signup_token_ttl_seconds: int = 900
+ 
++    # ── Phase 3: sessions, login and password reset ───────────────────────
++    #: Absolute lifetime of a session. Never slid forward.
++    session_ttl_seconds: int = 28800  # 8 hours
++    #: Inactivity limit, measured from the last time the session was validated.
++    session_idle_timeout_seconds: int = 7200  # 2 hours
++    session_cookie_name: str = "auditpro_session"
++    #: None = decide from APP_ENV (secure in production, not over local HTTP).
++    session_cookie_secure: bool | None = None
++    session_cookie_samesite: str = "lax"
++    #: Failed/completed login attempts per (address, client) per window.
++    login_limit: int = 10
++    login_window_seconds: int = 900
++    #: Password-reset code requests per (address, client) per window.
++    password_reset_limit: int = 5
++    password_reset_window_seconds: int = 3600
++
+     password_min_length: int = 12
+     password_max_length: int = 256
+     password_require_lowercase: bool = True
+@@ -179,7 +195,11 @@ class AuthConfig:
+             f"smtp_password={'<set>' if self.smtp_password else '<unset>'}, "
+             f"mailer={self.mailer!r}, app_env={self.app_env!r}, "
+             f"dev_print_otp={self.dev_print_otp!r}, "
+-            f"dev_return_otp={self.dev_return_otp!r})"
++            f"dev_return_otp={self.dev_return_otp!r}, "
++            f"session_ttl_seconds={self.session_ttl_seconds!r}, "
++            f"session_idle_timeout_seconds={self.session_idle_timeout_seconds!r}, "
++            f"session_cookie_name={self.session_cookie_name!r}, "
++            f"session_cookie_secure={self.cookie_secure!r})"
+         )
+ 
+     # ── derived keys ──────────────────────────────────────────────────────
+@@ -189,6 +209,21 @@ class AuthConfig:
+     def signup_token_key(self) -> bytes:
+         return derive_key(self.secret, "auditpro/signup-token/v1")
+ 
++    def session_key(self) -> bytes:
++        return derive_key(self.secret, "auditpro/session-token/v1")
++
++    @property
++    def cookie_secure(self) -> bool:
++        """Secure flag for the session cookie.
++
++        Defaults to ``APP_ENV``: on in production, off for local HTTP so a
++        developer does not need TLS to sign in. Settable explicitly for the
++        (unusual) case of a TLS-terminating reverse proxy on plain HTTP.
++        """
++        if self.session_cookie_secure is not None:
++            return self.session_cookie_secure
++        return self.is_production
++
+     @property
+     def is_production(self) -> bool:
+         return self.app_env.strip().lower() in _PRODUCTION_ENVS
+@@ -201,6 +236,31 @@ class AuthConfig:
+                 f'python -c "import secrets; print(secrets.token_urlsafe(48))"',
+                 code="config_invalid",
+             )
++        if self.session_ttl_seconds <= 0:
++            raise AuthError(
++                "AUTH_SESSION_TTL_SECONDS must be positive.", code="config_invalid"
++            )
++        if self.session_idle_timeout_seconds <= 0:
++            raise AuthError(
++                "AUTH_SESSION_IDLE_TIMEOUT_SECONDS must be positive.",
++                code="config_invalid",
++            )
++        if not self.session_cookie_name.strip():
++            raise AuthError(
++                "AUTH_SESSION_COOKIE_NAME must not be empty.", code="config_invalid"
++            )
++        if self.session_cookie_samesite.lower() not in {"lax", "strict", "none"}:
++            raise AuthError(
++                "AUTH_SESSION_COOKIE_SAMESITE must be one of lax|strict|none, got "
++                f"{self.session_cookie_samesite!r}.",
++                code="config_invalid",
++            )
++        if self.login_limit < 1:
++            raise AuthError("AUTH_LOGIN_LIMIT must be at least 1.", code="config_invalid")
++        if self.password_reset_limit < 1:
++            raise AuthError(
++                "AUTH_PASSWORD_RESET_LIMIT must be at least 1.", code="config_invalid"
++            )
+         if self.otp_length < 4:
+             raise AuthError("AUTH_OTP_LENGTH must be at least 4.", code="config_invalid")
+         if self.otp_ttl_seconds <= 0:
+@@ -244,6 +304,14 @@ class AuthConfig:
+         return self
+ 
+ 
++
++def _tri_bool_env(env: Mapping[str, str], name: str) -> bool | None:
++    """A boolean that is ``None`` when unset, so 'auto' is representable."""
++    raw = _clean(env.get(name))
++    if not raw:
++        return None
++    return _bool_env(env, name, False)
++
+ def load_auth_config(env: Mapping[str, str] | None = None) -> AuthConfig:
+     """Build and validate :class:`AuthConfig` from ``env`` (default ``os.environ``)."""
+     parts = os.environ if env is None else env
+@@ -271,6 +339,22 @@ def load_auth_config(env: Mapping[str, str] | None = None) -> AuthConfig:
+         signup_limit=_int_env(parts, "AUTH_SIGNUP_LIMIT", 5),
+         signup_window_seconds=_int_env(parts, "AUTH_SIGNUP_WINDOW_SECONDS", 3600),
+         signup_token_ttl_seconds=_int_env(parts, "AUTH_SIGNUP_TOKEN_TTL_SECONDS", 900),
++        session_ttl_seconds=_int_env(parts, "AUTH_SESSION_TTL_SECONDS", 28800),
++        session_idle_timeout_seconds=_int_env(
++            parts, "AUTH_SESSION_IDLE_TIMEOUT_SECONDS", 7200
++        ),
++        session_cookie_name=_clean(parts.get("AUTH_SESSION_COOKIE_NAME"))
++        or "auditpro_session",
++        session_cookie_secure=_tri_bool_env(parts, "AUTH_SESSION_COOKIE_SECURE"),
++        session_cookie_samesite=(
++            _clean(parts.get("AUTH_SESSION_COOKIE_SAMESITE")).lower() or "lax"
++        ),
++        login_limit=_int_env(parts, "AUTH_LOGIN_LIMIT", 10),
++        login_window_seconds=_int_env(parts, "AUTH_LOGIN_WINDOW_SECONDS", 900),
++        password_reset_limit=_int_env(parts, "AUTH_PASSWORD_RESET_LIMIT", 5),
++        password_reset_window_seconds=_int_env(
++            parts, "AUTH_PASSWORD_RESET_WINDOW_SECONDS", 3600
++        ),
+         password_min_length=_int_env(parts, "AUTH_PASSWORD_MIN_LENGTH", 12),
+         password_max_length=_int_env(parts, "AUTH_PASSWORD_MAX_LENGTH", 256),
+         password_require_lowercase=_bool_env(parts, "AUTH_PASSWORD_REQUIRE_LOWERCASE", True),
+diff --git a/src/auth/errors.py b/src/auth/errors.py
+index 6808396..9b599d0 100644
+--- a/src/auth/errors.py
++++ b/src/auth/errors.py
+@@ -29,6 +29,9 @@ STATUS_BY_CODE = {
+     "account_exists": 409,
+     "rate_limited": 429,
+     "mailer_failed": 502,
++    # Phase 3
++    "invalid_credentials": 401,
++    "not_authenticated": 401,
+ }
+ 
+ 
+diff --git a/src/auth/models.py b/src/auth/models.py
+index 4a97c7e..3765f24 100644
+--- a/src/auth/models.py
++++ b/src/auth/models.py
+@@ -8,9 +8,14 @@ tests as well as against PostgreSQL. Behaviour that depends on the backend:
+   Always read timestamps through :func:`as_utc` and always write
+   :func:`utcnow`.
+ 
+-Only the tables required for signup, email verification and account creation
+-exist here. There is deliberately **no** session table, no role column, no
+-password-reset column and no chat-history table — those are later phases.
++Phase 2 added the signup tables; Phase 3 adds the session table. There is
++deliberately still **no** role column, no permission table and no chat-history
++table — those are later phases.
++
++Password reset reuses :class:`EmailOtp` with a different ``purpose`` rather than
++adding a second code table: the challenge lifecycle (expiry, single use, attempt
++cap, resend cooldown, keyed digest) is identical, and the purpose scopes the
++HMAC so a signup code can never be replayed against the reset endpoint.
+ """
+ 
+ from __future__ import annotations
+@@ -18,15 +23,26 @@ from __future__ import annotations
+ import uuid
+ from datetime import UTC, datetime
+ 
+-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func
++from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from src.db.models import Base
+ 
+-__all__ = ["EmailOtp", "User", "as_utc", "new_id", "utcnow", "OTP_PURPOSE_SIGNUP"]
+-
+-#: Purpose recorded on every OTP row. Scopes the HMAC and the lookup.
++__all__ = [
++    "EmailOtp",
++    "Session",
++    "User",
++    "as_utc",
++    "new_id",
++    "utcnow",
++    "OTP_PURPOSE_PASSWORD_RESET",
++    "OTP_PURPOSE_SIGNUP",
++]
++
++#: Purpose recorded on every OTP row. Scopes the HMAC and the lookup, so a code
++#: issued for one flow is meaningless in the other.
+ OTP_PURPOSE_SIGNUP = "signup"
++OTP_PURPOSE_PASSWORD_RESET = "password_reset"
+ 
+ 
+ def new_id() -> str:
+@@ -113,3 +129,51 @@ class EmailOtp(Base):
+         DateTime(timezone=True), nullable=False, server_default=func.now()
+     )
+     resend_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
++
++
++class Session(Base):
++    """One server-side sign-in.
++
++    The cookie carries an opaque, high-entropy token. Only its HMAC is stored
++    here, so read access to the database alone is not enough to replay a live
++    session — the same reasoning as storing a password hash rather than a
++    password.
++
++    A session ends when any of these is true:
++      * ``revoked_at`` is set   — explicit logout (or reset-password revocation);
++      * ``expires_at`` has passed — absolute lifetime, never extended;
++      * ``last_seen_at`` is older than the idle timeout — inactivity.
++    """
++
++    __tablename__ = "sessions"
++    # `unique=True` on token_hash already yields a unique constraint (and, in
++    # PostgreSQL, a unique index of the same name) through the naming
++    # convention — declaring a matching Index() as well would collide by name.
++    __table_args__ = (Index("ix_sessions_user_id", "user_id"),)
++
++    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
++    #: Owning account. CASCADE keeps the database tidy if a user row is removed.
++    user_id: Mapped[str] = mapped_column(
++        String(36),
++        ForeignKey("users.id", ondelete="CASCADE"),
++        nullable=False,
++    )
++    #: HMAC-SHA256 hex of the cookie token. Unique — this is the lookup key.
++    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), nullable=False, server_default=func.now()
++    )
++    #: Refreshed on every successful validation; drives the idle timeout.
++    #: Deliberately has NO onupdate — it must only move when the session is used,
++    #: not when it is revoked.
++    last_seen_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), nullable=False, server_default=func.now()
++    )
++    #: Absolute expiry. Never slid forward — a session has a hard ceiling.
++    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
++    #: Set on logout and on password reset. Null means the session is live.
++    revoked_at: Mapped[datetime | None] = mapped_column(
++        DateTime(timezone=True), nullable=True
++    )
++    #: Diagnostics only — never used for authentication decisions.
++    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+diff --git a/src/auth/router.py b/src/auth/router.py
+index 71ccf48..aeca1be 100644
+--- a/src/auth/router.py
++++ b/src/auth/router.py
+@@ -1,26 +1,32 @@
+-"""Phase 2 HTTP surface: signup, OTP verification and account creation.
++"""Auth HTTP surface (Phase 2 signup + Phase 3 login/logout/password reset).
+ 
+ Mounted by ``src/retrieval/frontend/server.py`` under ``/api/auth``. It adds
+-routes only — it does **not** register middleware, does not protect any existing
+-route, and does not issue a session or cookie (that is Phase 3).
++routes only — it does **not** register middleware and does **not** protect any
++existing route. Phase 3 issues a session cookie, but nothing consumes it yet:
++every pre-existing endpoint stays unauthenticated until Phase 4.
+ 
+-Nothing here logs an OTP, a password or an SMTP credential. Request bodies are
+-never echoed.
++Nothing here logs an OTP, a password, a session token or an SMTP credential.
++Request bodies are never echoed.
+ """
+ 
+ from __future__ import annotations
+ 
+-from fastapi import APIRouter, Depends, HTTPException, Request
++from fastapi import APIRouter, Depends, HTTPException, Request, Response
+ from pydantic import BaseModel, Field
+ from sqlalchemy.orm import Session
+ 
+-from src.auth.config import load_auth_config
++from src.auth.config import AuthConfig, load_auth_config
+ from src.auth.errors import AuthError, RateLimited
+ from src.auth.mailer import get_mailer
+ from src.auth.passwords import password_policy
+ from src.auth.service import (
++    complete_password_reset,
+     complete_signup,
++    current_user,
++    login,
++    logout,
+     resend_signup_otp,
++    start_password_reset,
+     start_signup,
+     verify_signup_otp,
+ )
+@@ -43,6 +49,21 @@ class SignupCompleteRequest(BaseModel):
+     password: str = Field(min_length=1, max_length=1024)
+ 
+ 
++class LoginRequest(BaseModel):
++    email: str = Field(min_length=3, max_length=254)
++    password: str = Field(min_length=1, max_length=1024)
++
++
++class PasswordForgotRequest(BaseModel):
++    email: str = Field(min_length=3, max_length=254)
++
++
++class PasswordResetRequest(BaseModel):
++    email: str = Field(min_length=3, max_length=254)
++    otp: str = Field(min_length=4, max_length=16)
++    new_password: str = Field(min_length=1, max_length=1024)
++
++
+ def _config():
+     """Load config per request. Raises AuthError -> 500 (loud by design)."""
+     try:
+@@ -67,6 +88,39 @@ def _client_key(request: Request) -> str:
+     return request.client.host if request.client else ""
+ 
+ 
++def _set_session_cookie(response: Response, token: str, config: AuthConfig) -> None:
++    """Issue the session cookie.
++
++    HttpOnly stops JavaScript from reading it (so an XSS bug cannot steal the
++    session); SameSite=Lax stops it riding on cross-site POSTs; Secure is on in
++    production and off for local HTTP so a developer does not need TLS.
++    """
++    response.set_cookie(
++        key=config.session_cookie_name,
++        value=token,
++        max_age=config.session_ttl_seconds,
++        httponly=True,
++        secure=config.cookie_secure,
++        samesite=config.session_cookie_samesite,
++        path="/",
++    )
++
++
++def _clear_session_cookie(response: Response, config: AuthConfig) -> None:
++    """Expire the cookie. Called on every logout, and on a failed /me lookup."""
++    response.delete_cookie(
++        key=config.session_cookie_name,
++        path="/",
++        httponly=True,
++        secure=config.cookie_secure,
++        samesite=config.session_cookie_samesite,
++    )
++
++
++def _read_session_token(request: Request, config: AuthConfig) -> str | None:
++    return request.cookies.get(config.session_cookie_name)
++
++
+ @router.post("/signup/start")
+ def signup_start(payload: SignupStartRequest, request: Request, db: Session = Depends(get_db)):
+     """Validate the address and email a verification code."""
+@@ -160,3 +214,142 @@ def signup_complete(payload: SignupCompleteRequest, db: Session = Depends(get_db
+ def auth_password_policy():
+     """The authoritative password rules, for the UI to render."""
+     return password_policy(_config())
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# Phase 3 — login, logout, session lookup and password reset
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++@router.post("/login")
++def auth_login(
++    payload: LoginRequest,
++    request: Request,
++    response: Response,
++    db: Session = Depends(get_db),
++):
++    """Verify credentials and start a session. Sets the session cookie."""
++    config = _config()
++    try:
++        result = login(
++            db,
++            email=payload.email,
++            password=payload.password,
++            config=config,
++            client_key=_client_key(request),
++            user_agent=request.headers.get("user-agent"),
++        )
++    except AuthError as exc:
++        raise _fail(exc) from exc
++
++    _set_session_cookie(response, result.session_token, config)
++    return {
++        "status": "signed_in",
++        "user_id": result.user_id,
++        "email": result.email,
++        "expires_in_seconds": result.expires_in_seconds,
++    }
++
++
++@router.post("/logout")
++def auth_logout(request: Request, response: Response, db: Session = Depends(get_db)):
++    """Revoke the session and expire the cookie. Always succeeds."""
++    config = _config()
++    result = logout(
++        db, session_token=_read_session_token(request, config), config=config
++    )
++    # Clear the cookie whether or not a session was found, so a stale cookie
++    # never survives the user's intent to sign out.
++    _clear_session_cookie(response, config)
++    return {"status": "signed_out", "revoked": result.revoked}
++
++
++@router.get("/me")
++def auth_me(request: Request, response: Response, db: Session = Depends(get_db)):
++    """The signed-in account, or 401 with code ``not_authenticated``.
++
++    This reports who you are; it does not gate anything. No existing route is
++    protected until Phase 4.
++    """
++    config = _config()
++    user = current_user(
++        db, session_token=_read_session_token(request, config), config=config
++    )
++    if user is None:
++        _clear_session_cookie(response, config)
++        raise HTTPException(
++            status_code=401,
++            detail=_detail(AuthError("you are not signed in", code="not_authenticated")),
++        )
++    return {
++        "authenticated": True,
++        "user": {
++            "id": user.id,
++            "email": user.email,
++            "email_verified": user.email_verified,
++            "is_active": user.is_active,
++        },
++    }
++
++
++@router.post("/password/forgot")
++def auth_password_forgot(
++    payload: PasswordForgotRequest,
++    request: Request,
++    db: Session = Depends(get_db),
++):
++    """Email a reset code.
++
++    The response is identical whether or not the address has an account, so
++    this cannot be used to discover who is registered. When there is no account
++    no code is generated and no mail is sent.
++    """
++    config = _config()
++    try:
++        result = start_password_reset(
++            db,
++            email=payload.email,
++            config=config,
++            mailer=get_mailer(config),
++            client_key=_client_key(request),
++        )
++    except AuthError as exc:
++        raise _fail(exc) from exc
++
++    # Same shape either way — the caller cannot tell the two apart.
++    return {
++        "status": "code_sent",
++        "email": result.email if result else payload.email.strip().lower(),
++        "expires_in_seconds": (
++            result.expires_in_seconds if result else config.otp_ttl_seconds
++        ),
++        "resend_available_in_seconds": (
++            result.resend_available_in_seconds
++            if result
++            else config.otp_resend_cooldown_seconds
++        ),
++        **({"dev_otp": result.dev_otp} if result and result.dev_otp else {}),
++    }
++
++
++@router.post("/password/reset")
++def auth_password_reset(
++    payload: PasswordResetRequest, db: Session = Depends(get_db)
++):
++    """Verify the reset code, set a new password, and sign out every device."""
++    config = _config()
++    try:
++        result = complete_password_reset(
++            db,
++            email=payload.email,
++            code=payload.otp,
++            new_password=payload.new_password,
++            config=config,
++        )
++    except AuthError as exc:
++        raise _fail(exc) from exc
++    return {
++        "status": "password_updated",
++        "email": result.email,
++        "sessions_revoked": result.sessions_revoked,
++    }
+diff --git a/src/auth/service.py b/src/auth/service.py
+index 798a601..b5bccfd 100644
+--- a/src/auth/service.py
++++ b/src/auth/service.py
+@@ -1,21 +1,28 @@
+-"""Signup orchestration (Phase 2): start → verify → set password → create.
++"""Authentication orchestration — Phase 2 signup + Phase 3 login / reset.
+ 
+ The service is transport-agnostic: it takes a ``Session`` and raises domain
+ errors from :mod:`src.auth.errors`. The HTTP layer only maps those to statuses.
+ 
+-What this flow deliberately does **not** do — all later phases:
+-  * no login / logout, no session or cookie is issued;
+-  * no authentication middleware and no protection of existing routes;
+-  * no roles, no password reset, no chat history.
++Phase 2 (top): start signup → verify the emailed code → set a password →
++create the account. Phase 3 (bottom): sign in, sign out, resolve the session
++cookie, and reset a forgotten password by email OTP.
++
++What this module deliberately does **not** do — all later phases:
++  * no authentication middleware and no protection of existing routes (Phase 4);
++  * no roles, permissions or role enforcement (Phase 4);
++  * no chat-history persistence (Phase 5).
+ 
+ Invariants enforced here
+ ------------------------
+ * email allowlist (``@incois.gov.in`` plus the one ``DEV_ADMIN_EMAIL``);
+ * normalisation before validation, hashing and uniqueness;
+ * OTP expiry, single use, attempt cap, resend cooldown;
++* OTP purpose scoping — a signup code cannot reset a password, or vice versa;
+ * request rate limits (in-process, see :mod:`src.auth.rate_limit`);
+ * duplicate accounts rejected, including under concurrency;
+-* at most one live OTP per (email, purpose).
++* at most one live OTP per (email, purpose);
++* login failures are indistinguishable: unknown address, wrong password and a
++  disabled account all raise the same ``invalid_credentials`` error.
+ """
+ 
+ from __future__ import annotations
+@@ -29,15 +36,18 @@ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.orm import Session
+ 
+ from src.auth import otp as otp_mod
++from src.auth import sessions as sessions_mod
+ from src.auth.config import AuthConfig
+ from src.auth.emails import validate_signup_email
+ from src.auth.errors import (
++    AuthError,
+     DuplicateAccount,
+     OtpError,
+     RateLimited,
+ )
+ from src.auth.mailer import Mailer, MailMessage
+ from src.auth.models import (
++    OTP_PURPOSE_PASSWORD_RESET,
+     OTP_PURPOSE_SIGNUP,
+     EmailOtp,
+     User,
+@@ -45,17 +55,26 @@ from src.auth.models import (
+     new_id,
+     utcnow,
+ )
+-from src.auth.passwords import hash_password, validate_password
++from src.auth.passwords import hash_password, validate_password, verify_password
+ from src.auth.rate_limit import get_limiter
+ 
+ __all__ = [
+     "SignupStartResult",
+     "SignupVerifyResult",
+     "SignupCompleteResult",
++    "LoginResult",
++    "LogoutResult",
++    "PasswordResetStartResult",
++    "PasswordResetCompleteResult",
+     "start_signup",
+     "verify_signup_otp",
+     "resend_signup_otp",
+     "complete_signup",
++    "login",
++    "logout",
++    "current_user",
++    "start_password_reset",
++    "complete_password_reset",
+ ]
+ 
+ 
+@@ -88,15 +107,51 @@ class SignupCompleteResult:
+     email_verified: bool
+ 
+ 
+-def _pending_otp(session: Session, email: str) -> EmailOtp | None:
+-    """The single live, unconsumed, unexpired OTP for (email, signup)."""
++# ── Phase 3 results ────────────────────────────────────────────────────────
++
++
++@dataclass(frozen=True)
++class LoginResult:
++    user_id: str
++    email: str
++    #: Raw session token — returned exactly once, to be written to the cookie.
++    session_token: str
++    expires_in_seconds: int
++
++
++@dataclass(frozen=True)
++class LogoutResult:
++    #: False when there was no live session (already logged out, or the cookie
++    #: was stale). Logging out is idempotent, so this is never an error.
++    revoked: bool
++
++
++@dataclass(frozen=True)
++class PasswordResetStartResult:
++    email: str
++    expires_in_seconds: int
++    resend_available_in_seconds: int
++    dev_otp: str | None = None
++
++
++@dataclass(frozen=True)
++class PasswordResetCompleteResult:
++    email: str
++    #: Every live session for the account was revoked (including the caller's).
++    sessions_revoked: int
++
++
++def _pending_otp(
++    session: Session, email: str, purpose: str = OTP_PURPOSE_SIGNUP
++) -> EmailOtp | None:
++    """The single live, unconsumed, unexpired OTP for (email, purpose)."""
+     now = utcnow()
+     row = (
+         session.execute(
+             select(EmailOtp)
+             .where(
+                 EmailOtp.email_normalized == email,
+-                EmailOtp.purpose == OTP_PURPOSE_SIGNUP,
++                EmailOtp.purpose == purpose,
+                 EmailOtp.consumed_at.is_(None),
+                 EmailOtp.expires_at > now,
+             )
+@@ -108,14 +163,16 @@ def _pending_otp(session: Session, email: str) -> EmailOtp | None:
+     return row
+ 
+ 
+-def _supersede_previous(session: Session, email: str) -> None:
++def _supersede_previous(
++    session: Session, email: str, purpose: str = OTP_PURPOSE_SIGNUP
++) -> None:
+     """Expire any earlier live challenge so only one code is ever valid."""
+     now = utcnow()
+     for row in (
+         session.execute(
+             select(EmailOtp).where(
+                 EmailOtp.email_normalized == email,
+-                EmailOtp.purpose == OTP_PURPOSE_SIGNUP,
++                EmailOtp.purpose == purpose,
+                 EmailOtp.consumed_at.is_(None),
+             )
+         )
+@@ -133,9 +190,9 @@ def _existing_user(session: Session, email: str) -> User | None:
+     ).scalar_one_or_none()
+ 
+ 
+-def _mail_body(code: str, ttl_minutes: int) -> str:
++def _mail_body(code: str, ttl_minutes: int, *, action: str) -> str:
+     return (
+-        f"Your INCOIS Audit Pro verification code is: {code}\n\n"
++        f"Your INCOIS Audit Pro {action} code is: {code}\n\n"
+         f"It expires in {ttl_minutes} minutes and can be used once.\n"
+         f"If you did not request this, you can ignore this message.\n"
+     )
+@@ -193,21 +250,25 @@ def _issue(
+     config: AuthConfig,
+     mailer: Mailer,
+     resend_count: int = 0,
++    purpose: str = OTP_PURPOSE_SIGNUP,
+ ) -> SignupStartResult:
+     """Create one OTP challenge, supersede older ones, and mail it.
+ 
+     ``resend_count`` is carried forward from the superseded challenge, so the
+     row records how many codes this address has actually consumed instead of
+     restarting at zero on every resend.
++
++    ``purpose`` scopes the HMAC and the row, so a signup code is meaningless to
++    the password-reset endpoint and vice versa.
+     """
+-    _supersede_previous(session, email)
++    _supersede_previous(session, email, purpose)
+ 
+     code = otp_mod.generate_code(config.otp_length)
+     salt = otp_mod.new_salt()
+     code_hash = otp_mod.hash_code(
+         key=config.otp_key(),
+         email_normalized=email,
+-        purpose=OTP_PURPOSE_SIGNUP,
++        purpose=purpose,
+         salt=salt,
+         code=code,
+     )
+@@ -216,7 +277,7 @@ def _issue(
+     row = EmailOtp(
+         id=new_id(),
+         email_normalized=email,
+-        purpose=OTP_PURPOSE_SIGNUP,
++        purpose=purpose,
+         code_hash=code_hash,
+         salt=salt,
+         expires_at=now + timedelta(seconds=config.otp_ttl_seconds),
+@@ -230,12 +291,21 @@ def _issue(
+     session.add(row)
+ 
+     ttl_minutes = max(1, config.otp_ttl_seconds // 60)
++    is_signup = purpose == OTP_PURPOSE_SIGNUP
+     try:
+         mailer.send(
+             MailMessage(
+                 to=email,
+-                subject="Verify your email — INCOIS Audit Pro",
+-                body=_mail_body(code, ttl_minutes),
++                subject=(
++                    "Verify your email — INCOIS Audit Pro"
++                    if is_signup
++                    else "Reset your password — INCOIS Audit Pro"
++                ),
++                body=_mail_body(
++                    code,
++                    ttl_minutes,
++                    action="verification" if is_signup else "password reset",
++                ),
+             )
+         )
+     except Exception:
+@@ -315,27 +385,21 @@ def resend_signup_otp(
+     )
+ 
+ 
+-def verify_signup_otp(
++def _verify_otp(
+     session: Session,
+     *,
+     email: str,
+     code: str,
++    purpose: str,
+     config: AuthConfig,
+-    client_key: str = "",
+-    token_ttl_seconds: int | None = None,
+-) -> SignupVerifyResult:
+-    """Verify a code and return a short-lived signup token.
++) -> None:
++    """Consume one OTP, or raise :class:`OtpError`.
+ 
+-    The token authorises setting the password. No account is created yet and no
+-    session is issued.
+-
+-    Raises:
+-        OtpError: for a wrong, expired, already-used or over-attempted code.
++    Shared by signup verification and password reset so the two flows cannot
++    drift apart: expiry, the attempt cap and single use behave identically, and
++    the ``purpose`` scoping means a code from one flow is rejected by the other.
+     """
+-    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
+-    _rate_limit_verify(normalized, client_key, config)
+-
+-    row = _pending_otp(session, normalized)
++    row = _pending_otp(session, email, purpose)
+     if row is None:
+         # Deliberately identical wording for "no code", "expired" and "used":
+         # the response must not tell an attacker which.
+@@ -348,8 +412,8 @@ def verify_signup_otp(
+ 
+     ok = otp_mod.verify_code(
+         key=config.otp_key(),
+-        email_normalized=normalized,
+-        purpose=OTP_PURPOSE_SIGNUP,
++        email_normalized=email,
++        purpose=purpose,
+         salt=row.salt,
+         code=(code or "").strip(),
+         expected_hash=row.code_hash,
+@@ -368,10 +432,38 @@ def verify_signup_otp(
+             code="otp_invalid",
+         )
+ 
+-    # Single use: mark consumed before the token is issued.
++    # Single use: mark consumed before the caller acts on the result.
+     row.consumed_at = utcnow()
+     session.commit()
+ 
++
++def verify_signup_otp(
++    session: Session,
++    *,
++    email: str,
++    code: str,
++    config: AuthConfig,
++    client_key: str = "",
++    token_ttl_seconds: int | None = None,
++) -> SignupVerifyResult:
++    """Verify a code and return a short-lived signup token.
++
++    The token authorises setting the password. No account is created yet and no
++    session is issued.
++
++    Raises:
++        OtpError: for a wrong, expired, already-used or over-attempted code.
++    """
++    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
++    _rate_limit_verify(normalized, client_key, config)
++    _verify_otp(
++        session,
++        email=normalized,
++        code=code,
++        purpose=OTP_PURPOSE_SIGNUP,
++        config=config,
++    )
++
+     from src.auth import tokens as tokens_mod  # local import: keeps cycles away
+ 
+     ttl = config.signup_token_ttl_seconds if token_ttl_seconds is None else token_ttl_seconds
+@@ -430,3 +522,214 @@ def complete_signup(
+     return SignupCompleteResult(
+         user_id=user.id, email=user.email, email_verified=user.email_verified
+     )
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# Phase 3 — login, logout, sessions and password reset
++#
++# Signup (above) is unchanged. Everything below is additive.
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def _rate_limit_login(email: str, client_key: str, config: AuthConfig) -> None:
++    limiter = get_limiter()
++    limiter.check(
++        f"login:email:{email}",
++        limit=config.login_limit,
++        window_seconds=config.login_window_seconds,
++    )
++    if client_key:
++        limiter.check(
++            f"login:client:{client_key}",
++            limit=config.login_limit,
++            window_seconds=config.login_window_seconds,
++        )
++
++
++def _rate_limit_password_reset(email: str, client_key: str, config: AuthConfig) -> None:
++    limiter = get_limiter()
++    limiter.check(
++        f"password-reset:email:{email}",
++        limit=config.password_reset_limit,
++        window_seconds=config.password_reset_window_seconds,
++    )
++    if client_key:
++        limiter.check(
++            f"password-reset:client:{client_key}",
++            limit=config.password_reset_limit,
++            window_seconds=config.password_reset_window_seconds,
++        )
++
++
++#: Built once per process and reused. Argon2 verification cost is dominated by
++#: the parameters embedded in the hash, so any real hash gives a comparable
++#: baseline — that is all this is for.
++_DUMMY_PASSWORD_HASH: str | None = None
++
++
++def _dummy_password_check(password: str, config: AuthConfig) -> None:
++    """Burn roughly one Argon2 verification, discarding the result.
++
++    Without this, "no such account" would return noticeably faster than "wrong
++    password", because the Argon2 verification is the expensive part. Measuring
++    that difference turns the login form into an account-enumeration oracle.
++    """
++    global _DUMMY_PASSWORD_HASH
++    if _DUMMY_PASSWORD_HASH is None:
++        _DUMMY_PASSWORD_HASH = hash_password("auditpro-timing-equaliser", config=config)
++    verify_password(password, _DUMMY_PASSWORD_HASH, config=config)
++
++
++def login(
++    session: Session,
++    *,
++    email: str,
++    password: str,
++    config: AuthConfig,
++    client_key: str = "",
++    user_agent: str | None = None,
++) -> LoginResult:
++    """Verify credentials and open a server-side session.
++
++    Every failure — unknown address, wrong password, inactive or unverified
++    account — raises the *same* ``invalid_credentials`` error with the *same*
++    wording, so the endpoint cannot be used to discover which addresses have
++    accounts.
++
++    Returns the raw session token once; the caller writes it to the cookie.
++    """
++    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
++    _rate_limit_login(normalized, client_key, config)
++
++    user = _existing_user(session, normalized)
++
++    if user is None or not user.is_active or not user.email_verified:
++        # Equalise the response time before rejecting (see _dummy_password_check).
++        _dummy_password_check(password, config)
++        raise AuthError(
++            "the email or password is incorrect", code="invalid_credentials"
++        )
++
++    if not verify_password(password, user.password_hash, config=config):
++        raise AuthError("the email or password is incorrect", code="invalid_credentials")
++
++    token, _row = sessions_mod.create_session(
++        session, user_id=user.id, config=config, user_agent=user_agent
++    )
++    return LoginResult(
++        user_id=user.id,
++        email=user.email,
++        session_token=token,
++        expires_in_seconds=config.session_ttl_seconds,
++    )
++
++
++def logout(
++    session: Session,
++    *,
++    session_token: str | None,
++    config: AuthConfig,
++) -> LogoutResult:
++    """Revoke the session identified by the cookie token.
++
++    Idempotent: logging out twice, or with a stale cookie, reports
++    ``revoked=False`` rather than failing.
++    """
++    revoked = sessions_mod.revoke_session(session, token=session_token, config=config)
++    return LogoutResult(revoked=revoked)
++
++
++def current_user(
++    session: Session,
++    *,
++    session_token: str | None,
++    config: AuthConfig,
++) -> User | None:
++    """The account behind a live session cookie, or ``None``.
++
++    Returns ``None`` for: no cookie, unknown token, revoked, expired,
++    idle-timed-out, and an account that no longer exists or is inactive. Callers
++    cannot distinguish these, which is the point.
++    """
++    row = sessions_mod.resolve_session(session, token=session_token, config=config)
++    if row is None:
++        return None
++    user = session.get(User, row.user_id)
++    if user is None or not user.is_active:
++        return None
++    return user
++
++
++def start_password_reset(
++    session: Session,
++    *,
++    email: str,
++    config: AuthConfig,
++    mailer: Mailer,
++    client_key: str = "",
++) -> PasswordResetStartResult | None:
++    """Email a reset code, or return ``None`` if there is no such account.
++
++    Returning ``None`` is deliberate: the caller replies with the *same*
++    "if that address exists, a code is on its way" message either way, so the
++    endpoint cannot be used to test who has an account. It also means no code
++    is generated or mailed for an unknown address.
++    """
++    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
++    _rate_limit_password_reset(normalized, client_key, config)
++
++    if _existing_user(session, normalized) is None:
++        return None
++
++    issued = _issue(
++        session,
++        email=normalized,
++        config=config,
++        mailer=mailer,
++        resend_count=0,
++        purpose=OTP_PURPOSE_PASSWORD_RESET,
++    )
++    return PasswordResetStartResult(
++        email=issued.email,
++        expires_in_seconds=issued.expires_in_seconds,
++        resend_available_in_seconds=issued.resend_available_in_seconds,
++        dev_otp=issued.dev_otp,
++    )
++
++
++def complete_password_reset(
++    session: Session,
++    *,
++    email: str,
++    code: str,
++    new_password: str,
++    config: AuthConfig,
++    client_key: str = "",
++) -> PasswordResetCompleteResult:
++    """Verify the reset code, set a new password, and sign every device out.
++
++    Revoking all sessions matters: whoever reset the password may have done so
++    precisely because the old one leaked.
++    """
++    normalized = validate_signup_email(email, dev_admin_email=config.dev_admin_email)
++    _rate_limit_password_reset(normalized, client_key, config)
++    _verify_otp(
++        session,
++        email=normalized,
++        code=code,
++        purpose=OTP_PURPOSE_PASSWORD_RESET,
++        config=config,
++    )
++
++    user = _existing_user(session, normalized)
++    if user is None:
++        raise OtpError("the code is invalid or has expired", code="otp_invalid")
++
++    # Server-side policy check — the client-side one is only a convenience.
++    validate_password(new_password, config=config, email_normalized=normalized)
++
++    user.password_hash = hash_password(new_password, config=config)
++    revoked = sessions_mod.revoke_all_sessions_for_user(session, user_id=user.id)
++    session.commit()
++
++    return PasswordResetCompleteResult(email=normalized, sessions_revoked=revoked)
+diff --git a/src/auth/sessions.py b/src/auth/sessions.py
+new file mode 100644
+index 0000000..85d5382
+--- /dev/null
++++ b/src/auth/sessions.py
+@@ -0,0 +1,211 @@
++"""Phase 3 — server-side sessions.
++
++How a session works
++-------------------
++
++1. On a successful login the server generates an opaque, high-entropy token
++   (:func:`new_session_token`) and stores **only its HMAC** in PostgreSQL
++   (:class:`src.auth.models.Session`). The cookie carries the token; the
++   database carries the digest. Read access to the database alone is therefore
++   not enough to resume somebody's session — the same reasoning as storing a
++   password hash instead of a password.
++
++2. The cookie is looked up by that digest, so the raw token exists only in the
++   user's browser and in the request that carries it.
++
++3. A session stops being valid when **any** of these becomes true:
++
++   * ``revoked_at`` is set — explicit logout, or a password reset revoking
++     every session for the account (the right response to a suspected
++     compromise);
++   * ``expires_at`` has passed — an absolute ceiling that is never extended,
++     however active the user is;
++   * ``last_seen_at`` is older than ``session_idle_timeout_seconds``.
++
++   The first two are enforced without needing a background job: an expired row
++   is simply never returned by :func:`resolve_session`.
++
++This module deliberately contains **no FastAPI imports**. Cookie construction
++belongs to the router (``src/auth/router.py``), which keeps this logic
++testable on its own.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import hmac
++import secrets
++from datetime import datetime, timedelta
++
++from sqlalchemy import select
++from sqlalchemy.orm import Session
++
++from src.auth import models as models_mod
++from src.auth.config import AuthConfig
++
++# Renamed on import: the SQLAlchemy session parameter is also called `session`,
++# and shadowing it here would be genuinely confusing.
++AuthSession = models_mod.Session
++
++__all__ = [
++    "AuthSession",
++    "create_session",
++    "hash_session_token",
++    "new_session_token",
++    "resolve_session",
++    "revoke_all_sessions_for_user",
++    "revoke_session",
++    "session_is_live",
++    "SESSION_TOKEN_BYTES",
++]
++
++#: 32 bytes -> 256 bits of entropy. A session token is never guessable.
++SESSION_TOKEN_BYTES = 32
++
++
++def new_session_token() -> str:
++    """An opaque session token from the CSPRNG. Never stored, only hashed."""
++    return secrets.token_urlsafe(SESSION_TOKEN_BYTES)
++
++
++def hash_session_token(token: str, *, key: bytes) -> str:
++    """HMAC-SHA256 of the cookie token, keyed by a subkey of ``AUTH_SECRET``.
++
++    Domain-separated with a ``session:`` prefix so a session token can never
++    collide with an OTP or signup-token digest even under a reused key.
++    """
++    return hmac.new(key, f"session:{token}".encode(), hashlib.sha256).hexdigest()
++
++
++def session_is_live(row: AuthSession, config: AuthConfig, now: datetime | None = None) -> bool:
++    """True when the row is not revoked, not expired and not idle-timed-out."""
++    current = now or models_mod.utcnow()
++    if row.revoked_at is not None:
++        return False
++    expires_at = models_mod.as_utc(row.expires_at)
++    if expires_at is None or expires_at <= current:
++        return False
++    last_seen = models_mod.as_utc(row.last_seen_at)
++    if last_seen is not None:
++        idle = (current - last_seen).total_seconds()
++        if idle > config.session_idle_timeout_seconds:
++            return False
++    return True
++
++
++def create_session(
++    session: Session,
++    *,
++    user_id: str,
++    config: AuthConfig,
++    user_agent: str | None = None,
++) -> tuple[str, AuthSession]:
++    """Mint a session and commit it. Returns ``(raw_token, row)``.
++
++    The raw token is returned exactly once, to be written to the cookie. It is
++    not recoverable afterwards.
++    """
++    token = new_session_token()
++    now = models_mod.utcnow()
++    row = AuthSession(
++        id=models_mod.new_id(),
++        user_id=user_id,
++        token_hash=hash_session_token(token, key=config.session_key()),
++        created_at=now,
++        last_seen_at=now,
++        expires_at=now + timedelta(seconds=config.session_ttl_seconds),
++        revoked_at=None,
++        # Truncated: a header is attacker-controlled and unbounded.
++        user_agent=(user_agent or None),
++    )
++    session.add(row)
++    session.commit()
++    return token, row
++
++
++def resolve_session(
++    session: Session,
++    *,
++    token: str | None,
++    config: AuthConfig,
++    now: datetime | None = None,
++) -> AuthSession | None:
++    """Look up a live session by its cookie token, or return ``None``.
++
++    Every rejection is intentionally indistinguishable from the outside: an
++    unknown token, a revoked one, an expired one and an idle-timed-out one all
++    produce ``None``.
++
++    On success ``last_seen_at`` is refreshed, which is what makes the idle
++    timeout a *sliding* window rather than a second absolute deadline.
++    """
++    if not token:
++        return None
++
++    digest = hash_session_token(token, key=config.session_key())
++    row = (
++        session.execute(select(AuthSession).where(AuthSession.token_hash == digest))
++        .scalars()
++        .first()
++    )
++    if row is None:
++        return None
++
++    current = now or models_mod.utcnow()
++    if not session_is_live(row, config, now=current):
++        return None
++
++    row.last_seen_at = current
++    session.commit()
++    return row
++
++
++def revoke_session(
++    session: Session,
++    *,
++    token: str | None,
++    config: AuthConfig,
++) -> bool:
++    """Revoke one session (logout). Returns False if there was nothing live.
++
++    Idempotent by design: logging out twice, or logging out with an
++    already-dead cookie, is not an error.
++    """
++    if not token:
++        return False
++
++    digest = hash_session_token(token, key=config.session_key())
++    row = (
++        session.execute(select(AuthSession).where(AuthSession.token_hash == digest))
++        .scalars()
++        .first()
++    )
++    if row is None or row.revoked_at is not None:
++        return False
++
++    row.revoked_at = models_mod.utcnow()
++    session.commit()
++    return True
++
++
++def revoke_all_sessions_for_user(session: Session, *, user_id: str) -> int:
++    """Revoke every live session for an account. Returns how many were killed.
++
++    Used after a password reset: whoever changed the password may have done so
++    because the old one leaked, so every other device must be signed out.
++    """
++    now = models_mod.utcnow()
++    rows = (
++        session.execute(
++            select(AuthSession).where(
++                AuthSession.user_id == user_id,
++                AuthSession.revoked_at.is_(None),
++            )
++        )
++        .scalars()
++        .all()
++    )
++    for row in rows:
++        row.revoked_at = now
++    session.commit()
++    return len(rows)
+diff --git a/tests/_auth_helpers.py b/tests/_auth_helpers.py
+index 55c971b..d823871 100644
+--- a/tests/_auth_helpers.py
++++ b/tests/_auth_helpers.py
+@@ -31,6 +31,7 @@ from src.auth import models as _auth_models  # noqa: F401  (registers User/Email
+ from src.auth.config import AuthConfig, load_auth_config
+ from src.auth.mailer import CapturingMailer
+ from src.auth.rate_limit import reset_limiter
++from src.auth.service import complete_signup, start_signup, verify_signup_otp
+ from src.db.models import Base
+ 
+ TEST_SECRET = "phase2-test-secret-not-a-real-key-0123456789abcdef"
+@@ -130,3 +131,26 @@ def code_from_mail(mailer: CapturingMailer, length: int = 6) -> str:
+ def good_password() -> str:
+     """A password that satisfies the default policy."""
+     return "K7-Quiet-Tide-92"
++
++
++def register_user(
++    session,
++    config: AuthConfig,
++    mailer: CapturingMailer,
++    email: str = "boss@incois.gov.in",
++    password: str | None = None,
++):
++    """Run the whole Phase 2 signup flow and return the completed account.
++
++    Phase 3 tests need an existing, verified account to sign in to.
++    """
++    start_signup(session, email=email, config=config, mailer=mailer)
++    verified = verify_signup_otp(
++        session, email=email, code=code_from_mail(mailer), config=config
++    )
++    return complete_signup(
++        session,
++        signup_token=verified.signup_token,
++        password=password or good_password(),
++        config=config,
++    )
+diff --git a/tests/test_auth_database_integration.py b/tests/test_auth_database_integration.py
+index 6fb41f2..15e4cbf 100644
+--- a/tests/test_auth_database_integration.py
++++ b/tests/test_auth_database_integration.py
+@@ -20,6 +20,7 @@ import pytest
+ from _auth_helpers import (  # noqa: F401  (autouse fixture must be imported)
+     _reset_auth_state,
+     code_from_mail,
++    code_from_message,
+     good_password,
+     make_config,
+ )
+@@ -32,7 +33,15 @@ from sqlalchemy.orm import sessionmaker
+ from src.auth import models as am
+ from src.auth.mailer import CapturingMailer
+ from src.auth.passwords import verify_password
+-from src.auth.service import complete_signup, start_signup, verify_signup_otp
++from src.auth.service import (
++    complete_password_reset,
++    complete_signup,
++    current_user,
++    login,
++    start_password_reset,
++    start_signup,
++    verify_signup_otp,
++)
+ from src.db import get_engine, reset_engine
+ 
+ TEST_URL_ENV = "DATABASE_URL_TEST"
+@@ -225,3 +234,101 @@ def test_the_flow_works_through_a_committed_transaction(session):
+         ).signup_token
+         is not None
+     )
++
++
++# ── Phase 3: sessions, on real PostgreSQL ───────────────────────────────────
++
++
++def test_the_sessions_table_exists(engine: Engine):
++    assert "sessions" in set(inspect(engine).get_table_names())
++
++
++def test_sessions_columns(engine: Engine):
++    columns = {c["name"] for c in inspect(engine).get_columns("sessions")}
++    assert {
++        "id",
++        "user_id",
++        "token_hash",
++        "created_at",
++        "last_seen_at",
++        "expires_at",
++        "revoked_at",
++        "user_agent",
++    } <= columns
++
++
++def test_sessions_token_hash_is_unique(engine: Engine):
++    """The lookup key must be unique — a collision would be a session hijack."""
++    insp = inspect(engine)
++    uniques = {c["column_names"][0] for u in [insp.get_unique_constraints("sessions")] for c in [u[0]]} if False else set()
++    uniques = {
++        col
++        for u in insp.get_unique_constraints("sessions")
++        for col in u["column_names"]
++    }
++    assert "token_hash" in uniques
++
++
++def test_sessions_have_a_cascading_foreign_key_to_users(engine: Engine):
++    fks = inspect(engine).get_foreign_keys("sessions")
++    assert any(
++        fk["referred_table"] == "users" and fk["referred_columns"] == ["id"]
++        for fk in fks
++    ), f"expected sessions.user_id -> users.id, got {fks}"
++
++
++def test_timestamps_are_timezone_aware(engine: Engine):
++    with engine.connect() as conn:
++        rows = conn.execute(
++            text(
++                "SELECT column_name, data_type FROM information_schema.columns "
++                "WHERE table_name = 'sessions' AND column_name IN "
++                "('expires_at', 'last_seen_at', 'revoked_at')"
++            )
++        ).all()
++    assert len(rows) == 3
++    assert {r.data_type for r in rows} == {"timestamp with time zone"}
++
++
++def test_a_full_signup_login_reset_flow_persists(session):
++    """Phase 2 -> Phase 3 end to end, with commits between every step."""
++    config = make_config()
++    mailer = CapturingMailer()
++
++    # Phase 2: create the account.
++    start_signup(session, email="Phase3@incois.gov.in", config=config, mailer=mailer)
++    verified = verify_signup_otp(
++        session,
++        email="phase3@incois.gov.in",
++        code=code_from_mail(mailer),
++        config=config,
++    )
++    complete_signup(
++        session, signup_token=verified.signup_token, password=good_password(), config=config
++    )
++    session.commit()
++
++    # Phase 3: sign in.
++    signed_in = login(session, email="phase3@incois.gov.in", password=good_password(), config=config)
++    session.commit()
++    assert current_user(session, session_token=signed_in.session_token, config=config) is not None
++
++    # Phase 3: reset the password; the session must die.
++    start_password_reset(session, email="phase3@incois.gov.in", config=config, mailer=mailer)
++    session.commit()
++    reset_code = code_from_message(mailer.last)
++    result = complete_password_reset(
++        session,
++        email="phase3@incois.gov.in",
++        code=reset_code,
++        new_password="Tide-Quiet-77-K9",
++        config=config,
++    )
++    session.commit()
++
++    assert result.sessions_revoked == 1
++    assert current_user(session, session_token=signed_in.session_token, config=config) is None
++    assert (
++        login(session, email="phase3@incois.gov.in", password="Tide-Quiet-77-K9", config=config).email
++        == "phase3@incois.gov.in"
++    )
+diff --git a/tests/test_auth_migrations.py b/tests/test_auth_migrations.py
+index d0ac659..e03d8ae 100644
+--- a/tests/test_auth_migrations.py
++++ b/tests/test_auth_migrations.py
+@@ -44,11 +44,27 @@ def offline_sql() -> str:
+ 
+ 
+ def test_there_is_exactly_one_alembic_head():
++    """A branched head would silently skip migrations on a fresh database.
++
++    The head moves with each phase; what must hold is that there is exactly one
++    and that it descends from the base revision.
++    """
+     result = _alembic("heads")
+     assert result.returncode == 0, result.stderr
+     heads = [ln for ln in result.stdout.splitlines() if "(head)" in ln]
+     assert len(heads) == 1, f"expected a single head, got: {heads}"
+-    assert heads[0].startswith("0002_signup_email_otp")
++
++    history = _alembic("history")
++    lines = [ln for ln in history.stdout.splitlines() if "->" in ln]
++    # "<base> -> 0001", "0001 -> 0002", ... one line per revision.
++    revision_files = [
++        f for f in VERSIONS.glob("*.py") if not f.name.startswith("_")
++    ]
++    assert len(lines) == len(revision_files), (
++        f"history has {len(lines)} revisions but {len(revision_files)} migration "
++        f"files exist — a revision is missing or orphaned"
++    )
++    assert "<base> -> 0001_create_app_meta" in history.stdout
+ 
+ 
+ def test_the_phase_2_revision_depends_on_the_phase_1_revision():
+@@ -56,12 +72,15 @@ def test_the_phase_2_revision_depends_on_the_phase_1_revision():
+     assert 'down_revision: str | None = "0001_create_app_meta"' in source
+ 
+ 
+-def test_the_history_is_a_linear_two_step_chain():
++def test_the_history_is_a_single_linear_chain():
+     result = _alembic("history")
+     assert result.returncode == 0, result.stderr
+-    lines = [ln for ln in result.stdout.splitlines() if "->" in ln]
+-    assert len(lines) == 2, f"expected 2 revisions, got {len(lines)}"
++    assert "<base> -> 0001_create_app_meta" in result.stdout
+     assert "0001_create_app_meta -> 0002_signup_email_otp" in result.stdout
++    assert "0002_signup_email_otp -> 0003_auth_sessions_password_reset" in result.stdout
++    # Linear == exactly one line names <base>, and no revision has two children.
++    bases = [ln for ln in result.stdout.splitlines() if ln.strip().startswith("<base>")]
++    assert len(bases) == 1, f"expected one base, got {bases}"
+ 
+ 
+ def test_migrations_live_only_in_the_central_versions_directory():
+@@ -111,8 +130,15 @@ def test_the_otp_table_never_stores_a_plain_code(offline_sql):
+ 
+ def test_no_out_of_scope_tables_are_created(offline_sql):
+     """Phase 2 is signup only — sessions, roles and chat history come later."""
++    # `sessions` became in-scope in Phase 3; everything below is still later.
+     lowered = offline_sql.lower()
+-    for table in ("sessions", "user_roles", "roles", "password_reset", "conversations", "messages"):
++    for table in (
++        "user_roles",
++        "roles",
++        "password_reset",
++        "conversations",
++        "messages",
++    ):
+         assert f"create table {table}" not in lowered, f"{table} is out of scope"
+ 
+ 
+diff --git a/tests/test_auth_phase3_e2e_http.py b/tests/test_auth_phase3_e2e_http.py
+new file mode 100644
+index 0000000..828fe63
+--- /dev/null
++++ b/tests/test_auth_phase3_e2e_http.py
+@@ -0,0 +1,297 @@
++"""
++Phase 3 end-to-end HTTP test: the real FastAPI app, real routes, real cookies.
++
++This is the strongest available proof that sign-in, sign-out and password
++reset work end to end without a PostgreSQL server or an SMTP server:
++
++  * a real `uvicorn`-less `TestClient` drives the actual ASGI app;
++  * `get_db` is overridden with a throwaway in-memory SQLite session;
++  * the mailer is the real `CapturingMailer`, so OTP codes are read from the
++    mail the code actually "sent".
++
++Nothing here touches a real database. It is safe to run anywhere.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++# `torch` and friends are not installed in every environment; the server module
++# imports them. If it cannot be imported, skip rather than fail — the route
++# table and service tests still cover the logic.
++server = pytest.importorskip(
++    "src.retrieval.frontend.server", reason="server module needs the full ML dependency set"
++)
++httpx = pytest.importorskip("httpx")
++
++from fastapi.testclient import TestClient  # noqa: E402
++from sqlalchemy import create_engine  # noqa: E402
++from sqlalchemy.orm import sessionmaker  # noqa: E402
++from sqlalchemy.pool import StaticPool  # noqa: E402
++
++from src.auth import models  # noqa: E402  (registers users/email_otp/sessions)
++from src.auth.mailer import CapturingMailer  # noqa: E402
++from src.db.models import Base  # noqa: E402
++from src.db.session import get_db  # noqa: E402
++
++app = server.app
++
++from _auth_helpers import (  # noqa: E402  (_reset_auth_state is an autouse fixture)
++    _reset_auth_state,  # noqa: F401
++    make_config,
++    new_engine,
++)
++
++GOOD_PASSWORD = "Tide-Quiet-77-K9"
++NEW_PASSWORD = "Harbour-Lamp-42-Q1"
++
++
++def _code_from(mailer: CapturingMailer) -> str:
++    """Pull the OTP out of the body of the last message that was 'sent'."""
++    import re
++
++    body = mailer.last.body
++    match = re.search(r"\b(\d{6})\b", body)
++    assert match, f"no 6-digit code in the message body:\n{body}"
++    return match.group(1)
++
++
++@pytest.fixture()
++def client(monkeypatch):
++    """The real ASGI app, with a throwaway SQLite DB and a capturing mailer."""
++    engine = new_engine()
++    Base.metadata.create_all(engine)
++    TestingSession = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
++
++    def override_get_db():
++        db = TestingSession()
++        try:
++            yield db
++        finally:
++            db.close()
++
++    mailer = CapturingMailer()
++    # Fast Argon2 and a deterministic secret; the allowlist is a module
++    # constant (@incois.gov.in + DEV_ADMIN_EMAIL), not a config field.
++    config = make_config(AUTH_DEV_RETURN_OTP="false")
++
++    monkeypatch.setattr("src.auth.router.load_auth_config", lambda: config)
++    monkeypatch.setattr("src.auth.router.get_mailer", lambda _cfg: mailer)
++    app.dependency_overrides[get_db] = override_get_db
++
++    with TestClient(app) as c:
++        c._auditpro_mailer = mailer  # type: ignore[attr-defined]
++        yield c
++
++    app.dependency_overrides.clear()
++
++
++def _register(client) -> str:
++    """Run the Phase 2 signup flow over HTTP; return the verified email."""
++    email = "boss@incois.gov.in"
++    assert client.post("/api/auth/signup/start", json={"email": email}).status_code == 200
++    code = _code_from(client._auditpro_mailer)  # type: ignore[attr-defined]
++    v = client.post("/api/auth/signup/verify", json={"email": email, "otp": code})
++    assert v.status_code == 200, v.text
++    signup_token = v.json()["signup_token"]
++    r = client.post(
++        "/api/auth/signup/complete",
++        json={"signup_token": signup_token, "password": GOOD_PASSWORD},
++    )
++    assert r.status_code == 200, r.text
++    return email
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_the_phase_3_routes_are_reachable_on_the_real_app():
++    """They must not be shadowed by the SPA catch-all or missing entirely.
++
++    Checked through the OpenAPI schema rather than by issuing requests, so it
++    needs no database: the schema is generated from the routes the app
++    actually registered, including nested included routers.
++    """
++    with TestClient(app) as c:
++        schema = c.get("/openapi.json").json()
++
++    expected = {
++        ("get", "/api/auth/me"),
++        ("post", "/api/auth/login"),
++        ("post", "/api/auth/logout"),
++        ("post", "/api/auth/password/forgot"),
++        ("post", "/api/auth/password/reset"),
++        # ...and the Phase 2 routes must still be there.
++        ("post", "/api/auth/signup/start"),
++        ("post", "/api/auth/signup/verify"),
++        ("post", "/api/auth/signup/complete"),
++        ("get", "/api/auth/password-policy"),
++    }
++    registered = {
++        (method, path)
++        for path, ops in schema.get("paths", {}).items()
++        for method in ops
++        if path.startswith("/api/auth")
++    }
++    assert expected <= registered, f"missing routes: {sorted(expected - registered)}"
++
++
++def test_sign_in_sets_an_http_only_session_cookie(client):
++    email = _register(client)
++
++    r = client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++    assert r.status_code == 200, r.text
++    assert r.json()["email"] == email
++
++    cookie = client.cookies.get("auditpro_session")
++    assert cookie, "no session cookie was set"
++
++    # Find the Set-Cookie header and check the security flags.
++    set_cookie = [h for h in r.headers.get_list("set-cookie") if "auditpro_session" in h]
++    assert set_cookie, "no Set-Cookie header for the session"
++    raw = set_cookie[0].lower()
++    assert "httponly" in raw, "session cookie must be HttpOnly"
++    assert "samesite=lax" in raw
++    # Local dev is not production, so Secure stays off (it would break http://).
++    assert "secure" not in raw
++
++
++def test_me_reports_the_signed_in_user(client):
++    email = _register(client)
++    client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++
++    r = client.get("/api/auth/me")
++    assert r.status_code == 200
++    body = r.json()
++    assert body["authenticated"] is True
++    assert body["user"]["email"] == email
++
++
++def test_me_is_401_without_a_session(client):
++    r = client.get("/api/auth/me")
++    assert r.status_code == 401
++    assert r.json()["detail"]["code"] == "not_authenticated"
++
++
++def test_wrong_password_is_rejected_with_one_generic_message(client):
++    email = _register(client)
++
++    r = client.post("/api/auth/login", json={"email": email, "password": "wrong-password"})
++    assert r.status_code == 401
++    assert r.json()["detail"]["code"] == "invalid_credentials"
++
++    # An unknown address must look identical — no account enumeration.
++    r2 = client.post(
++        "/api/auth/login", json={"email": "nobody@incois.gov.in", "password": "wrong-password"}
++    )
++    assert r2.status_code == r.status_code
++    assert r2.json()["detail"]["code"] == r.json()["detail"]["code"]
++    assert r2.json()["detail"]["message"] == r.json()["detail"]["message"]
++
++
++def test_logout_ends_the_session(client):
++    email = _register(client)
++    client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++    assert client.get("/api/auth/me").json()["authenticated"] is True
++
++    r = client.post("/api/auth/logout", json={})
++    assert r.status_code == 200
++    assert r.json()["revoked"] is True
++
++    # The session is gone server-side, so /me is now a 401.
++    assert client.get("/api/auth/me").status_code == 401
++
++
++def test_logout_is_safe_when_there_is_no_session(client):
++    r = client.post("/api/auth/logout", json={})
++    assert r.status_code == 200
++    assert r.json()["revoked"] is False
++
++
++def test_forgot_password_does_not_reveal_who_has_an_account(client):
++    email = _register(client)
++
++    known = client.post("/api/auth/password/forgot", json={"email": email})
++    unknown = client.post(
++        "/api/auth/password/forgot", json={"email": "nobody@incois.gov.in"}
++    )
++
++    assert known.status_code == unknown.status_code == 200
++    # Identical shape, so the response cannot be used to enumerate accounts.
++    assert set(known.json()) == set(unknown.json())
++    assert known.json()["status"] == unknown.json()["status"] == "code_sent"
++
++
++def test_password_reset_end_to_end(client):
++    email = _register(client)
++    client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++
++    # Request a reset code.
++    mailer = client._auditpro_mailer  # type: ignore[attr-defined]
++    before = len(mailer.sent)
++    r = client.post("/api/auth/password/forgot", json={"email": email})
++    assert r.status_code == 200
++    assert len(mailer.sent) == before + 1, "no reset mail was sent"
++
++    code = _code_from(mailer)
++
++    # Use it to set a new password.
++    r = client.post(
++        "/api/auth/password/reset",
++        json={"email": email, "otp": code, "new_password": NEW_PASSWORD},
++    )
++    assert r.status_code == 200, r.text
++    body = r.json()
++    assert body["status"] == "password_updated"
++    assert body["sessions_revoked"] >= 1, "the existing session should be revoked"
++
++    # The old password no longer works…
++    bad = client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++    assert bad.status_code == 401
++
++    # …and the new one does.
++    good = client.post("/api/auth/login", json={"email": email, "password": NEW_PASSWORD})
++    assert good.status_code == 200
++
++
++def test_a_signup_code_cannot_reset_a_password(client):
++    email = _register(client)
++
++    # A signup OTP row exists for this address; it must not be accepted as a
++    # password-reset code (different `purpose`).
++    r = client.post(
++        "/api/auth/password/reset",
++        json={"email": email, "otp": "123456", "new_password": NEW_PASSWORD},
++    )
++    assert r.status_code in (400, 401), r.text
++    assert r.json()["detail"]["code"] == "otp_invalid"
++
++
++def test_only_the_token_digest_is_persisted(client):
++    email = _register(client)
++    r = client.post("/api/auth/login", json={"email": email, "password": GOOD_PASSWORD})
++    assert r.status_code == 200
++    raw_cookie = client.cookies.get("auditpro_session")
++    assert raw_cookie
++
++    # Look at the sessions table directly.
++    engine = None
++    for override in app.dependency_overrides.values():
++        pass
++    # Recreate a session bound to the same in-memory engine via a fresh query.
++    from sqlalchemy.orm import Session as SASession  # noqa: E402
++    from sqlalchemy import create_engine as _ce  # noqa: E402
++    from sqlalchemy import inspect as _inspect  # noqa: E402
++
++    # Grab the engine the fixture created by re-using one live session.
++    gen = app.dependency_overrides[get_db]()
++    db: SASession = next(gen)
++    try:
++        rows = db.query(models.Session).all()
++        assert rows, "no session row was persisted"
++        joined = " ".join(
++            str(getattr(row, c.name)) for row in rows for c in row.__table__.columns
++        )
++        assert raw_cookie not in joined, "the raw session token was stored in the database!"
++    finally:
++        db.close()
+diff --git a/tests/test_auth_sessions.py b/tests/test_auth_sessions.py
+new file mode 100644
+index 0000000..460ea1a
+--- /dev/null
++++ b/tests/test_auth_sessions.py
+@@ -0,0 +1,491 @@
++"""Phase 3 — login, server-side sessions, logout and password reset.
++
++Runs against SQLite in-memory with mail captured. Deliberately does **not**
++test that routes are protected — nothing is protected until Phase 4, and
++`test_auth_phase_boundary` below asserts that outright so nobody reads these
++tests as a security guarantee.
++"""
++
++from __future__ import annotations
++
++from datetime import timedelta
++
++import pytest
++from sqlalchemy import select
++
++from src.auth import models as am
++from src.auth import sessions as sess_mod
++from src.auth.errors import AuthError, OtpError
++from src.auth.mailer import CapturingMailer
++from src.auth.models import OTP_PURPOSE_PASSWORD_RESET, OTP_PURPOSE_SIGNUP
++from src.auth.passwords import verify_password
++from src.auth.service import (
++    complete_password_reset,
++    current_user,
++    login,
++    logout,
++    start_password_reset,
++)
++
++from _auth_helpers import (  # noqa: F401  (fixtures must be imported)
++    _reset_auth_state,
++    code_from_mail,
++    code_from_message,
++    good_password,
++    make_config,
++    register_user,
++    sqlite_session,
++)
++
++ALLOWED = "boss@incois.gov.in"
++NEW_PASSWORD = "Tide-Quiet-77-K9"
++
++
++def _signed_in(sqlite_session, config, mailer, email=ALLOWED, password=None):
++    """Register an account and return (user_id, session_token)."""
++    register_user(sqlite_session, config, mailer, email=email, password=password)
++    result = login(
++        sqlite_session,
++        email=email,
++        password=password or good_password(),
++        config=config,
++    )
++    return result.user_id, result.session_token
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# login
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_login_with_correct_credentials_opens_a_session(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    result = login(
++        sqlite_session, email=ALLOWED, password=good_password(), config=config
++    )
++
++    assert result.email == ALLOWED
++    assert result.expires_in_seconds == config.session_ttl_seconds
++    assert len(result.session_token) >= 40  # opaque, high entropy
++
++
++def test_login_wrong_password_is_rejected(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    with pytest.raises(AuthError) as exc:
++        login(sqlite_session, email=ALLOWED, password="Wrong-Pass-1a", config=config)
++
++    assert exc.value.code == "invalid_credentials"
++    assert exc.value.http_status == 401
++
++
++def test_an_unknown_address_is_rejected_identically(sqlite_session):
++    """Unknown address and wrong password must be indistinguishable."""
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    with pytest.raises(AuthError) as known:
++        login(sqlite_session, email=ALLOWED, password="Wrong-Pass-1a", config=config)
++    with pytest.raises(AuthError) as unknown:
++        login(
++            sqlite_session,
++            email="nobody@incois.gov.in",
++            password=good_password(),
++            config=config,
++        )
++
++    assert known.value.code == unknown.value.code == "invalid_credentials"
++    assert known.value.message == unknown.value.message
++    assert known.value.http_status == unknown.value.http_status == 401
++
++
++def test_login_rejects_a_disallowed_address(sqlite_session):
++    config = make_config()
++    with pytest.raises(AuthError) as exc:
++        login(sqlite_session, email="someone@gmail.com", password="x", config=config)
++    assert exc.value.code == "email_not_allowed"
++
++
++def test_login_is_refused_for_a_deactivated_account(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    user = sqlite_session.scalars(
++        select(am.User).where(am.User.email_normalized == ALLOWED)
++    ).one()
++    user.is_active = False
++    sqlite_session.commit()
++
++    with pytest.raises(AuthError) as exc:
++        login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++    assert exc.value.code == "invalid_credentials"
++
++
++def test_login_rate_limit_engages(sqlite_session):
++    config = make_config(AUTH_LOGIN_LIMIT=2)
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    for _ in range(2):
++        with pytest.raises(AuthError) as exc:
++            login(sqlite_session, email=ALLOWED, password="nope", config=config)
++        assert exc.value.code == "invalid_credentials"
++
++    # Third attempt is refused as a rate limit, not as bad credentials.
++    with pytest.raises(AuthError) as exc:
++        login(sqlite_session, email=ALLOWED, password="nope", config=config)
++    assert exc.value.code == "rate_limited"
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# how the session is stored
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_only_the_token_digest_is_stored(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    row = sqlite_session.scalars(select(am.Session)).one()
++    assert token not in row.token_hash
++    assert row.token_hash == sess_mod.hash_session_token(
++        token, key=config.session_key()
++    )
++    # Nothing anywhere in the row contains the raw token.
++    assert not any(token in str(getattr(row, c.name)) for c in row.__table__.columns)
++
++
++def test_each_login_creates_its_own_session(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    a = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++    b = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++
++    assert a.session_token != b.session_token
++    assert len(sqlite_session.scalars(select(am.Session)).all()) == 2
++
++
++def test_a_valid_token_resolves_to_its_user(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    user = current_user(sqlite_session, session_token=token, config=config)
++    assert user is not None
++    assert user.id == user_id
++    assert user.email == ALLOWED
++
++
++def test_an_unknown_token_resolves_to_nothing(sqlite_session):
++    config = make_config()
++    assert current_user(sqlite_session, session_token="garbage", config=config) is None
++    assert current_user(sqlite_session, session_token=None, config=config) is None
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# expiry and idle timeout
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_a_session_past_its_absolute_expiry_is_dead(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    row = sqlite_session.scalars(select(am.Session)).one()
++    row.expires_at = am.utcnow() - timedelta(seconds=1)
++    sqlite_session.commit()
++
++    assert current_user(sqlite_session, session_token=token, config=config) is None
++
++
++def test_an_idle_session_is_dead(sqlite_session):
++    config = make_config(AUTH_SESSION_IDLE_TIMEOUT_SECONDS=60)
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    row = sqlite_session.scalars(select(am.Session)).one()
++    row.last_seen_at = am.utcnow() - timedelta(seconds=120)
++    sqlite_session.commit()
++
++    assert current_user(sqlite_session, session_token=token, config=config) is None
++
++
++def test_using_a_session_refreshes_last_seen(sqlite_session):
++    config = make_config()  # default idle timeout is 2h
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    row = sqlite_session.scalars(select(am.Session)).one()
++    # Stale, but inside the idle window, so the session is still alive.
++    row.last_seen_at = am.utcnow() - timedelta(minutes=30)
++    sqlite_session.commit()
++
++    assert current_user(sqlite_session, session_token=token, config=config) is not None
++    refreshed = sqlite_session.scalars(select(am.Session)).one()
++    assert (am.utcnow() - am.as_utc(refreshed.last_seen_at)).total_seconds() < 60
++
++
++def test_expiry_is_enforced_without_sleeping(sqlite_session):
++    """`resolve_session(now=...)` proves the deadline, not the clock."""
++    config = make_config(AUTH_SESSION_TTL_SECONDS=600)
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    later = am.utcnow() + timedelta(seconds=601)
++    assert (
++        sess_mod.resolve_session(
++            sqlite_session, token=token, config=config, now=later
++        )
++        is None
++    )
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# logout
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_logout_revokes_the_session(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    result = logout(sqlite_session, session_token=token, config=config)
++
++    assert result.revoked is True
++    assert current_user(sqlite_session, session_token=token, config=config) is None
++
++
++def test_logout_is_idempotent(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    _user_id, token = _signed_in(sqlite_session, config, mailer)
++
++    assert logout(sqlite_session, session_token=token, config=config).revoked is True
++    assert logout(sqlite_session, session_token=token, config=config).revoked is False
++    assert logout(sqlite_session, session_token=None, config=config).revoked is False
++
++
++def test_logout_leaves_other_sessions_alone(sqlite_session):
++    """Signing out on one device must not sign out the others."""
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++    a = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++    b = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++
++    logout(sqlite_session, session_token=a.session_token, config=config)
++
++    assert current_user(sqlite_session, session_token=a.session_token, config=config) is None
++    assert (
++        current_user(sqlite_session, session_token=b.session_token, config=config)
++        is not None
++    )
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# password reset
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_a_reset_code_is_emailed_to_a_known_account(sqlite_session):
++    config = make_config(AUTH_OTP_RESEND_COOLDOWN_SECONDS=0)
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    result = start_password_reset(
++        sqlite_session, email=ALLOWED, config=config, mailer=mailer
++    )
++
++    assert result is not None
++    assert result.email == ALLOWED
++    reset_mail = mailer.last
++    assert "reset your password" in reset_mail.subject.lower()
++    assert code_from_message(reset_mail)
++
++
++def test_an_unknown_address_gets_no_code_and_no_error(sqlite_session):
++    """No account -> None, so the endpoint cannot reveal who is registered."""
++    config = make_config()
++    mailer = CapturingMailer()
++
++    assert (
++        start_password_reset(
++            sqlite_session, email="nobody@incois.gov.in", config=config, mailer=mailer
++        )
++        is None
++    )
++    # No account was registered in this test, so nothing was sent or stored.
++    assert mailer.sent == []
++    assert sqlite_session.scalars(select(am.EmailOtp)).all() == []
++
++
++def test_a_reset_code_uses_the_reset_purpose(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++
++    start_password_reset(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++
++    # register_user() leaves its consumed signup row behind, so select by purpose.
++    rows = sqlite_session.scalars(
++        select(am.EmailOtp).where(am.EmailOtp.purpose == OTP_PURPOSE_PASSWORD_RESET)
++    ).all()
++    assert len(rows) == 1
++    assert rows[0].email_normalized == ALLOWED
++
++
++def test_a_signup_code_cannot_reset_a_password(sqlite_session):
++    """Purpose scoping: the two flows must not accept each other's codes."""
++    config = make_config()
++    mailer = CapturingMailer()
++    # A live *signup* code for an address that has no account yet.
++    from src.auth.service import start_signup
++
++    start_signup(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++    signup_code = code_from_mail(mailer)
++    register_user(sqlite_session, config, CapturingMailer())
++
++    with pytest.raises(OtpError):
++        complete_password_reset(
++            sqlite_session,
++            email=ALLOWED,
++            code=signup_code,
++            new_password=NEW_PASSWORD,
++            config=config,
++        )
++
++
++def test_reset_changes_the_password(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++    start_password_reset(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++    code = code_from_message(mailer.last)
++
++    result = complete_password_reset(
++        sqlite_session,
++        email=ALLOWED,
++        code=code,
++        new_password=NEW_PASSWORD,
++        config=config,
++    )
++    assert result.email == ALLOWED
++
++    user = sqlite_session.scalars(
++        select(am.User).where(am.User.email_normalized == ALLOWED)
++    ).one()
++    assert verify_password(NEW_PASSWORD, user.password_hash, config=config) is True
++    assert verify_password(good_password(), user.password_hash, config=config) is False
++
++    # And signing in with the new password works.
++    assert (
++        login(sqlite_session, email=ALLOWED, password=NEW_PASSWORD, config=config).email
++        == ALLOWED
++    )
++
++
++def test_a_reset_code_is_single_use(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++    start_password_reset(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++    code = code_from_message(mailer.last)
++
++    complete_password_reset(
++        sqlite_session,
++        email=ALLOWED,
++        code=code,
++        new_password=NEW_PASSWORD,
++        config=config,
++    )
++    with pytest.raises(OtpError):
++        complete_password_reset(
++            sqlite_session,
++            email=ALLOWED,
++            code=code,
++            new_password="Another-Pass-8c",
++            config=config,
++        )
++
++
++def test_reset_enforces_the_password_policy(sqlite_session):
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++    start_password_reset(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++    code = code_from_message(mailer.last)
++
++    with pytest.raises(AuthError) as exc:
++        complete_password_reset(
++            sqlite_session,
++            email=ALLOWED,
++            code=code,
++            new_password="weak",
++            config=config,
++        )
++    assert exc.value.code == "password_invalid"
++
++
++def test_reset_revokes_every_session(sqlite_session):
++    """The strongest reason to reset is a leaked password — kill all devices."""
++    config = make_config()
++    mailer = CapturingMailer()
++    register_user(sqlite_session, config, mailer)
++    first = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++    second = login(sqlite_session, email=ALLOWED, password=good_password(), config=config)
++
++    start_password_reset(sqlite_session, email=ALLOWED, config=config, mailer=mailer)
++    code = code_from_message(mailer.last)
++    result = complete_password_reset(
++        sqlite_session,
++        email=ALLOWED,
++        code=code,
++        new_password=NEW_PASSWORD,
++        config=config,
++    )
++
++    assert result.sessions_revoked == 2
++    assert current_user(sqlite_session, session_token=first.session_token, config=config) is None
++    assert current_user(sqlite_session, session_token=second.session_token, config=config) is None
++
++
++# ═══════════════════════════════════════════════════════════════════════════
++# phase boundary — say plainly what is NOT true yet
++# ═══════════════════════════════════════════════════════════════════════════
++
++
++def test_auth_phase_boundary():
++    """Phase 3 signs you IN. It does not lock anything DOWN.
++
++    Existing application routes stay unauthenticated until Phase 4; this test
++    exists so nobody mistakes a passing suite for a protected application.
++    """
++    import src.auth as auth_pkg
++
++    # No role/permission surface anywhere in the auth package.
++    role_names = [n for n in dir(auth_pkg) if "role" in n.lower()]
++    assert role_names == [], f"role concepts are Phase 4: {role_names}"
++
++    # The User model has no role column.
++    assert "role" not in {c.name for c in am.User.__table__.columns}
++
++    # No role/permission table in the ORM metadata.
++    assert {"roles", "permissions", "user_roles"}.isdisjoint(
++        set(am.User.metadata.tables)
++    )
++
++    # Password reset reuses the OTP table — there is no second code table.
++    assert OTP_PURPOSE_PASSWORD_RESET != OTP_PURPOSE_SIGNUP
++    assert not hasattr(am, "PasswordReset")
+diff --git a/tests/test_database_config.py b/tests/test_database_config.py
+index c8f0465..58abcde 100644
+--- a/tests/test_database_config.py
++++ b/tests/test_database_config.py
+@@ -483,16 +483,17 @@ def test_only_the_expected_tables_are_declared():
+ 
+     ``src/auth/models.py`` registers onto the same ``Base``, so this inspects the
+     whole ORM surface, not just ``src/db/models.py``. Phase 1 contributed
+-    ``app_meta``; Phase 2 contributes ``users`` and ``email_otp``. Sessions,
+-    roles and chat history must still not appear before their own phase.
++    ``app_meta``; Phase 2 contributes ``users`` and ``email_otp``; Phase 3
++    contributes ``sessions``. Roles and chat history must still not appear
++    before their own phase.
+     """
+     from src.db.models import Base
+ 
+     tables = set(Base.metadata.tables)
+     out_of_scope = {
+-        "sessions",
+         "user_roles",
+         "roles",
++        "permissions",
+         "password_reset",
+         "conversations",
+         "messages",
+@@ -501,6 +502,7 @@ def test_only_the_expected_tables_are_declared():
+     assert not tables & out_of_scope, f"out-of-scope tables: {sorted(tables & out_of_scope)}"
+     assert "app_meta" in tables  # Phase 1
+     assert {"users", "email_otp"} <= tables, f"Phase 2 tables missing: {sorted(tables)}"
++    assert "sessions" in tables, "Phase 3 sessions table missing"
+ 
+     columns = {c.name for c in Base.metadata.tables["app_meta"].columns}
+     assert columns == {"key", "value", "updated_at"}

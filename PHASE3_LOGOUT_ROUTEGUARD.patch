@@ -1,0 +1,820 @@
+diff -ruN a/frontend/src/App.tsx b/frontend/src/App.tsx
+--- a/frontend/src/App.tsx	2026-10-15 10:10:16.201297074 +0000
++++ b/frontend/src/App.tsx	2026-10-15 10:10:02.737297074 +0000
+@@ -10,6 +10,8 @@
+ );
+ 
+ import { AppShell } from "@/components/layout/AppShell";
++import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
++import { useSessionCacheBridge } from "@/hooks/useSession";
+ 
+ function Loader() {
+   return (
+@@ -34,12 +36,16 @@
+  * no chat interface, no product tour. `AppShell` (MainLayout + global
+  * overlays) wraps only the in-app routes via `<Outlet />`.
+  *
+- * Phase 3 does not gate anything: in-app routes stay reachable without a
+- * session. Route protection is Phase 4.
++ * In-app routes are gated by `ProtectedRoute`: without a valid session they
++ * redirect to /signin instead of rendering. Note this is a UI convenience —
++ * Phase 3 does not gate the API itself, so the enforcement only begins with
++ * Phase 4. What this DOES fix is a signed-out visitor being shown a screen that
++ * cannot work (every call behind it answers 401).
+  */
+ export function App() {
+   return (
+     <BrowserRouter>
++      <SessionBridge />
+       <Suspense fallback={<Loader />}>
+         <Routes>
+           {/* Standalone auth routes — deliberately no layout wrapper. */}
+@@ -48,11 +54,15 @@
+           <Route path="/signup" element={<Signup />} />
+           <Route path="/forgot-password" element={<ForgotPassword />} />
+ 
+-          {/* In-app routes — these get the dashboard chrome. */}
+-          <Route element={<AppShell />}>
+-            <Route path="/dashboard" element={<Dashboard />} />
+-            <Route path="/workspace" element={<Workspace />} />
+-            <Route path="*" element={<Dashboard />} />
++          {/* In-app routes — these get the dashboard chrome.
++              ProtectedRoute wraps the group rather than each child, so the
++              catch-all and any future in-app route are gated too. */}
++          <Route element={<ProtectedRoute />}>
++            <Route element={<AppShell />}>
++              <Route path="/dashboard" element={<Dashboard />} />
++              <Route path="/workspace" element={<Workspace />} />
++              <Route path="*" element={<Dashboard />} />
++            </Route>
+           </Route>
+         </Routes>
+       </Suspense>
+@@ -61,3 +71,14 @@
+ }
+ 
+ export default App;
++
++/**
++ * Tiny component so the bridge hook can sit inside the router.
++ * Hooks cannot be called conditionally, so it is its own component.
++ */
++function SessionBridge() {
++  // A session that ends between calls must drop cached data, so the next
++  // account to sign in on this tab cannot read the previous one's.
++  useSessionCacheBridge();
++  return null;
++}
+diff -ruN a/frontend/src/__tests__/authFlow.test.tsx b/frontend/src/__tests__/authFlow.test.tsx
+--- a/frontend/src/__tests__/authFlow.test.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/__tests__/authFlow.test.tsx	2026-10-15 10:08:28.629297074 +0000
+@@ -0,0 +1,362 @@
++/**
++ * Regression tests for the two authentication bugs.
++ *
++ *   1. Sign-out took two clicks. The handler cleared the cached session and
++ *      stopped there — it never navigated. The first click only swapped the
++ *      header's log-out icon for a sign-in link; the second click was following
++ *      that link. Nothing was waiting on the response, so no second request was
++ *      involved.
++ *
++ *   2. In-app routes rendered for signed-out visitors. There was no route
++ *      guard at all, so opening /workspace from the address bar (or reloading
++ *      it) painted a working-looking screen whose every API call answered 401.
++ *
++ * `fetch` is the only thing mocked: the real App, router, pages and hooks run.
++ */
++import { useState } from "react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { MemoryRouter, useLocation } from "react-router-dom";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++import App from "@/App";
++import { SESSION_KEY, useSignOut } from "@/hooks/useSession";
++import { useToastStore } from "@/store/useToastStore";
++
++// ── a stand-in auth backend whose session state can be flipped ──────────────
++
++interface MockResponse {
++  status?: number;
++  body?: unknown;
++  headers?: Record<string, string>;
++}
++
++const LOGGED_IN = {
++  authenticated: true,
++  user: { id: "u1", email: "boss@incois.gov.in", email_verified: true, is_active: true, role: "user", is_admin: false },
++};
++
++const NOT_AUTHENTICATED = {
++  code: "not_authenticated",
++  message: "you are not signed in",
++};
++
++const POLICY = {
++  min_length: 12,
++  max_length: 256,
++  require_lowercase: true,
++  require_uppercase: true,
++  require_digit: true,
++  require_symbol: false,
++  rejects_email_substring: true,
++  rejects_common_passwords: true,
++};
++
++/**
++ * The important part is `state.signedIn`: a successful logout flips it, so the
++ * app has to cope with the server genuinely revoking the session rather than
++ * just being told to forget it locally.
++ */
++function makeServer() {
++  const state = { signedIn: true, logoutFails: false };
++  const calls: Array<{ url: string; method: string }> = [];
++
++  const handler = (url: string, init?: RequestInit): MockResponse => {
++    const method = init?.method ?? "GET";
++    calls.push({ url, method });
++
++    if (url.includes("/api/auth/logout")) {
++      if (state.logoutFails) {
++        return { status: 500, body: { detail: { code: "server_error", message: "boom" } } };
++      }
++      // Server-side revocation: /me will now answer 401.
++      state.signedIn = false;
++      return { body: { status: "signed_out", revoked: true } };
++    }
++    if (url.includes("/api/auth/me")) {
++      if (!state.signedIn) return { status: 401, body: { detail: NOT_AUTHENTICATED } };
++      return { body: LOGGED_IN };
++    }
++    if (url.includes("/api/auth/password-policy")) return { body: POLICY };
++    return { body: {} };
++  };
++
++  const logouts = () => calls.filter((c) => c.url.includes("/api/auth/logout"));
++  return { state, calls, handler, logouts };
++}
++
++type Server = ReturnType<typeof makeServer>;
++
++function install(server: Server): void {
++  global.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
++    const result = server.handler(String(input), init);
++    const status = result.status ?? 200;
++    return {
++      ok: status >= 200 && status < 300,
++      status,
++      statusText: "",
++      json: async () => result.body ?? {},
++      headers: { get: (key: string) => result.headers?.[key] ?? null },
++    } as unknown as Response;
++  }) as unknown as typeof fetch;
++}
++
++/**
++ * Render the app at a path with a fresh QueryClient — a fresh client is what a
++ * page reload looks like: nothing cached, so the session has to be re-checked.
++ */
++function renderAppAt(path: string) {
++  window.history.pushState({}, "", path);
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  const view = render(
++    <QueryClientProvider client={client}>
++      <App />
++    </QueryClientProvider>,
++  );
++  return { ...view, client };
++}
++
++/** Present only inside the dashboard shell — the app's protected chrome. */
++const chrome = () => document.querySelector("[data-tour^='header-']");
++
++async function waitForAppReady(): Promise<HTMLElement> {
++  return waitFor(() => {
++    const btn = document.querySelector<HTMLElement>('[data-testid="session-signout"]');
++    expect(btn).not.toBeNull();
++    return btn as HTMLElement;
++  });
++}
++
++// ── tests ──────────────────────────────────────────────────────────────────
++
++describe("sign out", () => {
++  beforeEach(() => {
++    useToastStore.setState({ toasts: [] });
++  });
++
++  afterEach(() => {
++    window.history.pushState({}, "", "/");
++    useToastStore.setState({ toasts: [] });
++  });
++
++  it("lands on /signin after a SINGLE click", async () => {
++    const server = makeServer();
++    install(server);
++    renderAppAt("/workspace");
++
++    const button = await waitForAppReady();
++
++    fireEvent.click(button); // one click, and only one
++
++    await waitFor(() => {
++      expect(window.location.pathname).toBe("/signin");
++    });
++
++    // Exactly one request: the bug's second click never reached the server, it
++    // was following a link. If navigation came from a second interaction, the
++    // endpoint would have been hit twice.
++    expect(server.logouts()).toHaveLength(1);
++    // Protected chrome is gone.
++    expect(chrome()).toBeNull();
++  });
++
++  it("clears the cached session so no screen can render from stale state", async () => {
++    const server = makeServer();
++    install(server);
++    const { client } = renderAppAt("/workspace");
++
++    fireEvent.click(await waitForAppReady());
++
++    await waitFor(() => {
++      expect(client.getQueryData(SESSION_KEY)).toEqual({ authenticated: false, user: null });
++    });
++  });
++
++  it("blocks direct navigation to /workspace after signing out", async () => {
++    const server = makeServer();
++    install(server);
++    renderAppAt("/workspace");
++
++    fireEvent.click(await waitForAppReady());
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++
++    // Sign out again from a clean mount, then walk straight to /workspace as if
++    // it had been typed into the address bar.
++    renderAppAt("/workspace");
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++    expect(document.querySelector('[data-testid="session-signout"]')).toBeNull();
++  });
++
++  it("surfaces an error and stays put when the server refuses the logout", async () => {
++    const server = makeServer();
++    server.state.logoutFails = true;
++    install(server);
++    renderAppAt("/workspace");
++
++    fireEvent.click(await waitForAppReady());
++
++    // The user is told, rather than left in an ambiguous state.
++    await waitFor(() => {
++      expect(screen.getByText(/could not sign you out/i)).toBeTruthy();
++    });
++
++    // Not silently signed out: still on the protected page, and the session is
++    // still valid server-side.
++    expect(window.location.pathname).toBe("/workspace");
++    expect(server.state.signedIn).toBe(true);
++  });
++});
++
++/**
++ * The sign-out handler tested on its own, with no ProtectedRoute in the tree.
++ *
++ * This is the test that pins Bug 1 specifically. The full-app test above would
++ * also pass if only the route guard were fixed — with the session cache cleared,
++ * the guard redirects on the next render, so the symptom disappears even if the
++ * handler never navigates. Relying on that alone would leave sign-out depending
++ * on a re-render rather than doing what the user asked, so the handler is held
++ * to its own behaviour here.
++ */
++describe("useSignOut, independent of the route guard", () => {
++  function LocationProbe() {
++    const location = useLocation();
++    return <span data-testid="loc">{location.pathname}</span>;
++  }
++
++  function SignOutProbe() {
++    const { signOut } = useSignOut();
++    const [result, setResult] = useState("pending");
++    return (
++      <button
++        data-testid="probe"
++        onClick={async () => setResult((await signOut()) ? "ok" : "failed")}
++      >
++        {result}
++      </button>
++    );
++  }
++
++  function renderProbe() {
++    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++    return render(
++      <MemoryRouter initialEntries={["/workspace"]}>
++        <QueryClientProvider client={client}>
++          <LocationProbe />
++          <SignOutProbe />
++        </QueryClientProvider>
++      </MemoryRouter>,
++    );
++  }
++
++  it("navigates to /signin by itself, not via a re-render of the guard", async () => {
++    const server = makeServer();
++    install(server);
++    renderProbe();
++
++    expect(screen.getByTestId("loc").textContent).toBe("/workspace");
++
++    fireEvent.click(screen.getByTestId("probe"));
++
++    await waitFor(() => {
++      expect(screen.getByTestId("loc").textContent).toBe("/signin");
++    });
++    await waitFor(() => {
++      expect(screen.getByTestId("probe").textContent).toBe("ok");
++    });
++    expect(server.logouts()).toHaveLength(1);
++  });
++
++  it("reports failure and does not navigate when the server refuses", async () => {
++    const server = makeServer();
++    server.state.logoutFails = true;
++    install(server);
++    renderProbe();
++
++    fireEvent.click(screen.getByTestId("probe"));
++
++    await waitFor(() => {
++      expect(screen.getByTestId("probe").textContent).toBe("failed");
++    });
++    // No navigation: the session is still live server-side.
++    expect(screen.getByTestId("loc").textContent).toBe("/workspace");
++  });
++});
++
++describe("protected routes", () => {
++  afterEach(() => {
++    window.history.pushState({}, "", "/");
++  });
++
++  it("shows a loading state, then redirects, when /workspace is reloaded while signed out", async () => {
++    const server = makeServer();
++    server.state.signedIn = false; // the session is gone
++    install(server);
++
++    // Fresh QueryClient == a reload: nothing cached, so the app must ask.
++    renderAppAt("/workspace");
++
++    // While it is asking: a loading state, never protected content.
++    expect(screen.getByTestId("auth-loading")).toBeTruthy();
++    expect(chrome()).toBeNull();
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++  });
++
++  it("never paints protected content for a signed-out visitor", async () => {
++    const server = makeServer();
++    server.state.signedIn = false;
++    install(server);
++
++    renderAppAt("/workspace");
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++    expect(screen.queryByTestId("session-signout")).toBeNull();
++  });
++
++  it("redirects the catch-all route too, not just the named ones", async () => {
++    const server = makeServer();
++    server.state.signedIn = false;
++    install(server);
++
++    renderAppAt("/some/unknown/path");
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++  });
++
++  it("lets a signed-in user open /workspace normally", async () => {
++    const server = makeServer();
++    install(server);
++    renderAppAt("/workspace");
++
++    await waitFor(() => {
++      expect(chrome()).not.toBeNull();
++    });
++
++    // No bounce: still where the user asked to be.
++    expect(window.location.pathname).toBe("/workspace");
++    expect(screen.getByTestId("session-signout")).toBeTruthy();
++  });
++
++  it("replaces the history entry so Back cannot return to the protected page", async () => {
++    const server = makeServer();
++    server.state.signedIn = false;
++    install(server);
++
++    window.history.pushState({}, "", "/signin");
++    window.history.pushState({}, "", "/workspace");
++
++    renderAppAt("/workspace");
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++
++    // The /workspace entry was replaced, so going back leaves it behind.
++    window.history.back();
++    await waitFor(() => {
++      expect(window.location.pathname).not.toBe("/workspace");
++    });
++  });
++});
+diff -ruN a/frontend/src/__tests__/signin.test.tsx b/frontend/src/__tests__/signin.test.tsx
+--- a/frontend/src/__tests__/signin.test.tsx	2026-10-15 10:10:16.201297074 +0000
++++ b/frontend/src/__tests__/signin.test.tsx	2026-10-15 10:08:28.629297074 +0000
+@@ -90,6 +90,18 @@
+   return { body: {} };
+ }
+ 
++/**
++ * As `baseHandler`, but `/api/auth/me` reports a valid session.
++ *
++ * Needed by tests that render in-app routes: those are gated now, so a handler
++ * that reports "signed out" would bounce them to /signin before the thing under
++ * test can render.
++ */
++function signedInHandler(url: string): MockResponse | null {
++  if (url.includes("/api/auth/me")) return { body: LOGGED_IN };
++  return baseHandler(url);
++}
++
+ /** Render the whole app at a given path. */
+ function renderAppAt(path: string) {
+   window.history.pushState({}, "", path);
+@@ -179,7 +191,9 @@
+   });
+ 
+   it("the dashboard route DOES get its chrome (the split is real, not a global removal)", async () => {
+-    installFetch(baseHandler);
++    // Signed in: /dashboard is gated, so a signed-out handler would redirect
++    // to /signin and this test would be checking the redirect, not the chrome.
++    installFetch(signedInHandler);
+     renderAppAt("/dashboard");
+ 
+     // The header renders once the lazy chunk resolves.
+@@ -486,18 +500,18 @@
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ describe("phase boundary", () => {
+-  it("in-app routes stay reachable while signed out (gating is Phase 4)", async () => {
++  // Inverted: this used to assert the opposite ("gating is Phase 4"), which
++  // pinned the bug — a signed-out visitor could open an in-app route directly
++  // and see a working-looking screen. In-app routes are gated now.
++  it("in-app routes redirect to /signin while signed out", async () => {
+     installFetch(baseHandler);
+     renderAppAt("/dashboard");
+ 
+-    // If Phase 4's redirect were on, this would bounce to /signin.
+-    // (The dashboard itself navigates on to /workspace, so the assertion is
+-    // "we were not kicked out to an auth route", not an exact path.)
+     await waitFor(() => {
+-      expect(document.querySelector("[data-tour^='header-']")).not.toBeNull();
++      expect(window.location.pathname).toBe("/signin");
+     });
+-    expect(window.location.pathname).not.toBe("/signin");
+-    expect(window.location.pathname).not.toBe("/");
++    // No dashboard chrome may reach a signed-out visitor.
++    expect(document.querySelector("[data-tour^='header-']")).toBeNull();
+   });
+ 
+   it("the sign-in screen offers no role, permission or admin control", async () => {
+diff -ruN a/frontend/src/components/auth/ProtectedRoute.tsx b/frontend/src/components/auth/ProtectedRoute.tsx
+--- a/frontend/src/components/auth/ProtectedRoute.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/components/auth/ProtectedRoute.tsx	2026-10-15 10:08:28.633297074 +0000
+@@ -0,0 +1,50 @@
++/**
++ * Gate for every in-application route.
++ *
++ * Rendered as a layout route, so it wraps Dashboard, Workspace and the
++ * catch-all — a nested or newly added in-app route cannot sidestep it by
++ * simply not knowing about it.
++ *
++ * Three rules, in order:
++ *
++ *   1. While the session lookup is in flight, show a loading state. Never
++ *      protected content: "we have not asked yet" is not "yes".
++ *   2. Signed out -> redirect to sign-in, `replace`d so the Back button cannot
++ *      return here.
++ *   3. Otherwise render the child route.
++ *
++ * This is presentation-layer routing only. It keeps signed-out visitors from
++ * looking at a screen that cannot work; it is not what stops them reading
++ * data. The backend enforces that, and every protected endpoint returns 401
++ * without a valid session.
++ */
++
++import { Navigate, Outlet } from "react-router-dom";
++import { useSession } from "@/hooks/useSession";
++
++export function ProtectedRoute() {
++  const { status } = useSession();
++
++  if (status === "loading") {
++    return (
++      <div
++        data-testid="auth-loading"
++        role="status"
++        aria-live="polite"
++        className="flex h-screen w-full items-center justify-center text-xs text-muted"
++      >
++        Checking your session…
++      </div>
++    );
++  }
++
++  if (status === "unauthenticated") {
++    // `replace` so the protected URL is not left in history: Back would
++    // otherwise land the user on a page they are no longer allowed to see.
++    return <Navigate to="/signin" replace />;
++  }
++
++  return <Outlet />;
++}
++
++export default ProtectedRoute;
+diff -ruN a/frontend/src/components/layout/SessionMenu.tsx b/frontend/src/components/layout/SessionMenu.tsx
+--- a/frontend/src/components/layout/SessionMenu.tsx	2026-10-15 10:10:16.201297074 +0000
++++ b/frontend/src/components/layout/SessionMenu.tsx	2026-10-15 10:08:28.633297074 +0000
+@@ -1,36 +1,27 @@
+ /**
+- * Header account chip: who is signed in, and a way to sign out.
++ * Header account chip: who is signed in, and a one-click way to sign out.
+  *
+- * Phase 3 signs you IN. It does not lock anything DOWN — this control reports
+- * session state and offers sign-out; it gates nothing. Existing routes stay
+- * reachable without a session until Phase 4.
++ * Sign-out revokes the session server-side, clears the cache and navigates to
++ * /signin. It does not wait for a later request to fail and notice — the
++ * redirect is explicit, so a single click is enough.
+  */
+-import { useQuery, useQueryClient } from "@tanstack/react-query";
+ import { LogIn, LogOut, User as UserIcon } from "lucide-react";
+ import { Link } from "react-router-dom";
+ import { Button } from "@/components/ui/button";
+-import { fetchSession, signOut } from "@/api/auth";
++import { useSession, useSignOut } from "@/hooks/useSession";
+ 
+ export function SessionMenu() {
+-  const queryClient = useQueryClient();
++  const { user, authenticated } = useSession();
++  const { signOut: performSignOut, pending } = useSignOut();
+ 
+-  const { data } = useQuery({
+-    queryKey: ["session"],
+-    queryFn: fetchSession,
+-    // Short-lived: this is chrome, not data. Never retry a 401 — fetchSession
+-    // already turns that into "signed out", so a retry would just be noise.
+-    staleTime: 60_000,
+-    refetchOnWindowFocus: false,
+-  });
++  const signedIn = authenticated;
++  const email = user?.email ?? null;
+ 
+-  const signedIn = Boolean(data?.authenticated);
+-  const email = data?.user?.email ?? null;
+-
+-  const handleSignOut = async () => {
+-    await signOut();
+-    // Drop the cached session so the header re-renders immediately.
+-    queryClient.setQueryData(["session"], { authenticated: false, user: null });
+-    queryClient.invalidateQueries({ queryKey: ["session"] });
++  // One click: revoke, clear, navigate. The hook owns the ordering; on failure
++  // it surfaces a toast and leaves the session untouched, so the user is never
++  // left half-signed-out without being told.
++  const handleSignOut = () => {
++    void performSignOut();
+   };
+ 
+   if (!signedIn) {
+@@ -60,6 +51,7 @@
+         variant="ghost"
+         size="icon"
+         onClick={handleSignOut}
++        disabled={pending}
+         title="Sign out"
+         aria-label="Sign out"
+         data-testid="session-signout"
+diff -ruN a/frontend/src/hooks/useSession.ts b/frontend/src/hooks/useSession.ts
+--- a/frontend/src/hooks/useSession.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/hooks/useSession.ts	2026-10-15 10:08:59.497297074 +0000
+@@ -0,0 +1,208 @@
++/**
++ * Session state and the UI behaviours that depend on it.
++ *
++ * Three concerns, deliberately kept separate:
++ *
++ * 1. :func:`useSession` — the one source of truth for "who is signed in, and do
++ *    we know yet?". It reports one of THREE states, because "we have not asked
++ *    the server yet" and "the server said no" are different situations. Merging
++ *    them is what let a signed-out visitor see protected content: an unknown
++ *    session was treated as a known-good one.
++ *
++ * 2. :func:`useSignOut` — end the session in one click: revoke it server-side,
++ *    drop every cached response, then navigate. The redirect is explicit; it
++ *    does not wait for some unrelated request to fail and notice.
++ *
++ * 3. :func:`useSessionCacheBridge` — when a session ends underneath the app,
++ *    discard cached data so a later sign-in on this tab cannot inherit it.
++ *
++ * PHASE 3 NOTE: this file also carries `useSessionGuard` in the Phase 4 tree,
++ * which listens for the 401 event `apiFetch` dispatches. Phase 3's `apiFetch`
++ * never dispatches it (the API is not gated yet), so that hook is omitted here
++ * rather than left as dead code. Phase 4's version of this file is a superset —
++ * it replaces this one wholesale when you move on.
++ */
++
++import { useCallback, useEffect, useRef, useState } from "react";
++import { useNavigate } from "react-router-dom";
++import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
++
++import { AuthApiError, signOut } from "@/api/auth";
++import { fetchSession } from "@/api/auth";
++import type { SessionState, SessionUser } from "@/api/auth";
++import { useToastStore } from "@/store/useToastStore";
++
++/** Cache key every session reader shares, so the lookup happens once. */
++export const SESSION_KEY = ["session"] as const;
++
++/** What an absent session looks like in the cache. */
++export const SIGNED_OUT: SessionState = { authenticated: false, user: null };
++
++/**
++ * `loading`          — the lookup is in flight; we do not know who you are yet.
++ * `authenticated`    — the server confirmed a valid session.
++ * `unauthenticated`  — the server said no (401), or the lookup failed outright.
++ *
++ * Only `authenticated` may render protected content.
++ */
++export type SessionStatus = "loading" | "authenticated" | "unauthenticated";
++
++export interface SessionView {
++  status: SessionStatus;
++  /** Convenience for `status === "loading"`. */
++  isLoading: boolean;
++  authenticated: boolean;
++  user: SessionUser | null;
++  isAdmin: boolean;
++}
++
++/**
++ * Drop every cached response, then re-seed the session as signed out.
++ *
++ * The re-seed matters: it leaves the cache in a definite state, so nothing
++ * refetches to "find out" whether we are signed in, and no frame renders with
++ * the previous account's data.
++ *
++ * Cached responses are user-scoped (saved knowledge, chat runs), so they must
++ * not survive a session boundary — otherwise the next account to sign in on
++ * this tab can read them.
++ */
++export function clearSessionState(queryClient: QueryClient): void {
++  // Everything except the session key, which is re-seeded just below. Removing
++  // it too would make the observer refetch mid-teardown.
++  queryClient.removeQueries({
++    predicate: (query) => query.queryKey[0] !== SESSION_KEY[0],
++  });
++  queryClient.setQueryData(SESSION_KEY, SIGNED_OUT);
++}
++
++/**
++ * Whether the session is known-good, unknown, or known-absent.
++ *
++ * `retry` is off and `refetchOnWindowFocus` is off: this query drives access
++ * control, so it must resolve on what the server actually said, not on a
++ * background refresh the user did not ask for.
++ */
++export function useSession(): SessionView {
++  const { data, isPending } = useQuery<SessionState>({
++    queryKey: SESSION_KEY,
++    queryFn: fetchSession,
++    staleTime: 60_000,
++    refetchOnWindowFocus: false,
++    retry: false,
++  });
++
++  // Fails closed, in both failure directions:
++  //   * still loading, no answer yet                   -> loading
++  //   * lookup failed with no cached answer            -> unauthenticated
++  //   * lookup failed, but we hold a good prior answer -> that answer stands
++  //   * server said 401                                -> unauthenticated
++  const authenticated = Boolean(data?.authenticated);
++
++  const status: SessionStatus = isPending
++    ? "loading"
++    : authenticated
++      ? "authenticated"
++      : "unauthenticated";
++
++  return {
++    status,
++    isLoading: isPending,
++    authenticated,
++    user: authenticated ? (data?.user ?? null) : null,
++    // Phase 3 has no role model — `users.role` and `is_admin` arrive with
++    // Phase 4, which replaces this file with a superset version. Kept in the
++    // shape so Header's useIsAdmin() keeps working when it is dropped in.
++    isAdmin: false,
++  };
++}
++
++/**
++ * Discard cached responses when a session ends underneath the app.
++ *
++ * A session can lapse between calls — the cookie expires, or another tab signs
++ * out — so this watches the state itself rather than waiting for a request to
++ * fail. Mount once. Renders nothing.
++ */
++export function useSessionCacheBridge(): void {
++  const queryClient = useQueryClient();
++  const { status } = useSession();
++  const wasAuthenticated = useRef(false);
++
++  useEffect(() => {
++    if (status === "authenticated") {
++      wasAuthenticated.current = true;
++      return;
++    }
++    if (status === "unauthenticated" && wasAuthenticated.current) {
++      wasAuthenticated.current = false;
++      clearSessionState(queryClient);
++    }
++  }, [status, queryClient]);
++}
++
++export interface UseSignOut {
++  /** End the session. Resolves true if signed out, false if it failed. */
++  signOut: () => Promise<boolean>;
++  /** True while the request is in flight, so the control can disable itself. */
++  pending: boolean;
++}
++
++/**
++ * Sign out in one click.
++ *
++ * The order is deliberate:
++ *
++ *   1. Ask the server to revoke the session. Until that succeeds the cookie is
++ *      still valid, so clearing local state first would be a lie — and if the
++ *      call fails the user must be told, not silently left half-signed-out.
++ *   2. Clear the cache. Synchronous, so no frame renders with stale account
++ *      data; ProtectedRoute reads the same cache and would bounce us anyway.
++ *   3. Navigate, replacing the history entry so Back cannot return to a
++ *      protected page.
++ */
++export function useSignOut(): UseSignOut {
++  const navigate = useNavigate();
++  const queryClient = useQueryClient();
++  const pushToast = useToastStore((s) => s.push);
++  const [pending, setPending] = useState(false);
++  const busy = useRef(false);
++
++  // StrictMode mounts, unmounts and remounts, so the flag is (re)set in the
++  // effect body — setting it only in the cleanup would leave it stuck false.
++  useEffect(() => {
++    busy.current = false;
++  }, []);
++
++  const run = useCallback(async (): Promise<boolean> => {
++    if (busy.current) return false; // ignore double-clicks
++    busy.current = true;
++    setPending(true);
++
++    try {
++      await signOut();
++    } catch (err) {
++      // A 401 here means the server has no session for us either way — the
++      // intended outcome, not a failure. This never treats 401 as proof of
++      // authentication; it is proof of the opposite.
++      const alreadyGone = err instanceof AuthApiError && err.status === 401;
++      if (!alreadyGone) {
++        busy.current = false;
++        setPending(false);
++        pushToast(
++          "error",
++          "Could not sign you out. Your session may still be active — please try again."
++        );
++        return false;
++      }
++    }
++
++    clearSessionState(queryClient);
++    setPending(false);
++    // No await: navigate is synchronous from the caller's point of view.
++    navigate("/signin", { replace: true });
++    return true;
++  }, [navigate, queryClient, pushToast]);
++
++  return { signOut: run, pending };
++}

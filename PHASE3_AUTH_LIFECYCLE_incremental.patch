@@ -1,0 +1,835 @@
+diff -ruN a/frontend/src/App.tsx b/frontend/src/App.tsx
+--- a/frontend/src/App.tsx	2026-10-15 11:19:49.269694024 +0000
++++ b/frontend/src/App.tsx	2026-10-15 11:02:09.559630600 +0000
+@@ -11,7 +11,7 @@
+ 
+ import { AppShell } from "@/components/layout/AppShell";
+ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
+-import { useSessionCacheBridge } from "@/hooks/useSession";
++import { useSessionCacheBridge, useSessionRevalidation } from "@/hooks/useSession";
+ 
+ function Loader() {
+   return (
+@@ -80,5 +80,9 @@
+   // A session that ends between calls must drop cached data, so the next
+   // account to sign in on this tab cannot read the previous one's.
+   useSessionCacheBridge();
++  // Sessions are shared by every tab on this origin (the cookie is per-profile,
++  // not per-tab). Re-check the server when this tab comes back into view, so a
++  // logout in another tab is noticed instead of being shown stale content.
++  useSessionRevalidation();
+   return null;
+ }
+diff -ruN a/frontend/src/__tests__/authLifecycle.test.tsx b/frontend/src/__tests__/authLifecycle.test.tsx
+--- a/frontend/src/__tests__/authLifecycle.test.tsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/__tests__/authLifecycle.test.tsx	2026-10-15 11:08:19.143630600 +0000
+@@ -0,0 +1,340 @@
++/**
++ * Regression tests for the two authentication-lifecycle bugs.
++ *
++ *   1. Login did not take effect until a hard refresh. `SignIn` called
++ *      `navigate("/dashboard")` straight after `signIn()`. The cookie was set,
++ *      but the cached session still said "signed out" (all the more so right
++ *      after a logout, which writes exactly that). ProtectedRoute read the
++ *      stale answer and bounced the user back to /signin. A hard refresh
++ *      emptied the cache, which is why it appeared to fix things.
++ *
++ *   2. A new tab did not restore the session. The session cookie is
++ *      per-browser-profile, not per-tab, and the server proves it accepts the
++ *      same cookie from a brand-new client (see the backend test module). The
++ *      UI's problem was that it never re-checked: `refetchOnWindowFocus` was
++ *      off, so a backgrounded tab kept showing authenticated content after the
++ *      session had ended elsewhere.
++ *
++ * `fetch` is the only thing mocked. The real App, router, pages and hooks run.
++ */
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++import App from "@/App";
++import { SESSION_KEY } from "@/hooks/useSession";
++import { useToastStore } from "@/store/useToastStore";
++
++// ── a stand-in auth backend whose session state can be flipped ──────────────
++
++interface MockResponse {
++  status?: number;
++  body?: unknown;
++}
++
++const USER = {
++  id: "u1",
++  email: "boss@incois.gov.in",
++  email_verified: true,
++  is_active: true,
++};
++
++const LOGGED_IN = { authenticated: true, user: USER };
++const NOT_AUTHENTICATED = { code: "not_authenticated", message: "you are not signed in" };
++
++const POLICY = {
++  min_length: 12,
++  max_length: 256,
++  require_lowercase: true,
++  require_uppercase: true,
++  require_digit: true,
++  require_symbol: false,
++  rejects_email_substring: true,
++  rejects_common_passwords: true,
++};
++
++/**
++ * One server, shared by every client in a test. `signedIn` stands in for the
++ * browser cookie jar: two independently-rendered apps that share it behave the
++ * way two tabs do.
++ */
++function makeServer() {
++  const state = { signedIn: false, loginFails: false, logoutFails: false };
++  const calls: Array<{ url: string; method: string }> = [];
++
++  const handler = (url: string, init?: RequestInit): MockResponse => {
++    const method = init?.method ?? "GET";
++    calls.push({ url, method });
++
++    if (url.includes("/api/auth/login")) {
++      if (state.loginFails) {
++        return {
++          status: 401,
++          body: { detail: { code: "invalid_credentials", message: "the email or password is incorrect" } },
++        };
++      }
++      state.signedIn = true; // server-side: the cookie is issued
++      return { body: { status: "signed_in", user_id: USER.id, email: USER.email, expires_in_seconds: 28800 } };
++    }
++    if (url.includes("/api/auth/logout")) {
++      if (state.logoutFails) {
++        return { status: 500, body: { detail: { code: "server_error", message: "boom" } } };
++      }
++      state.signedIn = false; // server-side revocation
++      return { body: { status: "signed_out", revoked: true } };
++    }
++    if (url.includes("/api/auth/me")) {
++      if (!state.signedIn) return { status: 401, body: { detail: NOT_AUTHENTICATED } };
++      return { body: LOGGED_IN };
++    }
++    if (url.includes("/api/auth/password-policy")) return { body: POLICY };
++    return { body: {} };
++  };
++
++  return {
++    state,
++    calls,
++    handler,
++    logins: () => calls.filter((c) => c.url.includes("/api/auth/login")),
++    logouts: () => calls.filter((c) => c.url.includes("/api/auth/logout")),
++  };
++}
++
++type Server = ReturnType<typeof makeServer>;
++
++function install(server: Server): void {
++  global.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
++    const result = server.handler(String(input), init);
++    const status = result.status ?? 200;
++    return {
++      ok: status >= 200 && status < 300,
++      status,
++      statusText: "",
++      json: async () => result.body ?? {},
++      headers: { get: () => null },
++    } as unknown as Response;
++  }) as unknown as typeof fetch;
++}
++
++/** A fresh QueryClient is what a page load looks like: nothing cached. */
++function renderAppAt(path: string) {
++  window.history.pushState({}, "", path);
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  const view = render(
++    <QueryClientProvider client={client}>
++      <App />
++    </QueryClientProvider>,
++  );
++  return { ...view, client };
++}
++
++const chrome = () => document.querySelector("[data-tour^='header-']");
++
++/** Type credentials and submit the sign-in form. */
++async function submitLogin(email = "boss@incois.gov.in", password = "Tide-Quiet-77-K9") {
++  // findBy* (not getBy*): the auth pages are lazy-loaded, so the form is not
++  // on screen for the first frame.
++  fireEvent.change(await screen.findByLabelText(/email/i), { target: { value: email } });
++  fireEvent.change(await screen.findByLabelText(/password/i), { target: { value: password } });
++  await waitFor(() => {
++    expect(screen.getByRole("button", { name: /^sign in$/i })).toBeTruthy();
++  });
++  fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
++}
++
++// ── tests ──────────────────────────────────────────────────────────────────
++
++describe("login lifecycle", () => {
++  beforeEach(() => useToastStore.setState({ toasts: [] }));
++  afterEach(() => {
++    window.history.pushState({}, "", "/");
++    useToastStore.setState({ toasts: [] });
++  });
++
++  it("1. a successful login updates auth state and navigates with NO hard refresh", async () => {
++    const server = makeServer();
++    install(server);
++    renderAppAt("/signin");
++
++    await submitLogin();
++
++    // Lands on the dashboard, and the cache agrees with the server.
++    await waitFor(() => {
++      expect(window.location.pathname).toBe("/dashboard");
++    });
++    // The shell is lazy-loaded, so the chrome arrives a frame later.
++    await waitFor(() => {
++      expect(chrome()).not.toBeNull();
++    });
++    expect(server.logins()).toHaveLength(1);
++    // The canonical cache was actually refreshed — not left saying "signed out".
++    expect(server.calls.some((c) => c.url.includes("/api/auth/me"))).toBe(true);
++  });
++
++  it("1b. login works after a logout in the SAME session (the stale-cache case)", async () => {
++    const server = makeServer();
++    server.state.signedIn = true;
++    install(server);
++
++    // Signed in, then sign out — this writes "signed out" into the cache.
++    const first = renderAppAt("/workspace");
++    const button = await waitFor(() => {
++      const el = document.querySelector<HTMLElement>('[data-testid="session-signout"]');
++      expect(el).not.toBeNull();
++      return el as HTMLElement;
++    });
++    fireEvent.click(button);
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    first.unmount();
++
++    // Sign in again WITHOUT reloading. Previously the stale cached "signed
++    // out" made ProtectedRoute bounce this straight back to /signin.
++    renderAppAt("/signin");
++    await submitLogin();
++
++    await waitFor(() => {
++      expect(window.location.pathname).toBe("/dashboard");
++    });
++    await waitFor(() => {
++      expect(chrome()).not.toBeNull();
++    });
++  });
++
++  it("2. reloading while authenticated restores the session", async () => {
++    const server = makeServer();
++    server.state.signedIn = true; // cookie still valid
++    install(server);
++
++    // Fresh QueryClient == a reload: nothing cached, so /me must be asked.
++    renderAppAt("/workspace");
++
++    await waitFor(() => {
++      expect(chrome()).not.toBeNull();
++    });
++    expect(window.location.pathname).toBe("/workspace");
++    expect(screen.getByTestId("session-signout")).toBeTruthy();
++  });
++
++  it("3. a second app instance restores the same session from /api/auth/me", async () => {
++    const server = makeServer();
++    server.state.signedIn = true;
++    install(server);
++
++    // Tab 1.
++    const tab1 = renderAppAt("/workspace");
++    await waitFor(() => expect(chrome()).not.toBeNull());
++
++    // Tab 2 — a brand-new QueryClient sharing only the server (the cookie jar).
++    const tab2 = renderAppAt("/workspace");
++    await waitFor(() => {
++      expect(document.querySelectorAll('[data-testid="session-signout"]').length).toBeGreaterThan(0);
++    });
++    expect(window.location.pathname).toBe("/workspace");
++
++    // Tab 2 never logged in: it restored purely from /api/auth/me.
++    expect(server.logins()).toHaveLength(0);
++    tab1.unmount();
++    tab2.unmount();
++  });
++
++  it("4. logout clears cached queries and redirects immediately", async () => {
++    const server = makeServer();
++    server.state.signedIn = true;
++    install(server);
++    const { client } = renderAppAt("/workspace");
++
++    fireEvent.click(await waitFor(() => {
++      const el = document.querySelector<HTMLElement>('[data-testid="session-signout"]');
++      expect(el).not.toBeNull();
++      return el as HTMLElement;
++    }));
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(client.getQueryData(SESSION_KEY)).toEqual({ authenticated: false, user: null });
++    expect(chrome()).toBeNull();
++  });
++
++  it("5. a revoked or expired session does not restore authentication", async () => {
++    const server = makeServer();
++    server.state.signedIn = false; // revoked server-side
++    install(server);
++
++    renderAppAt("/workspace");
++
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++    expect(screen.queryByTestId("session-signout")).toBeNull();
++  });
++
++  it("6. a failed login shows the error and does not stick in a loading state", async () => {
++    const server = makeServer();
++    server.state.loginFails = true;
++    install(server);
++    renderAppAt("/signin");
++
++    await submitLogin();
++
++    // The server's own safe message, not a generic one.
++    await waitFor(() => {
++      expect(screen.getByText(/the email or password is incorrect/i)).toBeTruthy();
++    });
++    // Not stuck: the button is back to "Sign in", not "Signing in…".
++    expect(screen.getByRole("button", { name: /^sign in$/i })).toBeTruthy();
++    expect(screen.queryByRole("button", { name: /signing in/i })).toBeNull();
++    // Still on the sign-in screen.
++    expect(window.location.pathname).toBe("/signin");
++  });
++});
++
++describe("cross-tab session revalidation", () => {
++  afterEach(() => {
++    window.history.pushState({}, "", "/");
++  });
++
++  it("a tab that comes back into view re-checks the server", async () => {
++    const server = makeServer();
++    server.state.signedIn = true;
++    install(server);
++    renderAppAt("/workspace");
++
++    await waitFor(() => expect(chrome()).not.toBeNull());
++    const before = server.calls.filter((c) => c.url.includes("/api/auth/me")).length;
++    expect(before).toBeGreaterThan(0);
++
++    // The session ends elsewhere (another tab signed out).
++    server.state.signedIn = false;
++
++    // This tab becomes visible again.
++    Object.defineProperty(document, "visibilityState", {
++      value: "visible",
++      configurable: true,
++    });
++    fireEvent(document, new Event("visibilitychange"));
++
++    // It notices, instead of continuing to show authenticated content.
++    await waitFor(() => expect(window.location.pathname).toBe("/signin"));
++    expect(chrome()).toBeNull();
++  });
++
++  it("a still-valid session survives a visibility re-check", async () => {
++    const server = makeServer();
++    server.state.signedIn = true;
++    install(server);
++    renderAppAt("/workspace");
++
++    await waitFor(() => expect(chrome()).not.toBeNull());
++
++    Object.defineProperty(document, "visibilityState", {
++      value: "visible",
++      configurable: true,
++    });
++    fireEvent(document, new Event("visibilitychange"));
++
++    // Re-checked, still valid, still here.
++    await waitFor(() => {
++      expect(server.calls.filter((c) => c.url.includes("/api/auth/me")).length).toBeGreaterThan(1);
++    });
++    expect(window.location.pathname).toBe("/workspace");
++    expect(chrome()).not.toBeNull();
++  });
++});
+diff -ruN a/frontend/src/__tests__/signin.test.tsx b/frontend/src/__tests__/signin.test.tsx
+--- a/frontend/src/__tests__/signin.test.tsx	2026-10-15 11:19:49.273694024 +0000
++++ b/frontend/src/__tests__/signin.test.tsx	2026-10-15 11:06:48.675630600 +0000
+@@ -117,7 +117,15 @@
+ }
+ 
+ function renderStandalone(node: React.ReactNode) {
+-  return render(<MemoryRouter>{node}</MemoryRouter>);
++  // SignIn now reads the session cache after a successful login, so it needs a
++  // QueryClientProvider. main.tsx supplies one for the real app; standalone
++  // renders have to supply their own.
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  return render(
++    <MemoryRouter>
++      <QueryClientProvider client={client}>{node}</QueryClientProvider>
++    </MemoryRouter>,
++  );
+ }
+ 
+ /**
+diff -ruN a/frontend/src/api/auth.ts b/frontend/src/api/auth.ts
+--- a/frontend/src/api/auth.ts	2026-10-15 10:52:45.035630600 +0000
++++ b/frontend/src/api/auth.ts	2026-10-15 11:00:37.475630600 +0000
+@@ -95,6 +95,11 @@
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify(body),
++    // The session lives in an HttpOnly cookie, so every auth call must carry
++    // credentials. `same-origin` is the browser default; stating it stops a
++    // later refactor from silently dropping the cookie — which presents as
++    // "login works, but a new tab is signed out".
++    credentials: "same-origin",
+   });
+ 
+   const payload = await res.json().catch(() => null);
+@@ -247,8 +252,17 @@
+  * no valid session, so callers can render without a try/catch. Any other
+  * error (server down, 500) still throws.
+  */
+-export async function fetchSession(): Promise<SessionState> {
+-  const res = await fetch("/api/auth/me", { headers: { Accept: "application/json" } });
++export async function fetchSession(signal?: AbortSignal): Promise<SessionState> {
++  const res = await fetch("/api/auth/me", {
++    headers: { Accept: "application/json" },
++    // The session is the cookie. Restating `same-origin` keeps the requirement
++    // visible at the point that matters most: the call that decides whether you
++    // are signed in.
++    credentials: "same-origin",
++    // Lets a login/logout cancel an in-flight lookup, so its (now stale)
++    // answer can never overwrite the newer state.
++    signal,
++  });
+   if (res.status === 401) return SIGNED_OUT;
+   if (!res.ok) {
+     throw new AuthApiError("Could not load the session", "session_unavailable", res.status);
+diff -ruN a/frontend/src/hooks/useSession.ts b/frontend/src/hooks/useSession.ts
+--- a/frontend/src/hooks/useSession.ts	2026-10-15 11:19:49.273694024 +0000
++++ b/frontend/src/hooks/useSession.ts	2026-10-15 11:01:12.703630600 +0000
+@@ -86,9 +86,12 @@
+ export function useSession(): SessionView {
+   const { data, isPending } = useQuery<SessionState>({
+     queryKey: SESSION_KEY,
+-    queryFn: fetchSession,
++    // `signal` lets a login/logout abort an in-flight lookup.
++    queryFn: ({ signal }) => fetchSession(signal),
+     staleTime: 60_000,
+-    refetchOnWindowFocus: false,
++    // A session can be ended in another tab. Re-check when the window regains
++    // focus rather than trusting the cached answer indefinitely.
++    refetchOnWindowFocus: true,
+     retry: false,
+   });
+ 
+@@ -141,6 +144,50 @@
+   }, [status, queryClient]);
+ }
+ 
++/**
++ * Re-read the session from the server and write it into the cache.
++ *
++ * Used after a successful login. The cookie is set by then, but the cache still
++ * holds whatever it held before — after a logout that is "signed out", so a
++ * bare `navigate()` would render ProtectedRoute against a stale answer and
++ * bounce the user straight back to sign-in. That is the bug this fixes.
++ *
++ * In-flight lookups are cancelled first: one that started before the login
++ * could otherwise resolve afterwards and overwrite the newer state with
++ * "signed out".
++ */
++export async function primeSession(queryClient: QueryClient): Promise<SessionState> {
++  await queryClient.cancelQueries({ queryKey: SESSION_KEY });
++  return queryClient.fetchQuery<SessionState>({
++    queryKey: SESSION_KEY,
++    queryFn: ({ signal }) => fetchSession(signal),
++    staleTime: 0, // always read the server; never serve the stale answer
++    retry: false,
++  });
++}
++
++/**
++ * Re-check the session when this tab becomes visible again.
++ *
++ * `refetchOnWindowFocus` covers refocusing the window, but switching between
++ * tabs does not always produce a focus event — and that is exactly when a
++ * session is most likely to have been ended elsewhere. Invalidate (not just
++ * refetch) so the check happens even inside `staleTime`.
++ */
++export function useSessionRevalidation(): void {
++  const queryClient = useQueryClient();
++
++  useEffect(() => {
++    const onVisibilityChange = () => {
++      if (document.visibilityState !== "visible") return;
++      void queryClient.invalidateQueries({ queryKey: SESSION_KEY });
++    };
++
++    document.addEventListener("visibilitychange", onVisibilityChange);
++    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
++  }, [queryClient]);
++}
++
+ export interface UseSignOut {
+   /** End the session. Resolves true if signed out, false if it failed. */
+   signOut: () => Promise<boolean>;
+@@ -197,6 +244,9 @@
+       }
+     }
+ 
++    // Cancel first, so a lookup already in flight cannot land after this and
++    // overwrite "signed out" with the session we just ended.
++    await queryClient.cancelQueries({ queryKey: SESSION_KEY });
+     clearSessionState(queryClient);
+     setPending(false);
+     // No await: navigate is synchronous from the caller's point of view.
+diff -ruN a/frontend/src/pages/SignIn.tsx b/frontend/src/pages/SignIn.tsx
+--- a/frontend/src/pages/SignIn.tsx	2026-10-15 10:52:45.043630600 +0000
++++ b/frontend/src/pages/SignIn.tsx	2026-10-15 11:01:31.107630600 +0000
+@@ -7,10 +7,13 @@
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { AuthAlert, AuthLayout, AuthLink } from "@/components/auth/AuthLayout";
++import { useQueryClient } from "@tanstack/react-query";
+ import { AuthApiError, signIn } from "@/api/auth";
++import { primeSession } from "@/hooks/useSession";
+ 
+ export function SignIn() {
+   const navigate = useNavigate();
++  const queryClient = useQueryClient();
+ 
+   const [email, setEmail] = useState("");
+   const [password, setPassword] = useState("");
+@@ -26,11 +29,17 @@
+     setError(null);
+     try {
+       await signIn(email, password);
+-      // Signed in — the cookie is set server-side. Go to the dashboard.
++      // The cookie is set now, but the cached session still holds whatever it
++      // held before — after a logout that is "signed out". Re-read it from the
++      // server BEFORE navigating, or ProtectedRoute renders against the stale
++      // answer and bounces the user straight back here. (This is why signing
++      // in used to appear to do nothing until a hard refresh.)
++      await primeSession(queryClient);
+       navigate("/dashboard");
+     } catch (err) {
+       // The server already returns one generic message for every credential
+       // failure, so there is nothing to disambiguate here (deliberately).
++      // The form keeps what was typed: only the error and the busy flag move.
+       setError(
+         err instanceof AuthApiError ? err.message : "Sign in failed. Please try again.",
+       );
+diff -ruN a/tests/test_phase3_session_cookie_http.py b/tests/test_phase3_session_cookie_http.py
+--- a/tests/test_phase3_session_cookie_http.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_phase3_session_cookie_http.py	2026-10-15 11:28:51.226409644 +0000
+@@ -0,0 +1,295 @@
++"""
++Phase 3 session-cookie HTTP test — does a new tab inherit the session?
++
++The question behind the "signing in does not persist across tabs" report is
++whether the server issues a cookie that a *different* client can present. This
++module answers it at the HTTP layer, with the real auth router, real cookies and
++a real database (in-memory SQLite):
++
++  * log in as client 1, capture the cookie the server actually sets;
++  * build a BRAND NEW client that carries only that cookie value — it shares no
++    client-side or server-side state with client 1, which is what a second
++    browser tab looks like from the server's point of view;
++  * assert the second client is authenticated.
++
++It also pins the cookie attributes that decide whether a browser will store and
++resend it at all (HttpOnly, Path, SameSite, no Domain), and that a revoked or
++forged cookie is rejected.
++
++Only the auth router is mounted: ``src.retrieval.frontend.server`` needs the full
++ML dependency set, which ``test_auth_phase3_e2e_http.py`` skips without it.
++Mounting the router alone keeps this runnable anywhere and keeps the assertion
++focused on the cookie contract.
++
++Nothing here touches a real database or an SMTP server.
++"""
++
++from __future__ import annotations
++
++import os
++import re
++import sys
++
++import pytest
++
++fastapi = pytest.importorskip("fastapi")
++httpx = pytest.importorskip("httpx")
++
++from fastapi import FastAPI  # noqa: E402
++from fastapi.testclient import TestClient  # noqa: E402
++from sqlalchemy import create_engine  # noqa: E402
++from sqlalchemy.orm import sessionmaker  # noqa: E402
++from sqlalchemy.pool import StaticPool  # noqa: E402
++
++# tests/ is on sys.path when pytest runs with rootdir=/home/user/audit
++sys.path.insert(0, os.path.dirname(__file__))
++
++from src.auth import models  # noqa: E402,F401  (registers users/otp/sessions)
++from src.auth.config import load_auth_config  # noqa: E402
++from src.auth.mailer import CapturingMailer  # noqa: E402
++from src.auth.rate_limit import reset_limiter  # noqa: E402
++from src.auth.router import router as auth_router  # noqa: E402
++from src.db.models import Base  # noqa: E402
++from src.db.session import get_db  # noqa: E402
++
++GOOD_PASSWORD = "Tide-Quiet-77-K9"
++EMAIL = "dev.admin@gmail.com"
++
++#: The auth configuration under test.
++#:
++#: Deliberately NOT written into ``os.environ`` at import time. The router
++#: builds its config from the environment on every request, so seeding it here
++#: and applying it with ``monkeypatch`` keeps this module from leaking settings
++#: into every other test in the process — including any that assert on the
++#: *absence* of an auth config.
++TEST_ENV: dict[str, str] = {
++    "AUTH_SECRET": "phase3-cookie-test-secret-not-a-real-key-0123456789",
++    "DEV_ADMIN_EMAIL": "dev.admin@gmail.com",
++    "APP_ENV": "development",
++    # Real Argon2id defaults are slow; this suite only needs them to be valid.
++    "AUTH_ARGON2_TIME_COST": "1",
++    "AUTH_ARGON2_MEMORY_COST": "8192",
++    "AUTH_ARGON2_PARALLELISM": "1",
++}
++
++
++def _env(**overrides: object) -> dict[str, str]:
++    """A complete auth environment, with `overrides` applied on top."""
++    env = dict(TEST_ENV)
++    env.update({key: str(value) for key, value in overrides.items()})
++    return env
++
++
++@pytest.fixture(autouse=True)
++def _auth_env(monkeypatch):
++    """Apply TEST_ENV for the duration of each test, and only then."""
++    for key, value in TEST_ENV.items():
++        monkeypatch.setenv(key, value)
++
++
++@pytest.fixture(autouse=True)
++def _reset_rate_limiter():
++    """The limiter is process-global. Without this, the second test's signup is
++    refused by the resend cooldown, no mail is captured, and the fixture fails
++    for a reason that has nothing to do with cookies."""
++    reset_limiter()
++    yield
++    reset_limiter()
++
++
++@pytest.fixture()
++def world(monkeypatch):
++    """A fresh app: empty in-memory DB, capturing mailer, seeded user."""
++    import src.auth.router as router_mod
++
++    config = load_auth_config(_env())
++    mailer = CapturingMailer()
++    monkeypatch.setattr(router_mod, "get_mailer", lambda config=None: mailer)
++
++    engine = create_engine(
++        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
++    )
++    Base.metadata.create_all(engine)
++    factory = sessionmaker(bind=engine, expire_on_commit=False)
++
++    def _db():
++        db = factory()
++        try:
++            yield db
++        finally:
++            db.close()
++
++    app = FastAPI()
++    app.include_router(auth_router)
++    app.dependency_overrides[get_db] = _db
++
++    client = TestClient(app)
++
++    # Create the account: signup is the only way to get a password set.
++    code = f"{_start_signup(client, mailer)}"
++    verify = client.post("/api/auth/signup/verify", json={"email": EMAIL, "otp": code})
++    client.post(
++        "/api/auth/signup/complete",
++        json={"signup_token": verify.json()["signup_token"], "password": GOOD_PASSWORD},
++    )
++
++    return {"app": app, "client": client, "config": config, "mailer": mailer}
++
++
++def _start_signup(client, mailer) -> str:
++    client.post("/api/auth/signup/start", json={"email": EMAIL})
++    return re.search(r"\b(\d{6})\b", mailer.last.body).group(1)
++
++
++def _login(client) -> str:
++    """Log in and return the raw session cookie value."""
++    res = client.post("/api/auth/login", json={"email": EMAIL, "password": GOOD_PASSWORD})
++    assert res.status_code == 200, res.text
++    value = client.cookies.get("auditpro_session")
++    assert value, "no session cookie was issued"
++    return value
++
++
++# ── the cookie the server actually sets ─────────────────────────────────────
++
++
++def test_login_sets_a_shareable_host_only_cookie(world):
++    client = world["client"]
++    res = client.post("/api/auth/login", json={"email": EMAIL, "password": GOOD_PASSWORD})
++    assert res.status_code == 200
++
++    raw = res.headers["set-cookie"]
++    assert "auditpro_session=" in raw
++    assert "HttpOnly" in raw, "the session must not be readable from JavaScript"
++    assert "Path=/" in raw, "a narrower Path would hide it from /api/auth/me"
++    assert "samesite=lax" in raw.lower(), "Lax still sends it on same-origin navigation"
++    # No Domain: a host-only cookie. Setting Domain would widen the scope.
++    assert not re.search(r"Domain=", raw, re.I), "cookie must stay host-only"
++
++
++def test_the_cookie_is_not_flagged_secure_over_local_http(world):
++    """In development the Secure flag must be off, or plain HTTP cannot use it."""
++    client = world["client"]
++    res = client.post("/api/auth/login", json={"email": EMAIL, "password": GOOD_PASSWORD})
++    assert "Secure" not in res.headers["set-cookie"]
++
++
++def test_production_sets_the_secure_flag(monkeypatch, world):
++    """...and on in production. If you serve production over plain HTTP, the
++    browser will drop the cookie — that is a deployment fix (use HTTPS, or set
++    AUTH_SESSION_COOKIE_SECURE=false for a trusted LAN), not a code change."""
++    import src.auth.router as router_mod
++
++    monkeypatch.setattr(
++        router_mod, "_config", lambda: load_auth_config(_env(APP_ENV="production"))
++    )
++
++    client = world["client"]
++    res = client.post("/api/auth/login", json={"email": EMAIL, "password": GOOD_PASSWORD})
++    assert res.status_code == 200
++    assert "Secure" in res.headers["set-cookie"]
++
++
++# ── the second-tab question ─────────────────────────────────────────────────
++
++
++def test_a_second_client_presenting_the_same_cookie_is_authenticated(world):
++    """A brand-new client — no shared state — gets the same session. This is
++    what a second browser tab looks like to the server."""
++    cookie_value = _login(world["client"])
++
++    tab2 = TestClient(world["app"], cookies={"auditpro_session": cookie_value})
++    res = tab2.get("/api/auth/me")
++
++    assert res.status_code == 200, res.text
++    body = res.json()
++    assert body["authenticated"] is True
++    assert body["user"]["email"] == EMAIL
++
++
++def test_the_second_client_never_had_to_log_in(world):
++    """The second tab authenticates from the cookie alone.
++
++    Every path the second client requests is recorded, so the claim is checked
++    against what it actually sent rather than assumed: it must hit
++    /api/auth/me, and must never touch /api/auth/login — no credential is ever
++    exchanged in the second tab.
++    """
++    cookie_value = _login(world["client"])
++
++    requested: list[str] = []
++    tab2 = TestClient(world["app"], cookies={"auditpro_session": cookie_value})
++    tab2.event_hooks["request"].append(lambda request: requested.append(request.url.path))
++
++    res = tab2.get("/api/auth/me")
++    assert res.status_code == 200, res.text
++    assert res.json()["authenticated"] is True
++
++    assert "/api/auth/login" not in requested, f"second tab logged in: {requested}"
++    assert requested == ["/api/auth/me"], f"unexpected requests: {requested}"
++
++
++def test_logout_in_one_client_revokes_it_for_the_other(world):
++    """The session is server-side state, so ending it ends it everywhere."""
++    cookie_value = _login(world["client"])
++    tab2 = TestClient(world["app"], cookies={"auditpro_session": cookie_value})
++    assert tab2.get("/api/auth/me").status_code == 200
++
++    out = world["client"].post("/api/auth/logout", json={})
++    assert out.status_code == 200
++    assert out.json()["revoked"] is True
++
++    after = tab2.get("/api/auth/me")
++    assert after.status_code == 401
++    assert after.json()["detail"]["code"] == "not_authenticated"
++
++
++def test_a_forged_cookie_is_rejected(world):
++    _login(world["client"])
++    forger = TestClient(world["app"], cookies={"auditpro_session": "not-a-real-token"})
++    res = forger.get("/api/auth/me")
++    assert res.status_code == 401
++
++
++def test_an_expired_session_is_rejected(world, monkeypatch):
++    """A session past its hard TTL must not authenticate.
++
++    `expires_at` is stamped onto the session row when it is created, so the short
++    TTL has to be in force *at login time*. Lowering the setting afterwards does
++    not retroactively expire a live session — which is the correct behaviour,
++    and worth pinning so nobody "fixes" it the other way.
++    """
++    import time
++
++    import src.auth.router as router_mod
++
++    monkeypatch.setattr(
++        router_mod,
++        "_config",
++        lambda: load_auth_config(_env(AUTH_SESSION_TTL_SECONDS="1")),
++    )
++    cookie_value = _login(world["client"])
++
++    # Alive first — proves the 401 below is expiry, not a bad cookie.
++    live = TestClient(world["app"], cookies={"auditpro_session": cookie_value}).get(
++        "/api/auth/me"
++    )
++    assert live.status_code == 200, live.text
++
++    time.sleep(1.2)
++
++    expired = TestClient(world["app"], cookies={"auditpro_session": cookie_value}).get(
++        "/api/auth/me"
++    )
++    assert expired.status_code == 401
++    assert expired.json()["detail"]["code"] == "not_authenticated"
++
++
++def test_a_failed_login_issues_no_cookie(world):
++    client = TestClient(world["app"])
++    res = client.post(
++        "/api/auth/login", json={"email": EMAIL, "password": "wrong-password"}
++    )
++    assert res.status_code == 401
++    assert res.json()["detail"]["code"] == "invalid_credentials"
++    assert "set-cookie" not in res.headers
